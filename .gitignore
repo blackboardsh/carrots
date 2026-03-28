@@ -1,1 +1,6 @@
-# Add files to ignore here
+node_modules/
+dist/
+.zig-cache/
+zig-out/
+artifacts/
+*.zst
