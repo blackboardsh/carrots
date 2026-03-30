@@ -23,10 +23,19 @@ jobs:
         run: bun install
 
       - name: Cache Zig compiler
+        id: zig-cache
         uses: actions/cache@v4
         with:
-          path: node_modules/electrobun/vendors/zig
-          key: zig-${{ runner.os }}-carrots
+          path: vendors/zig
+          key: zig-0.13.0-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Download Zig if not cached
+        if: steps.zig-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p vendors/zig
+          ZIG_VERSION="0.13.0"
+          ZIG_ARCH="aarch64-macos"
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" | tar -xJ --strip-components=1 -C vendors/zig
 
       - name: Cache llama.cpp
         uses: actions/cache@v4
@@ -50,6 +59,8 @@ jobs:
           done
 
       - name: Build all carrots
+        env:
+          ZIG_BINARY: ${{ github.workspace }}/vendors/zig/zig
         run: |
           mkdir -p artifacts
           for carrot in git pty search tsserver biome llama dash; do

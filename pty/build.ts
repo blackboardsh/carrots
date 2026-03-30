@@ -19,6 +19,8 @@ const zigName = process.platform === "win32" ? "zig.exe" : "zig";
 
 const zigCandidates = [
 	process.env.ZIG_BINARY,
+	join(sourceDir, "node_modules", "electrobun", "vendors", "zig", zigName),
+	join(sourceDir, "..", "node_modules", "electrobun", "vendors", "zig", zigName),
 	join(sourceDir, "..", "..", "electrobun", "package", "vendors", "zig", zigName),
 ].filter(Boolean) as string[];
 

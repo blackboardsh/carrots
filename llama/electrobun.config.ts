@@ -16,6 +16,9 @@ export default {
 			carrotOnly: true,
 		},
 	},
+	scripts: {
+		postBuild: "build.ts",
+	},
 	permissions: {
 		host: {
 			storage: true,
