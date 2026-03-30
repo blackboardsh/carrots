@@ -15,27 +15,9 @@ import {
   downloadSettings,
   getSyncStatus,
 } from "../services/settingsSyncService";
-
-// API URLs - use 127.0.0.1 in dev, canary-cloud for canary, cloud for stable
-const getApiBaseUrl = () => {
-  const channel = state.buildVars.channel;
-  if (channel === "dev") return "http://127.0.0.1:8788";
-  if (channel === "canary") return "https://canary-cloud.blackboard.sh";
-  return "https://cloud.blackboard.sh";
-};
-
-const getDashboardUrl = () => {
-  return `${getApiBaseUrl()}/dashboard`;
-};
+import { electrobun } from "../init";
 
 export const BunnyCloudSettings = (): JSXElement => {
-  const [isLoggingIn, setIsLoggingIn] = createSignal(false);
-  const [loginError, setLoginError] = createSignal<string>("");
-  const [email, setEmail] = createSignal("");
-  const [password, setPassword] = createSignal("");
-  const [connectionStatus, setConnectionStatus] = createSignal<string>("");
-
-  // Sync-related state
   const [isSettingPassphrase, setIsSettingPassphrase] = createSignal(false);
   const [newPassphrase, setNewPassphrase] = createSignal("");
   const [confirmPassphrase, setConfirmPassphrase] = createSignal("");
@@ -53,7 +35,6 @@ export const BunnyCloudSettings = (): JSXElement => {
     lastSync?: { at: number | null };
   } | null>(null);
 
-  // Check if passphrase is set
   const hasPassphrase = () => !!state.appSettings.bunnyCloud?.syncPassphrase;
 
   const isConnected = () => {
@@ -65,15 +46,8 @@ export const BunnyCloudSettings = (): JSXElement => {
     return new Date(timestamp * 1000).toLocaleString();
   };
 
-  const formatDateShort = (timestamp: number | undefined) => {
-    if (!timestamp) return "Never";
-    return new Date(timestamp).toLocaleDateString();
-  };
-
   onMount(() => {
-    // If we have a token, verify it's still valid
     if (isConnected()) {
-      verifyConnection();
       fetchSyncStatus();
     }
   });
@@ -85,169 +59,15 @@ export const BunnyCloudSettings = (): JSXElement => {
     }
   };
 
-  const verifyConnection = async () => {
-    if (!state.appSettings.bunnyCloud?.accessToken) return;
-
-    setConnectionStatus("Verifying connection...");
-
-    try {
-      const response = await fetch(`${getApiBaseUrl()}/api/user/profile`, {
-        headers: {
-          'Authorization': `Bearer ${state.appSettings.bunnyCloud.accessToken}`,
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        // Update user info if changed
-        setState("appSettings", "bunnyCloud", {
-          ...state.appSettings.bunnyCloud,
-          email: data.user.email,
-          name: data.user.name,
-          emailVerified: data.user.email_verified === 1,
-        });
-        setConnectionStatus("Connected");
-        updateSyncedAppSettings();
-      } else if (response.status === 401) {
-        // Token expired, try to refresh
-        await refreshToken();
-      } else {
-        setConnectionStatus("Connection error");
-      }
-    } catch (error) {
-      console.error("Error verifying Bunny Cloud connection:", error);
-      setConnectionStatus("Failed to verify connection");
-    }
-  };
-
-  const refreshToken = async () => {
-    const refreshTokenValue = state.appSettings.bunnyCloud?.refreshToken;
-    if (!refreshTokenValue) {
-      disconnect();
-      return;
-    }
-
-    try {
-      const response = await fetch(`${getApiBaseUrl()}/api/auth/refresh`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ refreshToken: refreshTokenValue }),
-      });
-
-      if (response.ok) {
-        const data = await response.json();
-        setState("appSettings", "bunnyCloud", {
-          ...state.appSettings.bunnyCloud,
-          accessToken: data.accessToken,
-          refreshToken: data.refreshToken,
-        });
-        setConnectionStatus("Connected");
-        updateSyncedAppSettings();
-      } else {
-        // Refresh token invalid, need to re-login
-        disconnect();
-        setConnectionStatus("Session expired, please login again");
-      }
-    } catch (error) {
-      console.error("Error refreshing token:", error);
-      setConnectionStatus("Failed to refresh session");
-    }
-  };
-
-  const login = async () => {
-    if (!email() || !password()) {
-      setLoginError("Email and password are required");
-      return;
-    }
-
-    setIsLoggingIn(true);
-    setLoginError("");
-
-    try {
-      const response = await fetch(`${getApiBaseUrl()}/api/auth/login`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          email: email(),
-          password: password(),
-        }),
-      });
-
-      const data = await response.json();
-
-      if (response.ok) {
-        setState("appSettings", "bunnyCloud", {
-          accessToken: data.accessToken,
-          refreshToken: data.refreshToken,
-          userId: data.user.id,
-          email: data.user.email,
-          name: data.user.name,
-          emailVerified: data.user.email_verified === 1,
-          connectedAt: Date.now(),
-        });
-        setConnectionStatus("Connected successfully!");
-        setEmail("");
-        setPassword("");
-        updateSyncedAppSettings();
-        fetchSyncStatus();
-      } else {
-        setLoginError(data.error || "Login failed");
-      }
-    } catch (error) {
-      console.error("Login error:", error);
-      setLoginError("Network error. Please check your connection.");
-    } finally {
-      setIsLoggingIn(false);
-    }
-  };
-
-  const disconnect = async () => {
-    // Try to logout on server
-    try {
-      const refreshTokenValue = state.appSettings.bunnyCloud?.refreshToken;
-      if (refreshTokenValue) {
-        await fetch(`${getApiBaseUrl()}/api/auth/logout`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ refreshToken: refreshTokenValue }),
-        });
-      }
-    } catch (error) {
-      // Ignore errors, we're logging out anyway
-    }
-
-    setState("appSettings", "bunnyCloud", {
-      accessToken: "",
-      refreshToken: "",
-      userId: "",
-      email: "",
-      name: "",
-      emailVerified: false,
-      connectedAt: undefined,
-    });
-    setConnectionStatus("Disconnected");
-    setSyncStatus(null);
-    updateSyncedAppSettings();
-  };
-
   const handleSavePassphrase = () => {
     if (!newPassphrase()) {
       setSyncMessage({ type: 'error', text: 'Please enter a passphrase' });
       return;
     }
-
     if (newPassphrase().length < 8) {
       setSyncMessage({ type: 'error', text: 'Passphrase must be at least 8 characters' });
       return;
     }
-
     if (newPassphrase() !== confirmPassphrase()) {
       setSyncMessage({ type: 'error', text: 'Passphrases do not match' });
       return;
@@ -264,12 +84,9 @@ export const BunnyCloudSettings = (): JSXElement => {
     setSyncMessage({ type: 'success', text: 'Passphrase saved!' });
   };
 
-  // Show message with minimum display time
   const showSyncMessage = (message: { type: 'success' | 'error'; text: string }, minDuration = 2000) => {
     setSyncMessage(message);
-    setTimeout(() => {
-      setSyncMessage(null);
-    }, minDuration);
+    setTimeout(() => setSyncMessage(null), minDuration);
   };
 
   const handleBackup = async () => {
@@ -278,14 +95,10 @@ export const BunnyCloudSettings = (): JSXElement => {
       showSyncMessage({ type: 'error', text: 'Please set a passphrase first' });
       return;
     }
-
     setIsSyncing(true);
     setSyncMessage(null);
-
     const result = await uploadSettings(passphrase);
-
     setIsSyncing(false);
-
     if (result.success) {
       showSyncMessage({ type: 'success', text: 'Settings backed up successfully!' });
       fetchSyncStatus();
@@ -300,14 +113,10 @@ export const BunnyCloudSettings = (): JSXElement => {
       showSyncMessage({ type: 'error', text: 'Please set a passphrase first' });
       return;
     }
-
     setIsSyncing(true);
     setSyncMessage(null);
-
     const result = await downloadSettings(passphrase);
-
     setIsSyncing(false);
-
     if (result.success) {
       showSyncMessage({ type: 'success', text: 'Settings restored successfully!' });
       fetchSyncStatus();
@@ -322,38 +131,40 @@ export const BunnyCloudSettings = (): JSXElement => {
   };
 
   return (
-    <div
-      style="background: #404040; color: #d9d9d9; height: 100vh; overflow: hidden; display: flex; flex-direction: column;"
-    >
+    <div style="background: #404040; color: #d9d9d9; height: 100vh; overflow: hidden; display: flex; flex-direction: column;">
       <form onSubmit={onSubmit} style="height: 100%; display: flex; flex-direction: column;">
         <SettingsPaneSaveClose label="Bunny Cloud" />
 
         <div style="flex: 1; overflow-y: auto; padding: 0; margin-bottom: 60px;">
-          <SettingsPaneFormSection label="Connection Status">
-            <SettingsPaneField label="Status">
-              <div style="background: #202020; padding: 12px; color: #d9d9d9; font-size: 12px; border-radius: 4px; margin-bottom: 8px;">
-                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
-                  <div style={{
-                    width: "8px",
-                    height: "8px",
-                    "border-radius": "50%",
-                    background: isConnected() ? "#51cf66" : "#666",
-                  }}></div>
-                  <span style="font-weight: 500;">
-                    {isConnected() ? "Connected" : "Not Connected"}
-                  </span>
-                </div>
-                <Show when={connectionStatus()}>
-                  <div style="font-size: 11px; color: #999; margin-top: 4px;">
-                    {connectionStatus()}
+          {/* Account Section */}
+          <SettingsPaneFormSection label="Account">
+            <Show when={isConnected()} fallback={
+              <SettingsPaneField label="">
+                <div style="background: #2b2b2b; padding: 16px; border-radius: 4px; text-align: center;">
+                  <div style="font-size: 12px; color: #999; margin-bottom: 12px;">
+                    Not connected to Bunny Cloud
                   </div>
-                </Show>
-              </div>
-            </SettingsPaneField>
-
-            <Show when={isConnected()}>
-              <SettingsPaneField label="Account">
+                  <button
+                    type="button"
+                    onClick={() => electrobun.rpc?.request.openFarm()}
+                    style="background: #4ade80; color: #1a1a1a; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500;"
+                  >
+                    Open Farm to Sign In
+                  </button>
+                </div>
+              </SettingsPaneField>
+            }>
+              <SettingsPaneField label="">
                 <div style="background: #2b2b2b; padding: 12px; border-radius: 4px;">
+                  <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                    <div style={{
+                      width: "8px",
+                      height: "8px",
+                      "border-radius": "50%",
+                      background: "#51cf66",
+                    }}></div>
+                    <span style="font-weight: 500; font-size: 12px;">Connected</span>
+                  </div>
                   <div style="display: flex; flex-direction: column; gap: 4px;">
                     <span style="font-size: 12px; font-weight: 500; color: #d9d9d9;">
                       {state.appSettings.bunnyCloud?.name || state.appSettings.bunnyCloud?.email}
@@ -370,105 +181,21 @@ export const BunnyCloudSettings = (): JSXElement => {
                 </div>
               </SettingsPaneField>
 
-              <SettingsPaneField label="Connected">
-                <div style="font-size: 11px; color: #999;">
-                  Connected on {formatDateShort(state.appSettings.bunnyCloud?.connectedAt)}
-                </div>
-              </SettingsPaneField>
-            </Show>
-          </SettingsPaneFormSection>
-
-          <SettingsPaneFormSection label="Authentication">
-            <Show
-              when={!isConnected()}
-              fallback={
-                <SettingsPaneField label="">
-                  <button
-                    type="button"
-                    onClick={disconnect}
-                    style="background: #ff6b6b; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 12px; width: 100%;"
-                  >
-                    Logout
-                  </button>
-                  <div style="font-size: 11px; color: #999; margin-top: 8px; text-align: center;">
-                    You will need to login again to sync settings.
-                  </div>
-                </SettingsPaneField>
-              }
-            >
               <SettingsPaneField label="">
-                <Show when={loginError()}>
-                  <div style="background: rgba(255, 107, 107, 0.1); border: 1px solid rgba(255, 107, 107, 0.3); color: #ff6b6b; padding: 8px 12px; border-radius: 4px; font-size: 11px; margin-bottom: 12px;">
-                    {loginError()}
-                  </div>
-                </Show>
-
-                <div style="margin-bottom: 12px;">
-                  <label style="display: block; font-size: 11px; color: #999; margin-bottom: 4px;">
-                    Email
-                  </label>
-                  <input
-                    type="email"
-                    placeholder="you@example.com"
-                    value={email()}
-                    onInput={(e) => setEmail(e.currentTarget.value)}
-                    style="background: #2b2b2b; border: 1px solid #555; color: #d9d9d9; padding: 8px 12px; border-radius: 4px; font-size: 12px; width: 100%; box-sizing: border-box;"
-                  />
-                </div>
-
-                <div style="margin-bottom: 12px;">
-                  <label style="display: block; font-size: 11px; color: #999; margin-bottom: 4px;">
-                    Password
-                  </label>
-                  <input
-                    type="password"
-                    placeholder="Enter your password"
-                    value={password()}
-                    onInput={(e) => setPassword(e.currentTarget.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        login();
-                      }
-                    }}
-                    style="background: #2b2b2b; border: 1px solid #555; color: #d9d9d9; padding: 8px 12px; border-radius: 4px; font-size: 12px; width: 100%; box-sizing: border-box;"
-                  />
-                </div>
-
                 <button
                   type="button"
-                  onClick={login}
-                  disabled={isLoggingIn()}
-                  style={`background: #4ade80; color: #1a1a1a; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer; font-size: 12px; width: 100%; font-weight: 500; opacity: ${isLoggingIn() ? 0.7 : 1};`}
+                  onClick={() => electrobun.rpc?.request.openFarm()}
+                  style="background: #333; color: #d9d9d9; border: 1px solid #555; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 12px; width: 100%;"
                 >
-                  {isLoggingIn() ? "Logging in..." : "Login"}
+                  Manage Account in Farm
                 </button>
-
-                <div style="font-size: 11px; color: #999; margin-top: 12px; text-align: center;">
-                  Don't have an account?{" "}
-                  <a
-                    href="#"
-                    style="color: #4ade80; text-decoration: none;"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      // Open registration page in a web tab
-                      const registerUrl = `${getApiBaseUrl()}/register`;
-                      import("../store").then(({ openNewTabForNode }) => {
-                        openNewTabForNode("__BUNNY_INTERNAL__/web", false, { url: registerUrl });
-                      });
-                    }}
-                  >
-                    Sign up
-                  </a>
-                </div>
               </SettingsPaneField>
             </Show>
           </SettingsPaneFormSection>
 
-          {/* Settings Sync Section - Only show when connected */}
+          {/* Settings Backup Section - Only show when connected */}
           <Show when={isConnected()}>
             <SettingsPaneFormSection label="Settings Backup">
-              {/* Passphrase not set - show setup prompt */}
               <Show when={!hasPassphrase() && !isSettingPassphrase()}>
                 <SettingsPaneField label="">
                   <div style="background: rgba(255, 193, 7, 0.1); border: 1px solid rgba(255, 193, 7, 0.3); padding: 16px; border-radius: 4px; text-align: center;">
@@ -489,7 +216,6 @@ export const BunnyCloudSettings = (): JSXElement => {
                 </SettingsPaneField>
               </Show>
 
-              {/* Setting passphrase form */}
               <Show when={isSettingPassphrase()}>
                 <SettingsPaneField label="Create Encryption Passphrase">
                   <div style="font-size: 11px; color: #999; margin-bottom: 12px;">
@@ -533,29 +259,7 @@ export const BunnyCloudSettings = (): JSXElement => {
                 </SettingsPaneField>
               </Show>
 
-              {/* Passphrase is set - show backup/restore UI */}
               <Show when={hasPassphrase() && !isSettingPassphrase()}>
-                {/* What gets synced */}
-                <SettingsPaneField label="What gets backed up">
-                  <div style="background: #2b2b2b; padding: 12px; border-radius: 4px; font-size: 11px;">
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; color: #999;">
-                      <div style="display: flex; align-items: center; gap: 6px;">
-                        <span style="color: #4ade80;">✓</span> AI / Llama settings
-                      </div>
-                      <div style="display: flex; align-items: center; gap: 6px;">
-                        <span style="color: #4ade80;">✓</span> GitHub connection
-                      </div>
-                      <div style="display: flex; align-items: center; gap: 6px;">
-                        <span style="color: #4ade80;">✓</span> API tokens
-                      </div>
-                      <div style="display: flex; align-items: center; gap: 6px;">
-                        <span style="color: #4ade80;">✓</span> Installed plugins
-                      </div>
-                    </div>
-                  </div>
-                </SettingsPaneField>
-
-                {/* Sync status */}
                 <Show when={syncStatus()}>
                   <SettingsPaneField label="Backup Status">
                     <div style="background: #2b2b2b; padding: 12px; border-radius: 4px;">
@@ -579,9 +283,7 @@ export const BunnyCloudSettings = (): JSXElement => {
                   </SettingsPaneField>
                 </Show>
 
-                {/* Backup/Restore buttons */}
                 <SettingsPaneField label="">
-                  {/* Message area - fixed height to prevent layout shift */}
                   <div style={{
                     height: syncMessage() ? "auto" : "0",
                     "min-height": syncMessage() ? "36px" : "0",
@@ -627,7 +329,6 @@ export const BunnyCloudSettings = (): JSXElement => {
                   </div>
                 </SettingsPaneField>
 
-                {/* Change passphrase option */}
                 <SettingsPaneField label="">
                   <button
                     type="button"
@@ -640,25 +341,6 @@ export const BunnyCloudSettings = (): JSXElement => {
               </Show>
             </SettingsPaneFormSection>
           </Show>
-
-          <SettingsPaneFormSection label="Manage Account">
-            <SettingsPaneField label="">
-              <button
-                type="button"
-                onClick={() => {
-                  import("../store").then(({ openNewTabForNode }) => {
-                    openNewTabForNode("__BUNNY_INTERNAL__/web", false, { url: getDashboardUrl() });
-                  });
-                }}
-                style="background: #333; color: #d9d9d9; border: 1px solid #555; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 12px; width: 100%;"
-              >
-                Open Bunny Cloud Dashboard
-              </button>
-              <div style="font-size: 11px; color: #999; margin-top: 8px; text-align: center;">
-                Manage your account, devices, and subscription.
-              </div>
-            </SettingsPaneField>
-          </SettingsPaneFormSection>
         </div>
       </form>
     </div>
