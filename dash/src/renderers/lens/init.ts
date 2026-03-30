@@ -52,6 +52,11 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
       updateStatus: (data) => {
         setState("update", data);
       },
+      appSettingsChanged: ({ appSettings }: { appSettings: any }) => {
+        if (appSettings) {
+          setState("appSettings", { ...state.appSettings, ...appSettings });
+        }
+      },
       setProjects: ({ projects, tokens, workspace, appSettings, bunnyDash }) => {
         // TODO: [blocking] make this a util, maybe in goldfish
         console.log("setProjects", { projects, tokens, workspace, appSettings });

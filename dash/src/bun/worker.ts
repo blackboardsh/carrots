@@ -410,13 +410,16 @@ let cloudInstances: CloudInstance[] = [];
 let cachedCarrotList: Array<{ id: string; name: string; description: string; version: string; mode: string; permissions: string[]; status: string }> = [];
 
 function initCloudApi(): CloudApi | null {
-  const auth = bunnyDashState.appSettings?.bunnyCloud;
-  if (!auth?.accessToken) return null;
+  // Use auth token from Bunny Ears (passed via init context) or from persisted dash state
+  const earsToken = app.authToken;
+  const persistedAuth = bunnyDashState.appSettings?.bunnyCloud;
+  const accessToken = earsToken || persistedAuth?.accessToken;
+  if (!accessToken) return null;
 
-  const isDev = manifestVersion === "0.0.1" || process.env.NODE_ENV !== "production";
-  return new CloudApi(getApiBaseUrl(isDev ? "dev" : undefined), {
+  const channel = app.channel || (manifestVersion === "0.0.1" ? "dev" : undefined);
+  return new CloudApi(getApiBaseUrl(channel), {
     getAuth: () => ({
-      accessToken: bunnyDashState.appSettings?.bunnyCloud?.accessToken || "",
+      accessToken: app.authToken || bunnyDashState.appSettings?.bunnyCloud?.accessToken || "",
       refreshToken: bunnyDashState.appSettings?.bunnyCloud?.refreshToken || "",
     }),
     onTokenRefresh: (tokens) => {
@@ -1200,6 +1203,69 @@ if (statePath) {
   void ensureBootPromise().catch((err) => {
     console.error("[bunny-dash] boot failed:", err);
   });
+}
+
+// Reinitialize cloud API when auth token changes (e.g., Farm login while dash is running)
+app.on("auth-token-changed", () => {
+  syncAuthFromEars().catch(() => {});
+});
+
+// Clear cloud state on logout
+app.on("auth-token-cleared", () => {
+  cloudApi = null;
+  cloudInstances = [];
+  if (bunnyDashState.appSettings?.bunnyCloud) {
+    bunnyDashState.appSettings.bunnyCloud = structuredClone(defaultBunnyAppSettings.bunnyCloud);
+  }
+  writePersistedDashState().catch(() => {});
+  broadcastAppSettings();
+});
+
+function broadcastAppSettings() {
+  const settings = bunnyDashState.appSettings || defaultBunnyAppSettings;
+  for (const [_id, win] of browserWindows) {
+    try {
+      (win.webview?.rpc as any)?.send?.runtimeEvent?.({ name: "appSettingsChanged", payload: { appSettings: settings } });
+    } catch {}
+  }
+}
+
+async function syncAuthFromEars() {
+  const token = app.authToken;
+  if (!token) return;
+
+  // Update the persisted bunnyCloud settings so the view shows logged-in state
+  if (!bunnyDashState.appSettings) {
+    bunnyDashState.appSettings = structuredClone(defaultBunnyAppSettings);
+  }
+  bunnyDashState.appSettings.bunnyCloud.accessToken = token;
+
+  // Fetch user profile to get email/name
+  const channel = app.channel || "dev";
+  const apiBase = getApiBaseUrl(channel);
+  try {
+    const resp = await fetch(`${apiBase}/v1/user/profile`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (resp.ok) {
+      const user = await resp.json() as { user?: { email?: string; name?: string; id?: string; email_verified?: boolean } };
+      if (user?.user) {
+        bunnyDashState.appSettings.bunnyCloud.email = user.user.email || "";
+        bunnyDashState.appSettings.bunnyCloud.name = user.user.name || "";
+        bunnyDashState.appSettings.bunnyCloud.userId = user.user.id || "";
+        bunnyDashState.appSettings.bunnyCloud.emailVerified = !!user.user.email_verified;
+        bunnyDashState.appSettings.bunnyCloud.connectedAt = new Date().toISOString();
+      }
+    }
+  } catch {}
+
+  // Reinitialize cloud API and refresh
+  cloudApi = initCloudApi();
+  if (cloudApi) {
+    await refreshCloudData();
+  }
+  await writePersistedDashState().catch(() => {});
+  broadcastAppSettings();
 }
 
 ApplicationMenu.on("application-menu-clicked", (event: any) => {
@@ -4333,6 +4399,10 @@ self.onmessage = async (event) => {
   if (message.type === "init") {
     initializeRuntimeContext(message);
     await ensureBootPromise();
+    // Sync auth from ears if the init message brought an auth token
+    if (app.authToken && !cloudApi) {
+      syncAuthFromEars().catch(() => {});
+    }
     return;
   }
 
