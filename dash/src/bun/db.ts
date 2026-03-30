@@ -1,4 +1,4 @@
-import DB, { type SchemaToDocumentTypes } from "../../../../goldfishdb/src/node/index.ts";
+import DB, { type SchemaToDocumentTypes } from "goldfishdb";
 
 export type WindowTabId =
   | "workspace"

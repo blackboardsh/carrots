@@ -5,6 +5,7 @@
   "type": "module",
   "dependencies": {
     "electrobun": "1.17.0-beta.0",
+    "goldfishdb": "*",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-search": "^0.15.0",
     "@xterm/addon-web-links": "^0.11.0",
