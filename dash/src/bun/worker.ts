@@ -3905,6 +3905,10 @@ async function hideCurrentWorkspaceWindows() {
 
 async function handleBunnyDashRequest(method: string, params: any) {
   switch (method) {
+    case "openFarm": {
+      app.openManager();
+      return { ok: true };
+    }
     case "getInitialState": {
       const workspace = currentBunnyWorkspace();
       ensureBunnyWorkspaceWindow(getCurrentWindow());

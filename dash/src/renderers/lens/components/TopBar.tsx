@@ -177,15 +177,12 @@ export const TopBar = () => {
         </div>
       </div>
 
-      {/* Bunny Cloud button */}
+      {/* Bunny Cloud button — opens Farm */}
       <div
         style="font-size: 13px; margin: 8px 4px; cursor: pointer; display: flex; align-items: center; gap: 4px; background: #2d4a3e; border-radius: 4px; padding: 2px 8px;"
-        title="Open Bunny Cloud settings"
+        title="Open Bunny Farm"
         onClick={() => {
-          setState("settingsPane", {
-            type: state.settingsPane.type === "bunny-cloud-settings" ? "" : "bunny-cloud-settings",
-            data: {},
-          });
+          electrobun.rpc?.request.openFarm();
         }}
       >
         <svg style="width: 14px; height: 14px;" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2">
