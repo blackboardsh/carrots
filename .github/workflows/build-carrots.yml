@@ -41,7 +41,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: llama/llama-cli/deps/llama.cpp
-          key: llama-cpp-built-${{ runner.os }}-${{ hashFiles('llama/llama-cli/setup-llama.sh') }}
+          key: llama-cpp-built-v1-${{ runner.os }}-${{ runner.arch }}
+          restore-keys: |
+            llama-cpp-built-v1-${{ runner.os }}-
 
       - name: Setup and build llama.cpp libraries
         run: |
