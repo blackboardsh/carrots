@@ -34,7 +34,7 @@ jobs:
         run: |
           mkdir -p vendors/zig
           ZIG_VERSION="0.13.0"
-          ZIG_ARCH="aarch64-macos"
+          ZIG_ARCH="macos-aarch64"
           curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" | tar -xJ --strip-components=1 -C vendors/zig
 
       - name: Cache llama.cpp
