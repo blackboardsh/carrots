@@ -1,65 +1,31 @@
-import { cpSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+/**
+ * PostBuild script for Bunny Search.
+ * Copies vendored fd and rg binaries into the carrot output.
+ */
+import { cpSync, existsSync, chmodSync } from "node:fs";
+import { join } from "node:path";
 
-const FD_BINARY_NAME = process.platform === "win32" ? "fd.exe" : "fd";
-const RG_BINARY_NAME = process.platform === "win32" ? "rg.exe" : "rg";
+const sourceDir = process.cwd();
+const carrotDir = process.env.ELECTROBUN_CARROT_DIR;
 
-type BuildContext = {
-  sourceDir: string;
-  outDir: string;
-  manifest: any;
-  defaultBuild: () => Promise<void>;
-};
-
-function resolveVendorBinary(sourceDir: string, binaryName: string) {
-  const localVendorPath = resolve(sourceDir, "vendor", binaryName);
-  if (existsSync(localVendorPath)) {
-    return localVendorPath;
-  }
-
-  return null;
+if (!carrotDir) {
+	console.error("[search postBuild] ELECTROBUN_CARROT_DIR not set, skipping");
+	process.exit(0);
 }
 
-function copyVendorBinary(
-  sourceDir: string,
-  outDir: string,
-  binaryName: string,
-  envOverride: string | undefined,
-  required: boolean,
-) {
-  const sourcePath =
-    (envOverride && existsSync(envOverride) ? envOverride : null) ||
-    resolveVendorBinary(sourceDir, binaryName);
+const fdName = process.platform === "win32" ? "fd.exe" : "fd";
+const rgName = process.platform === "win32" ? "rg.exe" : "rg";
 
-  if (!sourcePath) {
-    if (required) {
-      throw new Error(
-        `Missing required search binary ${binaryName}. Add it under ${resolve(sourceDir, "vendor")} or set an override env var.`,
-      );
-    }
-    return;
-  }
-
-  cpSync(sourcePath, join(resolve(outDir), binaryName), { force: true });
+for (const name of [fdName, rgName]) {
+	const src = join(sourceDir, "vendor", name);
+	if (existsSync(src)) {
+		const dest = join(carrotDir, name);
+		cpSync(src, dest, { force: true });
+		if (process.platform !== "win32") chmodSync(dest, "755");
+		console.log(`[search postBuild] Copied ${name}`);
+	} else {
+		console.warn(`[search postBuild] Missing vendor/${name}`);
+	}
 }
 
-export async function buildCarrot({ sourceDir, outDir, defaultBuild }: BuildContext) {
-  await defaultBuild();
-
-  copyVendorBinary(
-    sourceDir,
-    outDir,
-    RG_BINARY_NAME,
-    process.env.BUNNY_SEARCH_RG_BIN,
-    true,
-  );
-  copyVendorBinary(
-    sourceDir,
-    outDir,
-    FD_BINARY_NAME,
-    process.env.BUNNY_SEARCH_FD_BIN,
-    false,
-  );
-}
-
-export default buildCarrot;
+console.log("[search postBuild] Done");

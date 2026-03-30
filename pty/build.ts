@@ -1,55 +1,39 @@
+/**
+ * PostBuild script for Bunny PTY.
+ * Compiles the Zig PTY binary and copies it into the carrot output.
+ */
 import { execFileSync } from "node:child_process";
 import { cpSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+
+const sourceDir = process.cwd();
+const carrotDir = process.env.ELECTROBUN_CARROT_DIR;
+
+if (!carrotDir) {
+	console.error("[pty postBuild] ELECTROBUN_CARROT_DIR not set, skipping");
+	process.exit(0);
+}
 
 const PTY_BINARY_NAME = process.platform === "win32" ? "pty.exe" : "pty";
+const zigName = process.platform === "win32" ? "zig.exe" : "zig";
 
-type BuildContext = {
-  sourceDir: string;
-  outDir: string;
-  manifest: any;
-  defaultBuild: () => Promise<void>;
-};
+const zigCandidates = [
+	process.env.ZIG_BINARY,
+	join(sourceDir, "..", "..", "electrobun", "package", "vendors", "zig", zigName),
+].filter(Boolean) as string[];
 
-function buildPtyBinary(sourceDir: string, outDir: string) {
-  const zigName = process.platform === "win32" ? "zig.exe" : "zig";
-  // Check env var, then sibling electrobun repo, then old relative path
-  const zigCandidates = [
-    process.env.ZIG_BINARY,
-    join(sourceDir, "..", "..", "electrobun", "package", "vendors", "zig", zigName),
-  ].filter(Boolean) as string[];
-
-  const zigBinary = zigCandidates.find((p) => existsSync(p));
-  if (!zigBinary) {
-    throw new Error(`Missing Zig binary. Searched:\n${zigCandidates.join("\n")}`);
-  }
-
-  execFileSync(zigBinary, ["build"], {
-    cwd: sourceDir,
-    stdio: "pipe",
-  });
-
-  const builtPtyBinary = join(
-    sourceDir,
-    "zig-out",
-    "bin",
-    PTY_BINARY_NAME,
-  );
-
-  if (!existsSync(builtPtyBinary)) {
-    throw new Error(`Failed to build PTY binary at ${builtPtyBinary}`);
-  }
-
-  cpSync(
-    builtPtyBinary,
-    join(resolve(outDir), PTY_BINARY_NAME),
-    { force: true },
-  );
+const zigBinary = zigCandidates.find((p) => existsSync(p));
+if (!zigBinary) {
+	throw new Error(`Missing Zig binary. Searched:\n${zigCandidates.join("\n")}`);
 }
 
-export async function buildCarrot({ sourceDir, outDir, defaultBuild }: BuildContext) {
-  await defaultBuild();
-  buildPtyBinary(sourceDir, outDir);
+console.log("[pty postBuild] Building PTY binary with Zig...");
+execFileSync(zigBinary, ["build"], { cwd: sourceDir, stdio: "pipe" });
+
+const builtBinary = join(sourceDir, "zig-out", "bin", PTY_BINARY_NAME);
+if (!existsSync(builtBinary)) {
+	throw new Error(`Failed to build PTY binary at ${builtBinary}`);
 }
 
-export default buildCarrot;
+cpSync(builtBinary, join(carrotDir, PTY_BINARY_NAME), { force: true });
+console.log("[pty postBuild] Done");

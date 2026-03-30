@@ -1,0 +1,8 @@
+{
+	"name": "@electrobunny/carrots",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"electrobun": "file:../electrobun/package"
+	}
+}

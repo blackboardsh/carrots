@@ -19,6 +19,7 @@ import {
   BrowserWindow,
   Carrots,
   ContextMenu,
+  defineElectrobunRPC,
   Tray,
   Utils,
   app,
@@ -542,11 +543,35 @@ function getOrCreateBrowserWindow(windowId = state.currentWindowId, title?: stri
   }
 
   const bunnyWindow = getBunnyWindowForRuntimeWindow(windowId);
+
+  const rpc = defineElectrobunRPC("bun", {
+    maxRequestTime: 10000,
+    handlers: {
+      requests: {
+        invoke: async ({ method, params }: { method: string; params?: any }) => {
+          await ensureBootPromise();
+          setActiveWindow(windowId);
+
+          if (typeof method === "string" && method.startsWith("send:")) {
+            await handleBunnyDashSend(method.slice(5), params);
+            return null;
+          }
+
+          return handleBunnyDashRequest(method, params);
+        },
+      },
+      messages: {},
+    },
+  });
+
+  const carrotDir = app.currentDir || (globalThis as any).__bunnyCarrotBootstrap?.context?.currentDir || "";
+
   const win = new BrowserWindow({
-    id: windowId,
     title: title || runtimeWindow.title,
     url: "views://lens/index.html",
+    viewsRoot: carrotDir || undefined,
     titleBarStyle: "hiddenInset",
+    rpc,
     frame: {
       x: bunnyWindow?.position.x ?? 120,
       y: bunnyWindow?.position.y ?? 120,
@@ -638,16 +663,15 @@ function sendToDashWindow(windowId: string | undefined, name: string, payload?: 
 }
 
 function sendRuntimeEventToDashWindow(windowId: string | undefined, name: string, payload?: unknown) {
-  post({
-    type: "action",
-    action: "emit-view",
-    payload: {
-      name,
-      payload,
-      raw: false,
-      windowId: windowId || state.currentWindowId,
-    },
-  });
+  const targetWindowId = windowId || state.currentWindowId;
+  const existing = browserWindows.get(targetWindowId);
+  if (existing) {
+    try {
+      (existing.webview?.rpc as any)?.send?.runtimeEvent?.({ name, payload });
+    } catch (err) {
+      // View may not be ready yet
+    }
+  }
 }
 
 function broadcastRuntimeEventToDashWindows(name: string, payload?: unknown) {
@@ -1141,6 +1165,9 @@ function initializeRuntimeContext(message?: {
 
 function ensureBootPromise() {
   if (!bootPromise) {
+    if (!statePath) {
+      return Promise.resolve();
+    }
     bootPromise = (async () => {
       await loadState();
 
@@ -1170,7 +1197,9 @@ function ensureBootPromise() {
 
 initializeRuntimeContext();
 if (statePath) {
-  void ensureBootPromise();
+  void ensureBootPromise().catch((err) => {
+    console.error("[bunny-dash] boot failed:", err);
+  });
 }
 
 ApplicationMenu.on("application-menu-clicked", (payload) => {
@@ -1559,15 +1588,13 @@ function emitViewMessage(name: string, payload?: unknown, windowId?: string) {
   const targetWindowId = windowId || state.currentWindowId;
   const existing = browserWindows.get(targetWindowId);
   if (existing) {
-    existing.send(name, payload, { raw: true });
+    try {
+      (existing.webview?.rpc as any)?.send?.[name]?.(payload);
+    } catch (err) {
+      // View may not be ready yet
+    }
     return;
   }
-
-  post({
-    type: "action",
-    action: "emit-view",
-    payload: { raw: true, name, payload, windowId: targetWindowId },
-  });
 }
 
 function handlePtyTerminalOutput(payload: unknown) {
@@ -2783,7 +2810,13 @@ function snapshot(): Snapshot {
 }
 
 function emitSnapshot() {
-  post({ type: "event", name: "snapshot", payload: snapshot() });
+  const data = snapshot();
+  // Send to all open windows
+  for (const [_id, win] of browserWindows) {
+    try {
+      (win.webview?.rpc as any)?.send?.runtimeEvent?.({ name: "snapshot", payload: data });
+    } catch {}
+  }
 }
 
 function isTreeNodeIdValid(nodeId: string) {
@@ -4330,6 +4363,7 @@ self.onmessage = async (event) => {
     }
 
     if (message.name === "boot") {
+      await ensureBootPromise();
       syncTray();
       emitSnapshot();
       return;

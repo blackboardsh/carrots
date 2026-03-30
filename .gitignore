@@ -1,6 +1,9 @@
 node_modules/
 dist/
+build/
 .zig-cache/
 zig-out/
 artifacts/
 *.zst
+.DS_Store
+bun.lock

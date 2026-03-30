@@ -7,7 +7,7 @@ import ActualElectrobun, {
   type WebviewEventTypes,
   type WgpuTagElement,
   type WgpuEventTypes,
-} from "../../../electrobun/package/dist/api/browser/index";
+} from "../../../../electrobun/package/dist/api/browser/index";
 
 type RuntimeEventHandler = (payload: unknown) => void;
 

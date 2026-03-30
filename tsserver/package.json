@@ -4,6 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "dependencies": {
+    "electrobun": "file:../../electrobun/package",
     "typescript": "5.9.3"
   }
 }

@@ -1,64 +1,32 @@
+/**
+ * PostBuild script for Bunny Biome.
+ * Copies the @biomejs/biome package into the carrot output.
+ */
 import { cpSync, existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
-type BuildContext = {
-  sourceDir: string;
-  outDir: string;
-  defaultBuild: () => Promise<void>;
-};
+const sourceDir = process.cwd();
+const carrotDir = process.env.ELECTROBUN_CARROT_DIR;
 
-function decodeOutput(bytes: Uint8Array<ArrayBufferLike> | undefined) {
-  return new TextDecoder().decode(bytes || new Uint8Array());
+if (!carrotDir) {
+	console.error("[biome postBuild] ELECTROBUN_CARROT_DIR not set, skipping");
+	process.exit(0);
 }
 
-function resolveBiomePackageDir(sourceDir: string) {
-  return resolve(sourceDir, "node_modules", "@biomejs");
+const biomePkg = join(sourceDir, "node_modules", "@biomejs", "biome");
+if (!existsSync(biomePkg)) {
+	throw new Error(`Missing @biomejs/biome at ${biomePkg}. Run bun install.`);
 }
 
-function ensureBiomeDependency(sourceDir: string) {
-  const packageJsonPath = join(sourceDir, "package.json");
-  if (!existsSync(packageJsonPath)) {
-    throw new Error(`Missing bunny.biome package.json at ${packageJsonPath}`);
-  }
+console.log("[biome postBuild] Copying @biomejs/biome...");
+cpSync(biomePkg, join(carrotDir, "@biomejs", "biome"), { recursive: true });
 
-  const packageDir = resolveBiomePackageDir(sourceDir);
-  if (existsSync(join(packageDir, "biome", "package.json"))) {
-    return packageDir;
-  }
-
-  const lockPath = join(sourceDir, "bun.lock");
-  const installArgs = existsSync(lockPath)
-    ? [process.execPath, "install", "--frozen-lockfile"]
-    : [process.execPath, "install"];
-  const result = Bun.spawnSync(installArgs, {
-    cwd: sourceDir,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  if (result.exitCode !== 0) {
-    throw new Error(
-      `Failed to install bunny.biome dependencies:\n${decodeOutput(result.stderr) || decodeOutput(result.stdout)}`,
-    );
-  }
-
-  if (!existsSync(join(packageDir, "biome", "package.json"))) {
-    throw new Error(`@biomejs namespace was not installed at ${packageDir}`);
-  }
-
-  return packageDir;
+// Also copy the platform-specific binary package
+const platform = process.platform === "darwin" ? "darwin" : process.platform === "win32" ? "win32" : "linux";
+const arch = process.arch;
+const platformPkg = join(sourceDir, "node_modules", `@biomejs/cli-${platform}-${arch}`);
+if (existsSync(platformPkg)) {
+	cpSync(platformPkg, join(carrotDir, `@biomejs/cli-${platform}-${arch}`), { recursive: true });
 }
 
-export async function buildCarrot({ sourceDir, outDir, defaultBuild }: BuildContext) {
-  await defaultBuild();
-
-  const biomeNamespaceDir = ensureBiomeDependency(sourceDir);
-  cpSync(biomeNamespaceDir, join(outDir, "@biomejs"), {
-    recursive: true,
-    force: true,
-    dereference: false,
-    verbatimSymlinks: true,
-  });
-}
-
-export default buildCarrot;
+console.log("[biome postBuild] Done");

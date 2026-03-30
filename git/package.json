@@ -4,6 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "dependencies": {
+    "electrobun": "file:../../electrobun/package",
     "simple-git": "3.22.0"
   }
 }
