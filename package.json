@@ -3,6 +3,6 @@
 	"private": true,
 	"type": "module",
 	"dependencies": {
-		"electrobun": "file:../electrobun/package"
+		"electrobun": "1.17.0-beta.0"
 	}
 }
