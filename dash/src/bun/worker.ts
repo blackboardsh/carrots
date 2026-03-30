@@ -1202,29 +1202,21 @@ if (statePath) {
   });
 }
 
-ApplicationMenu.on("application-menu-clicked", (payload) => {
-  const action = String((payload as { action?: string } | undefined)?.action || "");
+ApplicationMenu.on("application-menu-clicked", (event: any) => {
+  const action = String(event?.data?.action || event?.action || "");
   if (!action) {
     return;
   }
   void handleApplicationMenuAction(action);
 });
 
-ContextMenu.on("context-menu-clicked", (payload) => {
-  const action =
-    String(
-      (payload as { action?: string; data?: unknown } | undefined)?.action ||
-        (payload as { data?: { action?: string } } | undefined)?.data?.action ||
-        "",
-    );
+ContextMenu.on("context-menu-clicked", (event: any) => {
+  const action = String(event?.data?.action || event?.action || "");
   if (!action) {
     return;
   }
 
-  const data =
-    (payload as { data?: unknown } | undefined)?.data ??
-    (payload as { data?: { data?: unknown } } | undefined)?.data?.data ??
-    {};
+  const data = event?.data?.data ?? {};
   void handleContextMenuAction(action, data);
 });
 
