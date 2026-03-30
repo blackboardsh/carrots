@@ -37,16 +37,27 @@ jobs:
           ZIG_ARCH="macos-aarch64"
           curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-${ZIG_VERSION}.tar.xz" | tar -xJ --strip-components=1 -C vendors/zig
 
-      - name: Cache llama.cpp
+      - name: Cache llama.cpp build
         uses: actions/cache@v4
         with:
           path: llama/llama-cli/deps/llama.cpp
-          key: llama-cpp-${{ runner.os }}-${{ hashFiles('llama/llama-cli/setup-llama.sh') }}
+          key: llama-cpp-built-${{ runner.os }}-${{ hashFiles('llama/llama-cli/setup-llama.sh') }}
 
-      - name: Setup llama.cpp deps
+      - name: Setup and build llama.cpp libraries
         run: |
+          # Clone llama.cpp if not cached
           if [ ! -d "llama/llama-cli/deps/llama.cpp" ]; then
-            cd llama/llama-cli && bash setup-llama.sh
+            cd llama/llama-cli && bash setup-llama.sh && cd ../..
+          fi
+          # Build static libraries with CMake if not already built
+          LLAMA_CPP_DIR="llama/llama-cli/deps/llama.cpp"
+          BUILD_DIR="$LLAMA_CPP_DIR/build"
+          if [ ! -f "$BUILD_DIR/src/libllama.a" ]; then
+            mkdir -p "$BUILD_DIR"
+            cd "$BUILD_DIR"
+            cmake .. -DGGML_METAL=OFF -DGGML_CUDA=OFF -DGGML_OPENMP=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release
+            cmake --build . --config Release
+            cd ../../../..
           fi
 
       - name: Install carrot dependencies
