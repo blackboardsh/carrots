@@ -80,7 +80,7 @@ jobs:
             echo "=== Building $carrot ==="
             cd "$carrot"
             npx electrobun build --env=canary
-            find build -name "*.tar.zst" -exec cp {} ../artifacts/ \;
+            find artifacts -name "*.tar.zst" -exec cp {} ../artifacts/ \;
             cd ..
           done
           echo "=== Artifacts ==="
