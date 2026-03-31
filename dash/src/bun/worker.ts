@@ -547,23 +547,232 @@ function getOrCreateBrowserWindow(windowId = state.currentWindowId, title?: stri
 
   const bunnyWindow = getBunnyWindowForRuntimeWindow(windowId);
 
+  // Wrap each request handler with boot + window context
+  const r = <T>(fn: (params: any) => T | Promise<T>) => async (params: any) => {
+    await ensureBootPromise();
+    setActiveWindow(windowId);
+    return fn(params);
+  };
+  // Wrap each message handler (fire-and-forget)
+  const m = (fn: (payload: any) => void | Promise<void>) => (payload: any) => {
+    ensureBootPromise().then(() => {
+      setActiveWindow(windowId);
+      fn(payload);
+    }).catch(() => {});
+  };
+
   const rpc = defineElectrobunRPC("bun", {
     maxRequestTime: 10000,
     handlers: {
       requests: {
-        invoke: async ({ method, params }: { method: string; params?: any }) => {
-          await ensureBootPromise();
-          setActiveWindow(windowId);
-
-          if (typeof method === "string" && method.startsWith("send:")) {
-            await handleBunnyDashSend(method.slice(5), params);
-            return null;
-          }
-
-          return handleBunnyDashRequest(method, params);
-        },
+        openFarm: r(() => { app.openManager(); return { ok: true }; }),
+        getInitialState: r(() => {
+          const workspace = currentBunnyWorkspace();
+          ensureBunnyWorkspaceWindow(getCurrentWindow());
+          return {
+            windowId: getCurrentWindow().id,
+            buildVars: bunnyBuildVars(),
+            paths: bunnyPaths(),
+            peerDependencies: bunnyPeerDependencies(),
+            workspace,
+            bunnyDash: buildWorkspaceLensPayload(getCurrentWindow().id),
+            projects: bunnyProjectsForWorkspace(workspace.id),
+            tokens: bunnyDashState.tokens || [],
+            appSettings: bunnyDashState.appSettings || defaultBunnyAppSettings,
+          };
+        }),
+        newPreviewNode: r((params) => {
+          const parentPath = getBunnyProjectsFolder();
+          const nodeName = getUniqueNewName(parentPath, params?.candidateName || "new-project");
+          return { type: "dir", name: nodeName, path: join(parentPath, nodeName), previewChildren: [], isExpanded: false, slate: { v: 1, name: "", url: "", icon: "", type: "project", config: {} } };
+        }),
+        addProject: r((params) => addProjectMount({ workspaceId: getCurrentWorkspace().key, name: params?.projectName, path: String(params?.path || "") }).then((result) => { emitSetProjects(); return result; })),
+        syncWorkspace: r(async (params) => { log(`syncWorkspace request: workspace=${getCurrentWorkspace().key}`); bunnyDashState.workspaces ||= {}; bunnyDashState.workspaces[getCurrentWorkspace().key] = params.workspace; await saveState(); emitSetProjectsForWindow(getCurrentWindow().id); }),
+        syncAppSettings: r(async (params) => { bunnyDashState.appSettings = params.appSettings; await writePersistedDashState(); }),
+        openFileDialog: r((params) => Utils.openFileDialog({ startingFolder: params?.startingFolder, allowedFileTypes: params?.allowedFileTypes, canChooseFiles: params?.canChooseFiles, canChooseDirectory: params?.canChooseDirectory, allowsMultipleSelection: params?.allowsMultipleSelection })),
+        getNode: r((params) => getNodeForPath(String(params?.path || ""))),
+        readSlateConfigFile: r((params) => readSlateConfig(String(params?.path || ""))),
+        readFile: r((params) => { const path = String(params?.path || ""); const textContent = readFileSync(path, "utf8"); return { textContent, isBinary: false, loadedBytes: textContent.length, totalBytes: textContent.length }; }),
+        writeFile: r((params) => { try { writeFileSync(String(params?.path || ""), String(params?.value || "")); emitFileWatchEvent(String(params?.path || "")); return { success: true }; } catch (error) { return { success: false, error: error instanceof Error ? error.message : String(error) }; } }),
+        touchFile: r((params) => { try { const path = String(params?.path || ""); writeFileSync(path, String(params?.contents || ""), { flag: existsSync(path) ? "a" : "w" }); emitFileWatchEvent(path); return { success: true }; } catch (error) { return { success: false, error: error instanceof Error ? error.message : String(error) }; } }),
+        rename: r((params) => { try { renameSync(String(params?.oldPath || ""), String(params?.newPath || "")); emitFileWatchEvent(String(params?.oldPath || "")); emitFileWatchEvent(String(params?.newPath || "")); return { success: true }; } catch (error) { return { success: false, error: error instanceof Error ? error.message : String(error) }; } }),
+        exists: r((params) => existsSync(String(params?.path || ""))),
+        isFolder: r((params) => { const path = String(params?.path || ""); try { return existsSync(path) && statSync(path).isDirectory(); } catch { return false; } }),
+        mkdir: r((params) => { try { mkdirSync(String(params?.path || ""), { recursive: true }); emitFileWatchEvent(String(params?.path || "")); return { success: true }; } catch (error) { return { success: false, error: error instanceof Error ? error.message : String(error) }; } }),
+        showInFinder: r(async (params) => { await Utils.showItemInFolder(String(params?.path || "")); }),
+        copy: r((params) => { cpSync(String(params?.src || ""), String(params?.dest || ""), { recursive: true }); emitFileWatchEvent(String(params?.dest || "")); }),
+        safeDeleteFileOrFolder: r((params) => { rmSync(String(params?.path || ""), { recursive: true, force: true }); emitFileWatchEvent(String(params?.path || "")); }),
+        safeTrashFileOrFolder: r((params) => { rmSync(String(params?.path || ""), { recursive: true, force: true }); emitFileWatchEvent(String(params?.path || "")); }),
+        execSpawnSync: r((params) => {
+          const cmd = String(params?.cmd || "");
+          const args = Array.isArray(params?.args) ? params.args.map(String) : [];
+          const result = Bun.spawnSync([cmd, ...args], { ...(typeof params?.opts === "object" && params?.opts ? params.opts : {}) });
+          if (result.exitCode !== 0) throw new Error(new TextDecoder().decode(result.stderr || new Uint8Array()) || `${cmd} exited with code ${result.exitCode}`);
+          return new TextDecoder().decode(result.stdout || new Uint8Array());
+        }),
+        createTerminal: r(async (params) => {
+          const currentWindowId = getCurrentWindow().id;
+          const terminalId = await invokePtyCarrot<string>("createTerminal", { cwd: String(params?.cwd || process.cwd()), shell: typeof params?.shell === "string" ? params.shell : undefined, cols: Number(params?.cols || 80), rows: Number(params?.rows || 24) }, { windowId: currentWindowId });
+          log(`PTY carrot created terminal ${terminalId} for window ${currentWindowId}`);
+          terminalWindowOwners.set(terminalId, currentWindowId);
+          return terminalId;
+        }),
+        writeToTerminal: r((params) => invokePtyCarrot<boolean>("writeToTerminal", { terminalId: String(params?.terminalId || ""), data: String(params?.data || "") })),
+        resizeTerminal: r((params) => invokePtyCarrot<boolean>("resizeTerminal", { terminalId: String(params?.terminalId || ""), cols: Number(params?.cols || 80), rows: Number(params?.rows || 24) })),
+        killTerminal: r(async (params) => { const result = await invokePtyCarrot<boolean>("killTerminal", { terminalId: String(params?.terminalId || "") }); terminalWindowOwners.delete(String(params?.terminalId || "")); return result; }),
+        getTerminalCwd: r((params) => invokePtyCarrot<string | null>("getTerminalCwd", { terminalId: String(params?.terminalId || "") })),
+        getWorkspaceLensSidebar: r(() => buildWorkspaceLensSidebarData()),
+        activateLens: r((params) => activateLens(String(params?.lensId || state.currentLayoutId))),
+        findFilesInWorkspace: r((params) => invokeSearchCarrot<string[]>("findFilesInWorkspace", { query: String(params?.query || ""), targets: buildSearchTargetsForWorkspace() }, { windowId: getCurrentWindow().id })),
+        findAllInWorkspace: r((params) => invokeSearchCarrot<Array<{ path: string; line: number; column: number; match: string }>>("findAllInWorkspace", { query: String(params?.query || ""), targets: buildSearchTargetsForWorkspace() }, { windowId: getCurrentWindow().id })),
+        cancelFileSearch: r(() => invokeSearchCarrot<boolean>("cancelFileSearch", {}, { windowId: getCurrentWindow().id })),
+        cancelFindAll: r(() => invokeSearchCarrot<boolean>("cancelFindAll", {}, { windowId: getCurrentWindow().id })),
+        // Git operations — all forwarded to git carrot
+        gitShow: r((params) => invokeGitCarrot("gitShow", params, { windowId: getCurrentWindow().id })),
+        gitCommit: r((params) => invokeGitCarrot("gitCommit", params, { windowId: getCurrentWindow().id })),
+        gitCommitAmend: r((params) => invokeGitCarrot("gitCommitAmend", params, { windowId: getCurrentWindow().id })),
+        gitAdd: r((params) => invokeGitCarrot("gitAdd", params, { windowId: getCurrentWindow().id })),
+        gitLog: r((params) => invokeGitCarrot("gitLog", params, { windowId: getCurrentWindow().id })),
+        gitStatus: r((params) => invokeGitCarrot("gitStatus", params, { windowId: getCurrentWindow().id })),
+        gitDiff: r((params) => invokeGitCarrot("gitDiff", params, { windowId: getCurrentWindow().id })),
+        gitCheckout: r((params) => invokeGitCarrot("gitCheckout", params, { windowId: getCurrentWindow().id })),
+        gitCheckIsRepoRoot: r((params) => invokeGitCarrot("gitCheckIsRepoRoot", params, { windowId: getCurrentWindow().id })),
+        gitCheckIsRepoInTree: r((params) => invokeGitCarrot("gitCheckIsRepoInTree", params, { windowId: getCurrentWindow().id })),
+        gitRevParse: r((params) => invokeGitCarrot("gitRevParse", params, { windowId: getCurrentWindow().id })),
+        gitReset: r((params) => invokeGitCarrot("gitReset", params, { windowId: getCurrentWindow().id })),
+        gitRevert: r((params) => invokeGitCarrot("gitRevert", params, { windowId: getCurrentWindow().id })),
+        gitApply: r((params) => invokeGitCarrot("gitApply", params, { windowId: getCurrentWindow().id })),
+        gitStageHunkFromPatch: r((params) => invokeGitCarrot("gitStageHunkFromPatch", params, { windowId: getCurrentWindow().id })),
+        gitStageSpecificLines: r((params) => invokeGitCarrot("gitStageSpecificLines", params, { windowId: getCurrentWindow().id })),
+        gitStageMonacoChange: r((params) => invokeGitCarrot("gitStageMonacoChange", params, { windowId: getCurrentWindow().id })),
+        gitUnstageMonacoChange: r((params) => invokeGitCarrot("gitUnstageMonacoChange", params, { windowId: getCurrentWindow().id })),
+        gitCreatePatchFromLines: r((params) => invokeGitCarrot("gitCreatePatchFromLines", params, { windowId: getCurrentWindow().id })),
+        gitStashList: r((params) => invokeGitCarrot("gitStashList", params, { windowId: getCurrentWindow().id })),
+        gitStashCreate: r((params) => invokeGitCarrot("gitStashCreate", params, { windowId: getCurrentWindow().id })),
+        gitStashApply: r((params) => invokeGitCarrot("gitStashApply", params, { windowId: getCurrentWindow().id })),
+        gitStashPop: r((params) => invokeGitCarrot("gitStashPop", params, { windowId: getCurrentWindow().id })),
+        gitStashShow: r((params) => invokeGitCarrot("gitStashShow", params, { windowId: getCurrentWindow().id })),
+        gitRemote: r((params) => invokeGitCarrot("gitRemote", params, { windowId: getCurrentWindow().id })),
+        gitAddRemote: r((params) => invokeGitCarrot("gitAddRemote", params, { windowId: getCurrentWindow().id })),
+        gitFetch: r((params) => invokeGitCarrot("gitFetch", params, { windowId: getCurrentWindow().id })),
+        gitPull: r((params) => invokeGitCarrot("gitPull", params, { windowId: getCurrentWindow().id })),
+        gitPush: r((params) => invokeGitCarrot("gitPush", params, { windowId: getCurrentWindow().id })),
+        gitBranch: r((params) => invokeGitCarrot("gitBranch", params, { windowId: getCurrentWindow().id })),
+        gitCheckoutBranch: r((params) => invokeGitCarrot("gitCheckoutBranch", params, { windowId: getCurrentWindow().id })),
+        gitLogRemoteOnly: r((params) => invokeGitCarrot("gitLogRemoteOnly", params, { windowId: getCurrentWindow().id })),
+        gitClone: r((params) => invokeGitCarrot("gitClone", params, { windowId: getCurrentWindow().id })),
+        gitValidateUrl: r((params) => invokeGitCarrot("gitValidateUrl", params, { windowId: getCurrentWindow().id })),
+        getGitConfig: r((params) => invokeGitCarrot("getGitConfig", params, { windowId: getCurrentWindow().id })),
+        setGitConfig: r((params) => invokeGitCarrot("setGitConfig", params, { windowId: getCurrentWindow().id })),
+        checkGitHubCredentials: r((params) => invokeGitCarrot("checkGitHubCredentials", params, { windowId: getCurrentWindow().id })),
+        storeGitHubCredentials: r((params) => invokeGitCarrot("storeGitHubCredentials", params, { windowId: getCurrentWindow().id })),
+        removeGitHubCredentials: r((params) => invokeGitCarrot("removeGitHubCredentials", params, { windowId: getCurrentWindow().id })),
+        gitCreateBranch: r((params) => invokeGitCarrot("gitCreateBranch", params, { windowId: getCurrentWindow().id })),
+        gitDeleteBranch: r((params) => invokeGitCarrot("gitDeleteBranch", params, { windowId: getCurrentWindow().id })),
+        gitTrackRemoteBranch: r((params) => invokeGitCarrot("gitTrackRemoteBranch", params, { windowId: getCurrentWindow().id })),
+        initGit: r((params) => invokeGitCarrot("initGit", params, { windowId: getCurrentWindow().id })),
+        findFirstNestedGitRepo: r((params) => invokeSearchCarrot<string | null>("findFirstNestedGitRepo", { searchPath: String(params?.searchPath || ""), timeoutMs: Number(params?.timeoutMs || 5_000) })),
+        getUniqueNewName: r((params) => getUniqueNewName(String(params?.parentPath || ""), String(params?.baseName || "untitled"))),
+        getUniqueLensName: r((params) => getUniqueLensNameForWorkspace(String(params?.workspaceId || getCurrentWorkspace().key), String(params?.baseName || "Lens"))),
+        makeFileNameSafe: r((params) => makeFileNameSafe(String(params?.value || ""))),
+        getFaviconForUrl: r(() => "views://assets/file-icons/bookmark.svg"),
+        showContextMenu: r((params) => { ContextMenu.showContextMenu(Array.isArray(params?.menuItems) ? params.menuItems : []); }),
+        // Plugin stubs
+        pluginGetFileDecoration: r(() => null),
+        pluginFindSlateForFolder: r(() => null),
+        pluginGetStateValue: r(() => null),
+        pluginGetPreloadScripts: r(() => []),
+        pluginGetAllSlates: r(() => []),
+        pluginGetStatusBarItems: r(() => []),
+        pluginGetInstalled: r(() => []),
+        pluginSearch: r(() => []),
+        pluginGetSettingsValues: r(() => []),
+        pluginGetSettingsSchema: r(() => []),
+        pluginGetEntitlements: r(() => []),
+        pluginGetSettingValidationStatuses: r(() => []),
+        pluginGetCompletions: r(() => []),
+        pluginGetContextMenuItems: r(() => []),
+        pluginGetKeybindings: r(() => []),
+        pluginGetPendingSettingsMessages: r(() => []),
+        pluginSetSettingValue: r(() => ({ success: true })),
+        pluginInstall: r(() => ({ success: true })),
+        pluginUninstall: r(() => ({ success: true })),
+        pluginSetEnabled: r(() => ({ success: true })),
+        pluginSlateEvent: r(() => ({ success: true })),
+        pluginMountSlate: r(() => ({ success: true })),
+        pluginUnmountSlate: r(() => ({ success: true })),
+        pluginSendSettingsMessage: r(() => ({ success: true })),
+        pluginExecuteCommand: r(() => {}),
+        // Llama — forwarded to llama carrot
+        llamaListModels: r((params) => invokeLlamaCarrot("llamaListModels", params, { windowId: getCurrentWindow().id })),
+        llamaCompletion: r((params) => invokeLlamaCarrot("llamaCompletion", params, { windowId: getCurrentWindow().id })),
+        llamaInstallModel: r((params) => invokeLlamaCarrot("llamaInstallModel", params, { windowId: getCurrentWindow().id })),
+        llamaRemoveModel: r((params) => invokeLlamaCarrot("llamaRemoveModel", params, { windowId: getCurrentWindow().id })),
+        llamaDownloadStatus: r((params) => invokeLlamaCarrot("llamaDownloadStatus", params, { windowId: getCurrentWindow().id })),
+        // Tokens
+        getTokens: r(() => bunnyDashState.tokens || []),
+        setToken: r(() => {}),
       },
-      messages: {},
+      messages: {
+        openBunnyWindow: m((payload) => { app.openBunnyWindow({ screenX: typeof payload?.screenX === "number" ? payload.screenX : undefined, screenY: typeof payload?.screenY === "number" ? payload.screenY : undefined }); }),
+        closeWindow: m(() => { closeWindow(getCurrentWindow().id); }),
+        createWorkspace: m(async () => { const nextName = `Workspace ${listWorkspaces().length + 1}`; await createWorkspace(nextName, "Workspace inside Bunny Dash."); getOrCreateBunnyWorkspace(getCurrentWorkspace().key); emitSetProjects(); }),
+        updateWorkspace: m(async (payload) => {
+          const workspace = getCurrentWorkspace();
+          const db = ensureDb();
+          const nextName = typeof payload?.name === "string" && payload.name.trim() ? payload.name.trim() : workspace.name;
+          db.collection("workspaces").update(workspace.id, { name: nextName, subtitle: workspace.subtitle });
+          const bunnyWorkspace = getOrCreateBunnyWorkspace(workspace.key);
+          bunnyWorkspace.name = nextName;
+          if (typeof payload?.color === "string" && payload.color) bunnyWorkspace.color = payload.color;
+          flushDb(); emitSetProjects(); await writePersistedDashState();
+        }),
+        removeProjectFromBunnyDashOnly: m(async (payload) => {
+          const projectId = String(payload?.projectId || "");
+          const project = findProjectMountByKey(projectId);
+          if (project) { const db = ensureDb(); db.collection("projectMounts").remove(project.id); flushDb(); syncProjectWatchers(); emitSetProjects(); await writePersistedDashState(); }
+        }),
+        fullyDeleteProjectFromDiskAndBunnyDash: m(async (payload) => {
+          const projectId = String(payload?.projectId || "");
+          const project = findProjectMountByKey(projectId);
+          if (project) { rmSync(project.path, { recursive: true, force: true }); const db = ensureDb(); db.collection("projectMounts").remove(project.id); flushDb(); syncProjectWatchers(); emitSetProjects(); await writePersistedDashState(); }
+        }),
+        fullyDeleteNodeFromDisk: m((payload) => { rmSync(String(payload?.nodePath || ""), { recursive: true, force: true }); emitFileWatchEvent(String(payload?.nodePath || "")); }),
+        editProject: m(async (payload) => {
+          const project = findProjectMountByKey(String(payload?.projectId || ""));
+          if (!project) return;
+          ensureDb().collection("projectMounts").update(project.id, { name: String(payload?.projectName || project.name), path: String(payload?.path || project.path) });
+          flushDb(); syncProjectWatchers(); emitSetProjects(); await writePersistedDashState();
+        }),
+        deleteWorkspace: m(async () => {
+          const workspaces = listWorkspaces(); if (workspaces.length <= 1) return;
+          const current = getCurrentWorkspace(); const db = ensureDb();
+          for (const project of getProjectMountsForWorkspace(current.key)) { db.collection("projectMounts").remove(project.id); }
+          db.collection("workspaces").remove(current.id); delete (bunnyDashState.workspaces || {})[current.key]; flushDb();
+          await openWorkspace(listWorkspaces()[0]!.key); emitSetProjects(); await writePersistedDashState();
+        }),
+        deleteWorkspaceCompletely: m(async () => {
+          const workspaces = listWorkspaces(); if (workspaces.length <= 1) return;
+          const current = getCurrentWorkspace(); const db = ensureDb();
+          for (const project of getProjectMountsForWorkspace(current.key)) { rmSync(project.path, { recursive: true, force: true }); db.collection("projectMounts").remove(project.id); }
+          db.collection("workspaces").remove(current.id); delete (bunnyDashState.workspaces || {})[current.key]; flushDb();
+          await openWorkspace(listWorkspaces()[0]!.key); emitSetProjects(); await writePersistedDashState();
+        }),
+        formatFile: m(async (payload) => { await invokeBiomeCarrot("formatFile", { path: String(payload?.path || "") }, { windowId: getCurrentWindow().id }); }),
+        tsServerRequest: m(async (payload) => {
+          await invokeTsServerCarrot<boolean>("tsServerRequest", { command: String(payload?.command || ""), args: payload?.args ?? {}, metadata: payload?.metadata && typeof payload.metadata === "object" ? payload.metadata : {} },
+            { windowId: typeof payload?.metadata?.windowId === "string" ? payload.metadata.windowId : getCurrentWindow().id });
+        }),
+        tsServerEditorClosed: m(async (payload) => { await closeTsServerEditor(payload?.metadata && typeof payload.metadata === "object" ? payload.metadata : {}); }),
+        createWindow: m(async (payload) => { await createAdditionalWindow(payload ? { x: Number(payload.offset?.x || 0), y: Number(payload.offset?.y || 0) } : undefined); }),
+        hideWorkspace: m(async () => { await hideCurrentWorkspaceWindows(); }),
+        // No-ops
+        track: m(() => {}),
+        installUpdateNow: m(() => {}),
+        addToken: m(() => {}),
+        deleteToken: m(() => {}),
+        syncDevlink: m(() => {}),
+      },
     },
   });
 
@@ -670,7 +879,7 @@ function sendRuntimeEventToDashWindow(windowId: string | undefined, name: string
   const existing = browserWindows.get(targetWindowId);
   if (existing) {
     try {
-      (existing.webview?.rpc as any)?.send?.runtimeEvent?.({ name, payload });
+      (existing.webview?.rpc as any)?.send?.[name]?.(payload);
     } catch (err) {
       // View may not be ready yet
     }
@@ -1225,7 +1434,7 @@ function broadcastAppSettings() {
   const settings = bunnyDashState.appSettings || defaultBunnyAppSettings;
   for (const [_id, win] of browserWindows) {
     try {
-      (win.webview?.rpc as any)?.send?.runtimeEvent?.({ name: "appSettingsChanged", payload: { appSettings: settings } });
+      (win.webview?.rpc as any)?.send?.appSettingsChanged?.({ appSettings: settings });
     } catch {}
   }
 }
@@ -2869,10 +3078,9 @@ function snapshot(): Snapshot {
 
 function emitSnapshot() {
   const data = snapshot();
-  // Send to all open windows
   for (const [_id, win] of browserWindows) {
     try {
-      (win.webview?.rpc as any)?.send?.runtimeEvent?.({ name: "snapshot", payload: data });
+      (win.webview?.rpc as any)?.send?.snapshot?.(data);
     } catch {}
   }
 }

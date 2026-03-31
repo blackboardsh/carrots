@@ -26,17 +26,6 @@ if (!carrotDir) {
   process.exit(0);
 }
 
-function makeElectrobunViewAliasPlugin() {
-  const adapterPath = join(sourceDir, "src", "bridge", "electrobun-view.ts");
-  return {
-    name: "bunny-dash-electrobun-view-alias",
-    setup(build: any) {
-      build.onResolve({ filter: /^electrobun\/view$/ }, () => ({
-        path: adapterPath,
-      }));
-    },
-  };
-}
 
 async function buildMonacoWorkers(lensOutDir: string) {
   const require = createRequire(import.meta.url);
@@ -71,7 +60,6 @@ async function buildLens(lensOutDir: string) {
     outfile: join(lensOutDir, "index.js"),
     bundle: true,
     plugins: [
-      makeElectrobunViewAliasPlugin(),
       MonacoEsbuildPlugin({
         destDir: lensOutDir,
         pathPrefix: "/",
@@ -110,7 +98,7 @@ async function buildBunny(bunnyOutDir: string) {
     entryPoints: [join(sourceDir, "src", "renderers", "bunny", "index.ts")],
     outfile: join(bunnyOutDir, "index.js"),
     bundle: true,
-    plugins: [makeElectrobunViewAliasPlugin()],
+    plugins: [],
     platform: "browser",
     format: "esm",
     loader: { ".png": "file" },
