@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "dependencies": {
-    "electrobun": "1.17.0-beta.0",
+    "electrobun": "1.17.3-beta.1",
     "simple-git": "3.22.0"
   }
 }

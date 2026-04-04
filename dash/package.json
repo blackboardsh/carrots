@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "dependencies": {
-    "electrobun": "1.17.0-beta.0",
+    "electrobun": "1.17.3-beta.1",
     "goldfishdb": "*",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-search": "^0.15.0",
