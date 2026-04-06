@@ -917,6 +917,8 @@ function sendRuntimeEventToDashWindow(windowId: string | undefined, name: string
       // View may not be ready yet
     }
   }
+  // Also send via postMessage for Hop remote browsers
+  post({ type: "action", action: "emit-view", payload: { name, payload, raw: true, windowId: targetWindowId } });
 }
 
 function broadcastRuntimeEventToDashWindows(name: string, payload?: unknown) {
@@ -1893,8 +1895,9 @@ function emitViewMessage(name: string, payload?: unknown, windowId?: string) {
     } catch (err) {
       // View may not be ready yet
     }
-    return;
   }
+  // Also send via postMessage for Hop remote browsers
+  post({ type: "action", action: "emit-view", payload: { name, payload, raw: true, windowId: targetWindowId } });
 }
 
 function handlePtyTerminalOutput(payload: unknown) {
@@ -3116,6 +3119,8 @@ function emitSnapshot() {
       (win.webview?.rpc as any)?.send?.snapshot?.(data);
     } catch {}
   }
+  // Also send via postMessage for Hop remote browsers
+  post({ type: "action", action: "emit-view", payload: { name: "snapshot", payload: data, raw: true } });
 }
 
 function isTreeNodeIdValid(nodeId: string) {

@@ -10,7 +10,7 @@
         "@xterm/addon-web-links": "^0.11.0",
         "@xterm/addon-webgl": "^0.18.0",
         "@xterm/xterm": "^5.5.0",
-        "electrobun": "1.17.3-beta.1",
+        "electrobun": "1.17.3-beta.2",
         "esbuild": "^0.25.12",
         "esbuild-monaco-editor-plugin": "^0.1.1",
         "esbuild-plugin-solid": "^0.5.0",
@@ -227,7 +227,7 @@
 
     "dlv": ["dlv@1.1.3", "", {}, "sha512-+HlytyjlPKnIG8XuRG8WvmBP8xs8P71y+SKKS6ZXWoEgLuePxtDoUEiH7WkdePWrQ5JBpE6aoVqfZfJUQkjXwA=="],
 
-    "electrobun": ["electrobun@1.17.3-beta.1", "", { "dependencies": { "@babylonjs/core": "^7.45.0", "@types/bun": "^1.3.8", "png-to-ico": "^2.1.8", "proxy-agent": "^6.5.0", "rcedit": "^4.0.1", "three": "^0.165.0" }, "bin": { "electrobun": "bin/electrobun.cjs" } }, "sha512-exlTm9jkgkaRq2JAGH5PCFxno/moi9KYTA/kDd7RRFBOq7Eve5uS76o9uSiavtexyJCc/UvXm9QcLmpWpJK6nQ=="],
+    "electrobun": ["electrobun@1.17.3-beta.2", "", { "dependencies": { "@babylonjs/core": "^7.45.0", "@types/bun": "^1.3.8", "png-to-ico": "^2.1.8", "proxy-agent": "^6.5.0", "rcedit": "^4.0.1", "three": "^0.165.0" }, "bin": { "electrobun": "bin/electrobun.cjs" } }, "sha512-oa3+GayyRHyaIewTU6GpRGbGkGC2YKly1R76ez7IbyAPS1Y/tQYMFMFwfR4/UQiQsKmvtYGvszvX0ltfue5dhA=="],
 
     "electron-to-chromium": ["electron-to-chromium@1.5.313", "", {}, "sha512-QBMrTWEf00GXZmJyx2lbYD45jpI3TUFnNIzJ5BBc8piGUDwMPa1GV6HJWTZVvY/eiN3fSopl7NRbgGp9sZ9LTA=="],
 
