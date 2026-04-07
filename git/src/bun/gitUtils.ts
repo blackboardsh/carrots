@@ -60,6 +60,21 @@ const getInitialCommitEnv = async (baseDir: string) => {
   };
 };
 
+export const getGitStatus = async (): Promise<{ installed: boolean; version: string }> => {
+  const installed = fs.existsSync(GIT_BINARY_PATH);
+  if (!installed) {
+    return { installed: false, version: "" };
+  }
+  try {
+    const result = await git(os.tmpdir()).raw(["--version"]);
+    // result is e.g. "git version 2.43.0\n"
+    const match = String(result).match(/git version ([\w.]+)/);
+    return { installed: true, version: match ? match[1] : "" };
+  } catch {
+    return { installed: true, version: "" };
+  }
+};
+
 export const gitShow = (repoRoot: string, options: string[]) => {
   return git(repoRoot).show(options);
 };

@@ -1,6 +1,7 @@
 import {
   checkGitHubCredentials,
   getGitConfig,
+  getGitStatus,
   gitAdd,
   gitAddRemote,
   gitApply,
@@ -240,6 +241,8 @@ async function handleRequest(method: string, params: any) {
       );
     case "initGit":
       return initGit(String(params?.repoRoot || ""));
+    case "getGitStatus":
+      return getGitStatus();
     default:
       return undefined;
   }

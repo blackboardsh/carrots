@@ -268,6 +268,10 @@ let biomePeerDependencyStatus: BiomePeerDependencyStatus = {
   installed: false,
   version: "",
 };
+let gitPeerDependencyStatus: { installed: boolean; version: string } = {
+  installed: false,
+  version: "",
+};
 const LEGACY_CURRENT_SESSION_MAIN_TABS: WindowTabId[] = [
   "workspace",
   "projects",
@@ -1430,6 +1434,7 @@ function ensureBootPromise() {
       ensurePtyHeartbeatLoop();
       await refreshTypeScriptPeerDependencyStatus();
       await refreshBiomePeerDependencyStatus();
+      await refreshGitPeerDependencyStatus();
       syncApplicationMenu();
       await reopenRuntimeWindowsOnBoot();
       post({ type: "ready" });
@@ -1880,8 +1885,8 @@ function bunnyPeerDependencies() {
       version: biomePeerDependencyStatus.version,
     },
     git: {
-      installed: Boolean(Bun.which("git")),
-      version: "",
+      installed: gitPeerDependencyStatus.installed,
+      version: gitPeerDependencyStatus.version,
     },
   };
 }
@@ -2069,6 +2074,21 @@ async function refreshBiomePeerDependencyStatus() {
     };
   } catch {
     biomePeerDependencyStatus = {
+      installed: false,
+      version: "",
+    };
+  }
+}
+
+async function refreshGitPeerDependencyStatus() {
+  try {
+    const status = await invokeGitCarrot<{ installed: boolean; version: string }>("getGitStatus");
+    gitPeerDependencyStatus = {
+      installed: Boolean(status?.installed),
+      version: String(status?.version || ""),
+    };
+  } catch {
+    gitPeerDependencyStatus = {
       installed: false,
       version: "",
     };

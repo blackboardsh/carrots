@@ -23,4 +23,7 @@ export default {
 			},
 		},
 	},
+	scripts: {
+		postBuild: "build.ts",
+	},
 } satisfies ElectrobunConfig;

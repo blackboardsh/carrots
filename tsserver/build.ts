@@ -14,10 +14,15 @@ if (!carrotDir) {
 }
 
 const tsLib = join(sourceDir, "node_modules", "typescript", "lib");
+const tsPackageJson = join(sourceDir, "node_modules", "typescript", "package.json");
 if (!existsSync(tsLib)) {
 	throw new Error(`Missing typescript/lib at ${tsLib}. Run bun install.`);
 }
+if (!existsSync(tsPackageJson)) {
+	throw new Error(`Missing typescript/package.json at ${tsPackageJson}. Run bun install.`);
+}
 
-console.log("[tsserver postBuild] Copying TypeScript lib...");
+console.log("[tsserver postBuild] Copying TypeScript lib + package.json...");
 cpSync(tsLib, join(carrotDir, "typescript", "lib"), { recursive: true });
+cpSync(tsPackageJson, join(carrotDir, "typescript", "package.json"));
 console.log("[tsserver postBuild] Done");
