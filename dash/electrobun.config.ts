@@ -29,6 +29,11 @@ export default {
 				"bunny.biome": "file:../biome",
 				"bunny.llama": "file:../llama",
 			},
+			// Views built by build.ts (postBuild). Declared here so they're exposed
+			// in the manifest for remote loading via Hop.
+			remoteUIs: {
+				dash: { name: "Bunny Dash", path: "lens/index.html" },
+			},
 		},
 	},
 	scripts: {
