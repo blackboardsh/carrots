@@ -94,17 +94,10 @@ async function main() {
 
     console.log(`  • ${key} (${size} bytes)`);
 
-    // Tell Cloudflare's CDN not to cache these — the filename is fixed across
-    // builds (e.g. bunny.git-0.1.0.tar.zst) so a stale cache would serve the
-    // wrong contents indefinitely after a fresh push.
     await client.write(
       key,
       file,
-      {
-        ...(file.type ? { type: file.type } : {}),
-        // @ts-ignore Bun.S3Client supports cacheControl
-        cacheControl: "no-cache, no-store, must-revalidate",
-      },
+      file.type ? { type: file.type } : undefined,
     );
 
     uploadedCount += 1;
