@@ -258,6 +258,24 @@ fn sendOutputMessage(msg_type: []const u8, data: ?[]const u8, error_msg: ?[]cons
     _ = c.write(1, string.items.ptr, string.items.len);
 }
 
+fn utf8PartialTailLen(buf: []const u8) usize {
+    var offset: usize = 0;
+    while (offset < 3 and offset < buf.len) : (offset += 1) {
+        const byte = buf[buf.len - 1 - offset];
+        if ((byte & 0xC0) == 0x80) continue;
+        const needed: usize =
+            if ((byte & 0x80) == 0x00) 1
+            else if ((byte & 0xE0) == 0xC0) 2
+            else if ((byte & 0xF0) == 0xE0) 3
+            else if ((byte & 0xF8) == 0xF0) 4
+            else return 0;
+        const have = offset + 1;
+        if (needed > have) return have;
+        return 0;
+    }
+    return 0;
+}
+
 fn readPtyOutput() !void {
     if (pty_master) |master| {
         var buffer: [4096]u8 = undefined;
@@ -289,7 +307,19 @@ fn readPtyOutput() !void {
             defer allocator.free(processed_output);
 
             accumulated_buffer.clearRetainingCapacity();
-            sendOutputMessage("data", processed_output, null) catch {};
+
+            // Hold back a partial multi-byte UTF-8 sequence at the tail so std.json.stringify
+            // doesn't see invalid UTF-8 and fall back to emitting the data as an array of ints.
+            const tail = utf8PartialTailLen(processed_output);
+            const complete = processed_output[0 .. processed_output.len - tail];
+
+            if (complete.len > 0) {
+                sendOutputMessage("data", complete, null) catch {};
+            }
+
+            if (tail > 0) {
+                try accumulated_buffer.appendSlice(processed_output[processed_output.len - tail ..]);
+            }
         }
     }
 }
