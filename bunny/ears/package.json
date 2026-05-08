@@ -4,11 +4,10 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "sync:wgpu": "bun scripts/sync-wgpu.ts",
-    "start": "bun run sync:wgpu && electrobun dev",
-    "dev": "bun run sync:wgpu && electrobun dev --watch",
-    "build:canary": "bun run sync:wgpu && electrobun build --env=canary",
-    "build:stable": "bun run sync:wgpu && electrobun build --env=stable",
+    "start": "electrobun dev",
+    "dev": "electrobun dev --watch",
+    "build:canary": "electrobun build --env=canary",
+    "build:stable": "electrobun build --env=stable",
     "test:integration": "bun test tests/carrot.integration.test.ts"
   },
   "dependencies": {
