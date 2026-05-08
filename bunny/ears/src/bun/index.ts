@@ -2257,6 +2257,7 @@ class BunnyEarsRuntime {
       { type: "normal" as const, label: "Update Carrots", action: "update-carrots" },
       { type: "normal" as const, label: "Reset Local State", action: "emergency-reset" },
       { type: "normal" as const, label: "Quit Bunny Ears", action: "quit" },
+      { type: "normal" as const, label: "Test 1", action: "test" },
     ];
 
     return [...baseItems, ...dashItems, ...emergencyItems];
