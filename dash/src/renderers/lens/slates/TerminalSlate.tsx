@@ -1,6 +1,6 @@
-import { createSignal, onMount, onCleanup, Show } from "solid-js";
+import { createEffect, createSignal, onMount, onCleanup, Show } from "solid-js";
 import { produce } from "solid-js/store";
-import { type TerminalTabType, getWindow, setState, openNewTabForNode } from "../store";
+import { type TerminalTabType, getWindow, setState, openNewTabForNode, getPaneWithId, state } from "../store";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -24,6 +24,39 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
   const pendingTerminalExit: Array<{ terminalId: string; exitCode: number }> = [];
   const [showSearch, setShowSearch] = createSignal(false);
   const [searchQuery, setSearchQuery] = createSignal("");
+
+  const isTabActive = () => {
+    const _tab = tab();
+    if (!_tab) {
+      return false;
+    }
+
+    const pane = getPaneWithId(state, _tab.paneId);
+    return pane?.type === "pane" && pane.currentTabId === _tab.id;
+  };
+
+  const refreshTerminalDisplay = (focus = false) => {
+    if (!terminal || !terminalElement) {
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      if (!terminal || !terminalElement) {
+        return;
+      }
+
+      const rect = terminalElement.getBoundingClientRect();
+      if (rect.width <= 50 || rect.height <= 50) {
+        return;
+      }
+
+      fitAddon?.fit();
+      terminal.refresh(0, Math.max(terminal.rows - 1, 0));
+      if (focus && !showSearch()) {
+        terminal.focus();
+      }
+    });
+  };
 
   // Function to update current directory from the terminal process (debounced)
   const updateCurrentDir = async () => {
@@ -125,7 +158,7 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
       terminal.loadAddon(searchAddon);
 
       terminal.open(terminalElement);
-      fitAddon.fit();
+      refreshTerminalDisplay(false);
 
       // Load WebGL addon for better performance
       try {
@@ -333,6 +366,14 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
       fitAddon?.dispose();
       webglAddon?.dispose();
     });
+  });
+
+  createEffect(() => {
+    if (!isTabActive() || !terminalId()) {
+      return;
+    }
+
+    refreshTerminalDisplay(true);
   });
 
   const handleSearch = (query: string) => {

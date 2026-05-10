@@ -2013,7 +2013,13 @@ const Pane = ({
 
 	const renderDropTarget = () => Boolean(state.dragState);
 	const isDropTarget = () => state.dragState?.targetPaneId === pane.id;
-	const isEmptyPane = () => !pane.tabIds.length;
+	const livePane = () => {
+		const current = getPane(state, pathToPane);
+		return current?.type === "pane" ? current : pane;
+	};
+	const paneTabIds = () => livePane().tabIds;
+	const currentTabId = () => livePane().currentTabId || "";
+	const isEmptyPane = () => !paneTabIds().length;
 
 	// Removed isAddTabBtnHovered state - no longer needed without new tab button
 
@@ -2119,7 +2125,7 @@ const Pane = ({
 						class="pane-tab-container"
 						style="display:flex; width:100%;overflow-x: scroll;overflow-y:hidden;align-items: center;"
 					>
-						<For each={pane.tabIds}>
+						<For each={paneTabIds()}>
 							{(tabId, index) => (
 								<PaneTab
 									tabId={tabId}
@@ -2180,13 +2186,13 @@ const Pane = ({
 						"flex-grow": 1,
 					}}
 				>
-					<For each={pane.tabIds}>
+					<For each={paneTabIds()}>
 						{(tabId) => (
 							<div style={{
 								position: "absolute",
 								inset: "0",
-								display: tabId === pane.currentTabId ? "block" : "none",
-								"pointer-events": tabId === pane.currentTabId && !renderDropTarget() ? "auto" : "none",
+								display: tabId === currentTabId() ? "block" : "none",
+								"pointer-events": tabId === currentTabId() && !renderDropTarget() ? "auto" : "none",
 							}}>
 								<slot name={`paneslot-${tabId}`} />
 							</div>
