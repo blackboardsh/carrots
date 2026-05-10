@@ -55,11 +55,30 @@ const SEARCH_BATCH_FLUSH_MS = 100;
 const MAX_FIND_ALL_RESULTS = 1_000;
 const MAX_FIND_FILES_RESULTS = 500;
 const workerDir = dirname(fileURLToPath(import.meta.url));
-const FD_BINARY_PATH = join(workerDir, FD_BINARY_NAME);
-const RG_BINARY_PATH = join(workerDir, RG_BINARY_NAME);
+const FD_BINARY_PATH = resolveBinary([
+  process.env.BUNNY_SEARCH_FD_PATH || "",
+  join(workerDir, FD_BINARY_NAME),
+  Bun.which("fd") || "",
+  Bun.which("fdfind") || "",
+]);
+const RG_BINARY_PATH = resolveBinary([
+  process.env.BUNNY_SEARCH_RG_PATH || "",
+  join(workerDir, RG_BINARY_NAME),
+  Bun.which("rg") || "",
+]);
+const GREP_BINARY_PATH = Bun.which("grep");
 
 const findAllSessions = new Map<string, SearchSession<FindAllResult>>();
 const findFilesSessions = new Map<string, SearchSession<string>>();
+
+function resolveBinary(candidates: string[]) {
+  for (const candidate of candidates) {
+    if (candidate && existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
 
 function post(message: unknown) {
   self.postMessage(message);
@@ -232,34 +251,54 @@ function scheduleFindFileFlush(session: SearchSession<string>, query: string) {
   }, SEARCH_BATCH_FLUSH_MS);
 }
 
-function createRgProcess(path: string, query: string) {
-  if (!existsSync(RG_BINARY_PATH)) {
-    throw new Error(`Missing bundled rg binary at ${RG_BINARY_PATH}`);
+function createFindAllProcess(path: string, query: string) {
+  if (RG_BINARY_PATH) {
+    return Bun.spawn(
+      [
+        RG_BINARY_PATH,
+        "--line-number",
+        "--column",
+        "--no-heading",
+        "--color=never",
+        "--case-sensitive",
+        "--max-count=500",
+        query,
+        path,
+      ],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
   }
 
-  return Bun.spawn(
-    [
-      RG_BINARY_PATH,
-      "--line-number",
-      "--column",
-      "--no-heading",
-      "--color=never",
-      "--case-sensitive",
-      "--max-count=500",
-      query,
-      path,
-    ],
-    {
-      stdout: "pipe",
-      stderr: "pipe",
-    },
-  );
+  if (GREP_BINARY_PATH) {
+    return Bun.spawn(
+      [
+        GREP_BINARY_PATH,
+        "-RIn",
+        "--exclude-dir=.git",
+        "--exclude-dir=node_modules",
+        "--exclude-dir=build",
+        "--exclude-dir=dist",
+        "--",
+        query,
+        path,
+      ],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+  }
+
+  throw new Error("Missing rg or grep binary. Install ripgrep or add a bundled vendor binary.");
 }
 
 function createFindFilesProcess(path: string, query: string) {
   const fuzzyPattern = query.split("").join(".*");
 
-  if (existsSync(FD_BINARY_PATH)) {
+  if (FD_BINARY_PATH) {
     return Bun.spawn(
       [
         FD_BINARY_PATH,
@@ -314,7 +353,7 @@ function startFindAllSearch(owner: SearchOwner, query: string, targets: SearchTa
   findAllSessions.set(owner.key, session);
 
   for (const target of targets) {
-    const process = createRgProcess(target.path, query);
+    const process = createFindAllProcess(target.path, query);
     session.processes.push(process);
     session.resultBatches.set(target.projectId, []);
 
@@ -329,15 +368,16 @@ function startFindAllSearch(owner: SearchOwner, query: string, targets: SearchTa
       }
 
       const parts = line.split(":");
-      if (parts.length < 4) {
+      if (parts.length < 3) {
         return;
       }
 
+      const hasColumn = parts.length >= 4 && Number.isFinite(Number(parts[2]));
       const result = {
         path: parts[0]!,
         line: Number(parts[1] || 0),
-        column: Number(parts[2] || 0),
-        match: parts.slice(3).join(":"),
+        column: hasColumn ? Number(parts[2] || 0) : 0,
+        match: parts.slice(hasColumn ? 3 : 2).join(":"),
       } satisfies FindAllResult;
 
       const batch = session.resultBatches.get(target.projectId);
@@ -412,7 +452,7 @@ function startFindFileSearch(owner: SearchOwner, query: string, targets: SearchT
 }
 
 async function findFirstNestedGitRepo(searchPath: string, timeoutMs = 5_000) {
-  if (existsSync(FD_BINARY_PATH)) {
+  if (FD_BINARY_PATH) {
     const process = Bun.spawn(
       [
         FD_BINARY_PATH,

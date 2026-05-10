@@ -7,6 +7,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  lstatSync,
   watch,
   writeFileSync,
   type FSWatcher,
@@ -241,12 +242,15 @@ let statePath = "";
 let permissions = new Set<string>();
 let dashDb: DashDb | null = null;
 let manifestVersion = "0.0.1";
+let runtimeChannel = "dev";
+let runtimeAuthToken: string | null = null;
 let runtimeWindows: LensWindow[] = [];
 const browserWindows = new Map<string, BrowserWindow>();
 let tray: Tray | null = null;
 const terminalWindowOwners = new Map<string, string>();
 const expandedFsDirs = new Set<string>();
-const directoryWatchers = new Map<string, FSWatcher>();
+type ProjectDirectoryWatcher = { close: () => void };
+const directoryWatchers = new Map<string, ProjectDirectoryWatcher>();
 const framePersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let ptyHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -415,15 +419,15 @@ let cachedCarrotList: Array<{ id: string; name: string; description: string; ver
 
 function initCloudApi(): CloudApi | null {
   // Use auth token from Bunny Ears (passed via init context) or from persisted dash state
-  const earsToken = app.authToken;
+  const earsToken = runtimeAuthToken || app.authToken;
   const persistedAuth = bunnyDashState.appSettings?.bunnyCloud;
   const accessToken = earsToken || persistedAuth?.accessToken;
   if (!accessToken) return null;
 
-  const channel = app.channel || (manifestVersion === "0.0.1" ? "dev" : undefined);
+  const channel = runtimeChannel || app.channel || (manifestVersion === "0.0.1" ? "dev" : undefined);
   return new CloudApi(getApiBaseUrl(channel), {
     getAuth: () => ({
-      accessToken: app.authToken || bunnyDashState.appSettings?.bunnyCloud?.accessToken || "",
+      accessToken: runtimeAuthToken || app.authToken || bunnyDashState.appSettings?.bunnyCloud?.accessToken || "",
       refreshToken: bunnyDashState.appSettings?.bunnyCloud?.refreshToken || "",
     }),
     onTokenRefresh: (tokens) => {
@@ -591,7 +595,14 @@ function getOrCreateBrowserWindow(windowId = state.currentWindowId, title?: stri
           return { type: "dir", name: nodeName, path: join(parentPath, nodeName), previewChildren: [], isExpanded: false, slate: { v: 1, name: "", url: "", icon: "", type: "project", config: {} } };
         }),
         addProject: r((params) => addProjectMount({ workspaceId: getCurrentWorkspace().key, name: params?.projectName, path: String(params?.path || "") }).then((result) => { emitSetProjects(); return result; })),
-        syncWorkspace: r(async (params) => { log(`syncWorkspace request: workspace=${getCurrentWorkspace().key}`); bunnyDashState.workspaces ||= {}; bunnyDashState.workspaces[getCurrentWorkspace().key] = params.workspace; await saveState(); emitSetProjectsForWindow(getCurrentWindow().id); }),
+        syncWorkspace: r(async (params) => {
+          const workspaceId = String(params?.workspace?.id || getCurrentWorkspace().key);
+          log(`syncWorkspace request: workspace=${workspaceId}`);
+          bunnyDashState.workspaces ||= {};
+          bunnyDashState.workspaces[workspaceId] = params.workspace;
+          await saveState();
+          emitSetProjectsForWindow(getCurrentWindow().id);
+        }),
         syncAppSettings: r(async (params) => { bunnyDashState.appSettings = params.appSettings; await writePersistedDashState(); }),
         openFileDialog: r((params) => Utils.openFileDialog({ startingFolder: params?.startingFolder, allowedFileTypes: params?.allowedFileTypes, canChooseFiles: params?.canChooseFiles, canChooseDirectory: params?.canChooseDirectory, allowsMultipleSelection: params?.allowsMultipleSelection })),
         getNode: r((params) => getNodeForPath(String(params?.path || ""))),
@@ -1396,18 +1407,27 @@ function initializeRuntimeContext(message?: {
   context?: {
     permissions?: string[];
     statePath?: string;
+    authToken?: string | null;
+    channel?: string;
     config?: { ptyHeartbeatIntervalMs?: unknown };
   };
   manifest?: { version?: string };
 }) {
+  const context = message?.context;
   permissions = new Set(
-    message?.context?.permissions ||
+    context?.permissions ||
       ((app.permissions as string[] | undefined) ?? []),
   );
-  statePath = message?.context?.statePath || app.statePath || statePath;
+  statePath = context?.statePath || app.statePath || statePath;
   manifestVersion = message?.manifest?.version || app.manifest?.version || manifestVersion;
+  runtimeChannel = context?.channel || app.channel || runtimeChannel || "dev";
+  if (context && "authToken" in context) {
+    runtimeAuthToken = context.authToken || null;
+  } else {
+    runtimeAuthToken = app.authToken || runtimeAuthToken;
+  }
   ptyHeartbeatIntervalMs = parseDurationMs(
-    message?.context?.config?.ptyHeartbeatIntervalMs ??
+    context?.config?.ptyHeartbeatIntervalMs ??
       process.env.BUNNY_DASH_PTY_HEARTBEAT_INTERVAL_MS,
     ptyHeartbeatIntervalMs,
     1_000,
@@ -1455,12 +1475,17 @@ if (statePath) {
 }
 
 // Reinitialize cloud API when auth token changes (e.g., Farm login while dash is running)
-app.on("auth-token-changed", () => {
+app.on("auth-token-changed", (payload) => {
+  const nextToken = (payload as { token?: unknown } | undefined)?.token;
+  if (typeof nextToken === "string" && nextToken) {
+    runtimeAuthToken = nextToken;
+  }
   syncAuthFromEars().catch(() => {});
 });
 
 // Clear cloud state on logout
 app.on("auth-token-cleared", () => {
+  runtimeAuthToken = null;
   cloudApi = null;
   cloudInstances = [];
   if (bunnyDashState.appSettings?.bunnyCloud) {
@@ -1480,7 +1505,7 @@ function broadcastAppSettings() {
 }
 
 async function syncAuthFromEars() {
-  const token = app.authToken;
+  const token = runtimeAuthToken || app.authToken;
   if (!token) return;
 
   // Update the persisted bunnyCloud settings so the view shows logged-in state
@@ -1490,7 +1515,7 @@ async function syncAuthFromEars() {
   bunnyDashState.appSettings.bunnyCloud.accessToken = token;
 
   // Fetch user profile to get email/name
-  const channel = app.channel || "dev";
+  const channel = runtimeChannel || app.channel || "dev";
   const apiBase = getApiBaseUrl(channel);
   try {
     const resp = await fetch(`${apiBase}/v1/user/profile`, {
@@ -1583,8 +1608,23 @@ function listProjectMounts() {
   );
 }
 
+const WATCH_IGNORED_DIR_NAMES = new Set([
+  ".cache",
+  ".git",
+  ".turbo",
+  "artifacts",
+  "build",
+  "dist",
+  "node_modules",
+]);
+
 function isIgnoredPath(path: string) {
-  return path.includes("/node_modules/") || path.endsWith("/.DS_Store");
+  const parts = path.split(/[\\/]+/);
+  return parts.includes("node_modules") || parts.includes(".git") || path.endsWith("/.DS_Store");
+}
+
+function isIgnoredWatchDirectory(path: string) {
+  return WATCH_IGNORED_DIR_NAMES.has(basename(path)) || isIgnoredPath(path);
 }
 
 function scheduleRefresh(reason: string) {
@@ -1839,6 +1879,10 @@ function bunnyProjectsForWorkspace(workspaceId: string) {
     id: project.key,
     name: project.name,
     path: project.path,
+    instanceId: project.instanceId || "host-machine",
+    instanceLabel: project.instanceLabel || "This Machine",
+    kind: project.kind || "code",
+    status: project.status || "ready",
   }));
 }
 
@@ -2383,6 +2427,124 @@ function emitFileWatchEvent(absolutePath: string, workspaceId?: string) {
   }
 }
 
+function attachWatcherErrorHandler(watcher: ProjectDirectoryWatcher, label: string) {
+  (watcher as FSWatcher).on?.("error", (error) => {
+    log(`watch failed for ${label}: ${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
+function createProjectDirectoryWatcher(
+  rootPath: string,
+  onChange: (absolutePath: string) => void,
+): ProjectDirectoryWatcher {
+  if (process.platform !== "linux") {
+    const watcher = watch(
+      rootPath,
+      { recursive: true },
+      (_eventType, relativePath) => {
+        if (!relativePath) {
+          return;
+        }
+        onChange(join(rootPath, relativePath));
+      },
+    );
+    attachWatcherErrorHandler(watcher, rootPath);
+    return watcher;
+  }
+
+  const watchers: FSWatcher[] = [];
+  const watchedDirs = new Set<string>();
+  let closed = false;
+  let loggedFailures = 0;
+
+  const logWatchFailure = (dir: string, error: unknown) => {
+    if (loggedFailures < 5) {
+      log(`watch failed for ${dir}: ${error instanceof Error ? error.message : String(error)}`);
+    } else if (loggedFailures === 5) {
+      log("additional project watch failures suppressed");
+    }
+    loggedFailures += 1;
+  };
+
+  const addDirectory = (dir: string, isRoot = false) => {
+    if (closed || watchedDirs.has(dir)) {
+      return;
+    }
+    if (!isRoot && isIgnoredWatchDirectory(dir)) {
+      return;
+    }
+
+    try {
+      const stat = lstatSync(dir);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        return;
+      }
+    } catch {
+      return;
+    }
+
+    try {
+      const watcher = watch(dir, { recursive: false }, (_eventType, relativePath) => {
+        if (closed || !relativePath) {
+          return;
+        }
+
+        const absolutePath = join(dir, relativePath);
+        if (isIgnoredPath(absolutePath)) {
+          return;
+        }
+
+        if (existsSync(absolutePath)) {
+          try {
+            const stat = lstatSync(absolutePath);
+            if (stat.isDirectory() && !stat.isSymbolicLink()) {
+              addDirectory(absolutePath);
+            }
+          } catch {}
+        }
+
+        onChange(absolutePath);
+      });
+      attachWatcherErrorHandler(watcher, dir);
+      watchers.push(watcher);
+      watchedDirs.add(dir);
+    } catch (error) {
+      if (isRoot) {
+        throw error;
+      }
+      logWatchFailure(dir, error);
+      return;
+    }
+
+    let entries: ReturnType<typeof readdirSync>;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) {
+        continue;
+      }
+      addDirectory(join(dir, entry.name));
+    }
+  };
+
+  addDirectory(rootPath, true);
+
+  return {
+    close: () => {
+      closed = true;
+      for (const watcher of watchers) {
+        try {
+          watcher.close();
+        } catch {}
+      }
+    },
+  };
+}
+
 function syncProjectWatchers() {
   const projects = listProjectMounts();
   const nextKeys = new Set(
@@ -2403,23 +2565,14 @@ function syncProjectWatchers() {
     }
 
     try {
-      const watcher = watch(
-        project.path,
-        { recursive: true },
-        (_eventType, relativePath) => {
-          if (!relativePath) {
-            return;
-          }
+      const watcher = createProjectDirectoryWatcher(project.path, (absolutePath) => {
+        if (isIgnoredPath(absolutePath)) {
+          return;
+        }
 
-          const absolutePath = join(project.path, relativePath);
-          if (isIgnoredPath(absolutePath)) {
-            return;
-          }
-
-          emitFileWatchEvent(absolutePath, project.workspaceId);
-          scheduleRefresh(`project ${project.name}`);
-        },
-      );
+        emitFileWatchEvent(absolutePath, project.workspaceId);
+        scheduleRefresh(`project ${project.name}`);
+      });
       directoryWatchers.set(project.key, watcher);
     } catch (error) {
       log(
@@ -3757,7 +3910,7 @@ async function addProjectMount(params: {
     workspaceId: workspace.key,
     name: projectName,
     instanceId: params.instanceId || "host-machine",
-    instanceLabel: params.instanceLabel || "host-machine",
+    instanceLabel: params.instanceLabel || hostname() || "This Machine",
     path: resolvedPath,
     kind: params.kind || "code",
     status: "ready",
@@ -4218,13 +4371,15 @@ async function handleBunnyDashRequest(method: string, params: any) {
         emitSetProjects();
         return result;
       });
-    case "syncWorkspace":
-      log(`syncWorkspace request: workspace=${getCurrentWorkspace().key}`);
+    case "syncWorkspace": {
+      const workspaceId = String(params?.workspace?.id || getCurrentWorkspace().key);
+      log(`syncWorkspace request: workspace=${workspaceId}`);
       bunnyDashState.workspaces ||= {};
-      bunnyDashState.workspaces[getCurrentWorkspace().key] = params.workspace;
+      bunnyDashState.workspaces[workspaceId] = params.workspace;
       await saveState();
       emitSetProjectsForWindow(getCurrentWindow().id);
       return;
+    }
     case "syncAppSettings":
       bunnyDashState.appSettings = params.appSettings;
       await writePersistedDashState();
@@ -4670,7 +4825,7 @@ self.onmessage = async (event) => {
     initializeRuntimeContext(message);
     await ensureBootPromise();
     // Sync auth from ears if the init message brought an auth token
-    if (app.authToken && !cloudApi) {
+    if ((runtimeAuthToken || app.authToken) && !cloudApi) {
       syncAuthFromEars().catch(() => {});
     }
     return;

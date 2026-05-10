@@ -16,7 +16,9 @@ pub fn build(b: *std.Build) void {
     exe.linkLibCpp();
     
     // Link system frameworks (macOS)
-    exe.linkFramework("Accelerate");
+    if (target.result.os.tag == .macos) {
+        exe.linkFramework("Accelerate");
+    }
     
     // Add include paths
     exe.addIncludePath(b.path("deps/llama.cpp/include"));

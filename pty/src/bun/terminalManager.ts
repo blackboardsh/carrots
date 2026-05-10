@@ -1,5 +1,6 @@
 import { spawn } from "bun";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -71,15 +72,44 @@ export class TerminalManager {
 
   constructor(private readonly emit: (message: TerminalMessage) => void) {}
 
-  createTerminal(cwd: string = process.cwd(), shell?: string, cols = 80, rows = 24): string {
-    const terminalId = randomUUID();
+  private resolveShell(shell?: string) {
     const defaultShell =
       process.platform === "win32"
         ? "cmd.exe"
         : process.platform === "darwin"
           ? "/bin/zsh"
           : "/bin/bash";
-    const terminalShell = shell || process.env.SHELL || defaultShell;
+
+    const candidates = [shell, process.env.SHELL, defaultShell, "/bin/sh"];
+    for (const candidate of candidates) {
+      const trimmed = candidate?.trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      if (process.platform === "win32") {
+        return trimmed;
+      }
+
+      if (trimmed.includes("/")) {
+        if (existsSync(trimmed)) {
+          return trimmed;
+        }
+        continue;
+      }
+
+      const resolved = Bun.which(trimmed);
+      if (resolved) {
+        return resolved;
+      }
+    }
+
+    return defaultShell;
+  }
+
+  createTerminal(cwd: string = process.cwd(), shell?: string, cols = 80, rows = 24): string {
+    const terminalId = randomUUID();
+    const terminalShell = this.resolveShell(shell);
     const workerDir = dirname(fileURLToPath(import.meta.url));
     const ptyBinaryPath = join(workerDir, PTY_BINARY_NAME);
 

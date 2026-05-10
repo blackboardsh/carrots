@@ -45,6 +45,7 @@ var child_pid: ?posix.pid_t = null;
 
 fn openPty() !posix.fd_t {
     const c = @cImport({
+        @cDefine("_GNU_SOURCE", "1");
         @cInclude("stdlib.h");
         @cInclude("unistd.h");
         @cInclude("fcntl.h");
@@ -65,11 +66,21 @@ fn openPty() !posix.fd_t {
         return error.UnlockPtFailed;
     }
 
+    // Set non-blocking mode
+    const flags = c.fcntl(master_fd, c.F_GETFL, @as(c_int, 0));
+    if (flags < 0) {
+        return error.FcntlFailed;
+    }
+    if (c.fcntl(master_fd, c.F_SETFL, flags | c.O_NONBLOCK) < 0) {
+        return error.FcntlFailed;
+    }
+
     return @intCast(master_fd);
 }
 
 fn getPtyName(master_fd: posix.fd_t) ![]const u8 {
     const c = @cImport({
+        @cDefine("_GNU_SOURCE", "1");
         @cInclude("stdlib.h");
     });
 
@@ -89,6 +100,7 @@ fn spawnShell(shell: []const u8, cwd: []const u8, cols: u32, rows: u32) !void {
     defer allocator.free(pty_name);
 
     const c = @cImport({
+        @cDefine("_GNU_SOURCE", "1");
         @cInclude("unistd.h");
         @cInclude("fcntl.h");
         @cInclude("sys/ioctl.h");
@@ -154,6 +166,14 @@ fn spawnShell(shell: []const u8, cwd: []const u8, cols: u32, rows: u32) !void {
         };
 
         sendOutputMessage("ready", null, null) catch {};
+
+        // Give the child process a moment to fully initialize
+        std.time.sleep(50 * std.time.ns_per_ms);
+
+        // Send initial CWD
+        getCurrentWorkingDirectory() catch {
+            // Ignore error on initial CWD fetch
+        };
     }
 }
 
@@ -168,28 +188,42 @@ fn writeToShell(data: []const u8) !void {
 
 fn getCurrentWorkingDirectory() !void {
     if (child_pid) |pid| {
-        const c = @cImport({
-            @cInclude("libproc.h");
-            @cInclude("stdlib.h");
-        });
+        if (@import("builtin").os.tag == .linux) {
+            // On Linux, read /proc/{pid}/cwd symlink
+            var buf: [4096]u8 = undefined;
+            const cwd_link = try std.fmt.bufPrint(&buf, "/proc/{d}/cwd", .{pid});
+            var path_buffer: [4096]u8 = undefined;
 
-        var path_buffer: [4096]u8 = undefined;
-        const result = c.proc_pidpath(@intCast(pid), &path_buffer, path_buffer.len);
+            const cwd_slice = std.posix.readlink(cwd_link, &path_buffer) catch {
+                // Just silently ignore errors for now
+                return;
+            };
 
-        if (result > 0) {
-            const vnodepathinfo_size = @sizeOf(c.proc_vnodepathinfo);
-            var vnode_info: c.proc_vnodepathinfo = undefined;
+            try sendOutputMessage("cwd_update", cwd_slice, null);
+        } else if (@import("builtin").os.tag == .macos) {
+            const c = @cImport({
+                @cInclude("libproc.h");
+                @cInclude("stdlib.h");
+            });
 
-            const info_result = c.proc_pidinfo(@intCast(pid), c.PROC_PIDVNODEPATHINFO, 0, &vnode_info, vnodepathinfo_size);
+            var path_buffer: [4096]u8 = undefined;
+            const result = c.proc_pidpath(@intCast(pid), &path_buffer, path_buffer.len);
 
-            if (info_result == vnodepathinfo_size) {
-                const cwd_path = std.mem.sliceTo(&vnode_info.pvi_cdir.vip_path, 0);
-                try sendOutputMessage("cwd_update", cwd_path, null);
+            if (result > 0) {
+                const vnodepathinfo_size = @sizeOf(c.proc_vnodepathinfo);
+                var vnode_info: c.proc_vnodepathinfo = undefined;
+
+                const info_result = c.proc_pidinfo(@intCast(pid), c.PROC_PIDVNODEPATHINFO, 0, &vnode_info, vnodepathinfo_size);
+
+                if (info_result == vnodepathinfo_size) {
+                    const cwd_path = std.mem.sliceTo(&vnode_info.pvi_cdir.vip_path, 0);
+                    try sendOutputMessage("cwd_update", cwd_path, null);
+                } else {
+                    try sendOutputMessage("error", null, "Failed to get CWD via proc_pidinfo");
+                }
             } else {
-                try sendOutputMessage("error", null, "Failed to get CWD via proc_pidinfo");
+                try sendOutputMessage("error", null, "Failed to get process info");
             }
-        } else {
-            try sendOutputMessage("error", null, "Failed to get process info");
         }
     }
 }
@@ -290,11 +324,12 @@ fn readPtyOutput() !void {
         while (true) {
             const bytes_read = c.read(@intCast(master), &buffer, buffer.len);
             if (bytes_read < 0) {
-                const errno_val = c.__error().*;
-                if (errno_val == c.EAGAIN or errno_val == c.EWOULDBLOCK) {
-                    continue;
-                } else {
-                    break;
+                switch (std.posix.errno(bytes_read)) {
+                    .AGAIN => {
+                        std.time.sleep(10 * std.time.ns_per_ms);
+                        continue;
+                    },
+                    else => break,
                 }
             }
 

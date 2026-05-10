@@ -22,14 +22,20 @@ const vendorDest = join(carrotDir, "vendor");
 console.log("[git postBuild] Copying vendor binaries...");
 cpSync(vendorSrc, vendorDest, { recursive: true });
 
-// Ensure binaries are executable
-for (const entry of readdirSync(vendorDest)) {
-	const fullPath = join(vendorDest, entry);
-	if (statSync(fullPath).isFile()) {
-		try {
-			chmodSync(fullPath, 0o755);
-		} catch {}
+// Ensure binaries are executable (recursively for platform subdirectories)
+function makeExecutable(dir: string) {
+	for (const entry of readdirSync(dir)) {
+		const fullPath = join(dir, entry);
+		const stat = statSync(fullPath);
+		if (stat.isFile()) {
+			try {
+				chmodSync(fullPath, 0o755);
+			} catch {}
+		} else if (stat.isDirectory()) {
+			makeExecutable(fullPath);
+		}
 	}
 }
+makeExecutable(vendorDest);
 
 console.log("[git postBuild] Done");

@@ -3,6 +3,10 @@ export type CurrentDocumentTypes = {
     id: string;
     name: string;
     path: string;
+    instanceId?: string;
+    instanceLabel?: string;
+    kind?: string;
+    status?: string;
   };
   workspaces: {
     id: string;

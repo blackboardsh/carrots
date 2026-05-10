@@ -11,7 +11,7 @@
     "test:integration": "bun test tests/carrot.integration.test.ts"
   },
   "dependencies": {
-    "electrobun": "1.17.3-beta.5",
+    "electrobun": "file:../../../electrobun/package",
     "goldfishdb": "*"
   }
 }

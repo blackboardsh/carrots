@@ -118,6 +118,10 @@ export interface ProjectType {
   name: string;
   // slates: { [relativePath: string]: Slate };
   path: string;
+  instanceId?: string;
+  instanceLabel?: string;
+  kind?: string;
+  status?: string;
 }
 
 export type PreviewFolderNodeType = Omit<FolderNodeType, "children"> & {

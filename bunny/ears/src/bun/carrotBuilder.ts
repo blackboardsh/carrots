@@ -39,6 +39,43 @@ function getSdkBunModule() {
   return join(appRoot, "carrot-runtime", "bun.ts");
 }
 
+function getElectrobunPlatformSuffix() {
+  const osName =
+    process.platform === "darwin"
+      ? "macos"
+      : process.platform === "win32"
+        ? "windows"
+        : process.platform;
+
+  return `${osName}-${process.arch}`;
+}
+
+function chooseCurrentPlatformBuildDir(platformDirs: Array<string>) {
+  const platformSuffix = getElectrobunPlatformSuffix();
+  const matchingDirs = platformDirs
+    .filter((dir) => dir.endsWith(`-${platformSuffix}`))
+    .sort((a, b) => {
+      const aIsDev = a.startsWith("dev-");
+      const bIsDev = b.startsWith("dev-");
+      if (aIsDev !== bIsDev) {
+        return aIsDev ? -1 : 1;
+      }
+      return a.localeCompare(b);
+    });
+
+  if (matchingDirs[0]) {
+    return matchingDirs[0];
+  }
+
+  if (platformDirs.length === 1) {
+    return platformDirs[0];
+  }
+
+  throw new Error(
+    `No carrot build directory found for ${platformSuffix}. Found: ${platformDirs.join(", ")}`,
+  );
+}
+
 type CustomBuildContext = {
   sourceDir: string;
   outDir: string;
@@ -302,7 +339,8 @@ export async function buildCarrotSource(sourceDir: string, outDir: string) {
       throw new Error(`No platform build directory found in ${buildRoot}`);
     }
 
-    const carrotParent = join(buildRoot, platformDirs[0], "carrot");
+    const platformDir = chooseCurrentPlatformBuildDir(platformDirs);
+    const carrotParent = join(buildRoot, platformDir, "carrot");
     if (!existsSync(carrotParent)) {
       throw new Error(`No carrot output found in ${carrotParent}. Is build.carrot configured?`);
     }

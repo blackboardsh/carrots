@@ -55,6 +55,7 @@ import {
 	getRootPane,
 	getUniqueId,
 	getWindow,
+	insertPaneTabId,
 	openFileAt,
 	openNewTab,
 	openNewTabForNode,
@@ -133,6 +134,30 @@ import { WebSlate } from "./slates/WebSlate";
 const defaultWebFaviconUrl = () => "views://assets/file-icons/bookmark.svg";
 
 // Removed DEFAULT_HOME_URL - no longer needed without new tab button
+
+const collectPaneTabIds = (
+	pane: PaneLayoutType | undefined,
+	tabIds: Array<string>,
+	seen: Set<string>,
+) => {
+	if (!pane) {
+		return;
+	}
+
+	if (pane.type === "pane") {
+		for (const tabId of pane.tabIds) {
+			if (!seen.has(tabId)) {
+				seen.add(tabId);
+				tabIds.push(tabId);
+			}
+		}
+		return;
+	}
+
+	for (const childPane of pane.panes) {
+		collectPaneTabIds(childPane, tabIds, seen);
+	}
+};
 
 // Global ref for Find All input (for keyboard shortcut)
 let globalFindAllInput: HTMLInputElement | undefined;
@@ -418,7 +443,7 @@ const moveTabToPane = (
 			if (targetPane?.type !== "pane") {
 				return;
 			}
-			targetPane.tabIds.splice(targetTabIndex, 0, tabId);
+			insertPaneTabId(targetPane, tabId, targetTabIndex);
 			tab.paneId = targetPaneId;
 
 			if (oldPane.currentTabId === tabId) {
@@ -596,6 +621,16 @@ const App = () => {
 	// );
 
 	const githubAuthUrl = () => state.githubAuth.authUrl || "";
+	const workbenchTabIds = createMemo(() => {
+		const win = getWindow();
+		if (!win) {
+			return [];
+		}
+
+		const tabIds: Array<string> = [];
+		collectPaneTabIds(win.rootPane, tabIds, new Set());
+		return tabIds.filter((tabId) => Boolean(win.tabs[tabId]));
+	});
 
 	// YYY - Electron.WebviewTag;
 	let githubAuthWebview: any; //
@@ -965,7 +1000,7 @@ const App = () => {
 								ref={shadowHost}
 								style="width:100%; height: 100%"
 							>
-								<For each={Object.keys(getWindow()?.tabs || {})}>
+								<For each={workbenchTabIds()}>
 									{(tabId) => <TabContent tabId={tabId} />}
 								</For>
 							</div>
@@ -2204,9 +2239,6 @@ const TabContent = ({ tabId }: { tabId: string }) => {
 	// we should get this by tabId directly
 	const tab = () => getWindow()?.tabs[tabId];
 
-	// todo (yoav): rename pane and tab slots to make it more obvious what id is used
-	const paneSlot = () => `paneslot-${tab()?.id}`;
-
 	// todo (yoav): add a preload script to the webview wired up with typescript
 	// ideally we could inline it so allow dynamic scripts based on the url.
 	// maybe it just calls back with certain events.
@@ -2235,7 +2267,7 @@ const TabContent = ({ tabId }: { tabId: string }) => {
 		<div
 			class="tabcontent"
 			data-tabId={tabId}
-			slot={paneSlot()}
+			slot={`paneslot-${tabId}`}
 			style={{
 				height: "100%",
 				width: "100%",

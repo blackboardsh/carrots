@@ -5,16 +5,112 @@ import * as os from "os";
 
 // Path to macOS osxkeychain credential helper (if available)
 const OSXKEYCHAIN_HELPER = "/Library/Developer/CommandLineTools/usr/libexec/git-core/git-credential-osxkeychain";
-const DEFAULT_GIT_VENDOR_PATH = process.env.BUNNY_GIT_VENDOR_PATH || path.join(import.meta.dir, "vendor");
-const GIT_EXEC_PATH = process.env.BUNNY_GIT_EXEC_PATH || DEFAULT_GIT_VENDOR_PATH;
-const GIT_BINARY_PATH =
-  process.env.BUNNY_GIT_BINARY_PATH ||
-  path.join(GIT_EXEC_PATH, process.platform === "win32" ? "git.exe" : "git");
+
+function getPlatformArch() {
+  const platform = process.platform;
+  const arch = process.arch;
+
+  if (platform === "darwin") {
+    return arch === "arm64" ? "darwin-arm64" : "darwin-x64";
+  }
+
+  if (platform === "linux") {
+    return arch === "arm64" ? "linux-arm64" : "linux-x64";
+  }
+
+  if (platform === "win32") {
+    return arch === "arm64" ? "win-arm64" : "win-x64";
+  }
+
+  return platform;
+}
+
+type ResolvedGitBinary = {
+  binary: string;
+  execPath: string | null;
+};
+
+function pathExists(candidate: string | undefined) {
+  return Boolean(candidate && fs.existsSync(candidate));
+}
+
+function commandExists(candidate: string) {
+  return Boolean(Bun.which(candidate));
+}
+
+function isUsableGitBinary(binary: string) {
+  if (!pathExists(binary) && !commandExists(binary)) {
+    return false;
+  }
+
+  const result = Bun.spawnSync([binary, "--exec-path"], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  return result.exitCode === 0;
+}
+
+function resolveGitBinary(): ResolvedGitBinary {
+  const execName = process.platform === "win32" ? "git.exe" : "git";
+  const vendorRoot = process.env.BUNNY_GIT_VENDOR_PATH || path.join(import.meta.dir, "vendor");
+  const platformVendorDir = path.join(vendorRoot, platformArch);
+  const envExecPath = process.env.BUNNY_GIT_EXEC_PATH;
+  const envBinaryPath = process.env.BUNNY_GIT_BINARY_PATH;
+  const candidates: ResolvedGitBinary[] = [];
+
+  if (envBinaryPath) {
+    candidates.push({
+      binary: envBinaryPath,
+      execPath: envExecPath ?? null,
+    });
+  }
+
+  if (envExecPath) {
+    candidates.push({
+      binary: path.join(envExecPath, execName),
+      execPath: envExecPath,
+    });
+  }
+
+  candidates.push(
+    {
+      binary: path.join(platformVendorDir, execName),
+      execPath: platformVendorDir,
+    },
+    {
+      binary: path.join(vendorRoot, execName),
+      execPath: vendorRoot,
+    },
+  );
+
+  const systemGit = Bun.which("git");
+  if (systemGit) {
+    candidates.push({
+      binary: systemGit,
+      execPath: null,
+    });
+  }
+
+  for (const candidate of candidates) {
+    if (isUsableGitBinary(candidate.binary)) {
+      return candidate;
+    }
+  }
+
+  return {
+    binary: systemGit || "git",
+    execPath: null,
+  };
+}
+
+const platformArch = getPlatformArch();
+const resolvedGit = resolveGitBinary();
+const GIT_BINARY_PATH = resolvedGit.binary;
 
 // HOME ensures git can find ~/.gitconfig for user.name and user.email.
 const gitEnv = {
   HOME: os.homedir(),
-  ...(GIT_EXEC_PATH ? { GIT_EXEC_PATH } : {}),
+  ...(resolvedGit.execPath ? { GIT_EXEC_PATH: resolvedGit.execPath } : {}),
 };
 
 // Check if osxkeychain helper is available for credential management
@@ -61,7 +157,7 @@ const getInitialCommitEnv = async (baseDir: string) => {
 };
 
 export const getGitStatus = async (): Promise<{ installed: boolean; version: string }> => {
-  const installed = fs.existsSync(GIT_BINARY_PATH);
+  const installed = pathExists(GIT_BINARY_PATH) || commandExists(GIT_BINARY_PATH);
   if (!installed) {
     return { installed: false, version: "" };
   }
@@ -70,7 +166,8 @@ export const getGitStatus = async (): Promise<{ installed: boolean; version: str
     // result is e.g. "git version 2.43.0\n"
     const match = String(result).match(/git version ([\w.]+)/);
     return { installed: true, version: match ? match[1] : "" };
-  } catch {
+  } catch (error) {
+    console.error("[git] Error getting git version:", error);
     return { installed: true, version: "" };
   }
 };

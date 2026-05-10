@@ -10,7 +10,7 @@ import {
   Updater,
 } from "electrobun/bun";
 import { existsSync, mkdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type {
   CarrotPermissionConsentRequest,
   CarrotPermissionGrant,
@@ -25,6 +25,7 @@ import {
 import {
   getInstalledCarrotsRoot,
   getInstalledCarrot,
+  installDevCarrotFromSource,
   loadInstalledCarrots,
   prepareArtifactCarrotInstall,
   prepareDevCarrotInstallFromSource,
@@ -936,14 +937,21 @@ class CarrotInstance {
         // Forward to Hop remote browsers (using electrobun RPC message format)
         if (runtime.hopWs && this.hopBrowserIds.size > 0) {
           for (const browserId of this.hopBrowserIds) {
-            runtime.hopWs.send(JSON.stringify({
-              browserId,
-              payload: {
-                type: "message",
-                id: eventPayload.name,
-                payload: eventPayload.payload,
-              },
-            }));
+            try {
+              runtime.hopWs.send(JSON.stringify({
+                browserId,
+                payload: {
+                  type: "message",
+                  id: eventPayload.name,
+                  payload: eventPayload.payload,
+                },
+              }));
+            } catch (err) {
+              console.warn(
+                "[hop] Failed to forward view message:",
+                err instanceof Error ? err.message : err,
+              );
+            }
           }
         }
         break;
@@ -1345,6 +1353,11 @@ class BunnyEarsRuntime {
   }
 
   private connectToHop() {
+    if (isHopDisabled()) {
+      console.log("[hop] Disabled by BUNNY_DISABLE_HOP");
+      return;
+    }
+
     const hopBaseUrl = this.channel === "stable"
       ? "wss://hop.electrobunny.ai"
       : this.channel === "dev"
@@ -1668,7 +1681,7 @@ class BunnyEarsRuntime {
     const apiBase = this.channel === "dev"
       ? "http://localhost:8787"
       : this.channel === "canary"
-        ? "https://staging-api.electrobunny.ai"
+        ? "http://localhost:8787"
         : "https://api.electrobunny.ai";
 
     try {
@@ -1696,7 +1709,7 @@ class BunnyEarsRuntime {
     const apiBase = this.channel === "dev"
       ? "http://localhost:8787"
       : this.channel === "canary"
-        ? "https://staging-api.electrobunny.ai"
+        ? "http://localhost:8787"
         : "https://api.electrobunny.ai";
 
     try {
@@ -1738,7 +1751,7 @@ class BunnyEarsRuntime {
     const apiBase = this.channel === "dev"
       ? "http://localhost:8787"
       : this.channel === "canary"
-        ? "https://staging-api.electrobunny.ai"
+        ? "http://localhost:8787"
         : "https://api.electrobunny.ai";
 
     try {
@@ -1787,6 +1800,7 @@ class BunnyEarsRuntime {
             carrot.sendEvent("auth-token-changed", { token });
           }
         }
+        this.registerInstanceWithToken(token).catch(() => {});
       }
       return token;
     } catch (err) {
@@ -2766,6 +2780,80 @@ const FOUNDATION_CARROTS = [
   { id: "bunny-dash", artifact: "bunny-dash-0.1.0.tar.zst" },
 ];
 
+const DEV_FOUNDATION_CARROTS = [
+  { id: "bunny.git", directory: "git" },
+  { id: "bunny.pty", directory: "pty" },
+  { id: "bunny.search", directory: "search" },
+  { id: "bunny.tsserver", directory: "tsserver" },
+  { id: "bunny.biome", directory: "biome" },
+  { id: "bunny.llama", directory: "llama" },
+  { id: "bunny-dash", directory: "dash" },
+] as const;
+
+function isHopDisabled() {
+  const value = process.env.BUNNY_DISABLE_HOP || process.env.BUNNY_EARS_DISABLE_HOP;
+  return value === "1" || value === "true";
+}
+
+function looksLikeCarrotsRepoRoot(path: string) {
+  return DEV_FOUNDATION_CARROTS.every((carrot) =>
+    existsSync(join(path, carrot.directory, "electrobun.config.ts")),
+  );
+}
+
+function resolveDevCarrotsBaseDir() {
+  const candidates = [
+    process.env.CARROTS_BASE_DIR,
+    resolve(process.cwd(), "../.."),
+    resolve(import.meta.dir, "..", "..", "..", ".."),
+    resolve(import.meta.dir, "..", "..", "..", "..", ".."),
+  ].filter((candidate): candidate is string => typeof candidate === "string" && candidate.length > 0);
+
+  for (const candidate of candidates) {
+    if (looksLikeCarrotsRepoRoot(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+async function ensureDevFoundationCarrotsInstalled() {
+  const carrotsBaseDir = resolveDevCarrotsBaseDir();
+  if (!carrotsBaseDir) {
+    console.warn(
+      "[bunny-ears] Could not find local carrots source root. Set CARROTS_BASE_DIR to enable dev carrot installs.",
+    );
+    return;
+  }
+
+  console.log(`[bunny-ears] Ensuring dev foundation carrots from ${carrotsBaseDir}`);
+
+  for (const carrot of DEV_FOUNDATION_CARROTS) {
+    const carrotPath = join(carrotsBaseDir, carrot.directory);
+    const installed = getInstalledCarrot(carrot.id);
+    const alreadyDevSource =
+      installed?.install.devMode === true &&
+      installed.install.source.kind === "local" &&
+      resolve(installed.install.source.path) === carrotPath;
+
+    if (alreadyDevSource) {
+      continue;
+    }
+
+    console.log(`[bunny-ears] Installing ${carrot.id} from ${carrotPath}...`);
+    try {
+      await installDevCarrotFromSource(carrotPath);
+      console.log(`[bunny-ears] Installed ${carrot.id}`);
+    } catch (error) {
+      console.error(
+        `[bunny-ears] Failed to install ${carrot.id}:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+}
+
 async function installFoundationCarrotsFromR2(channel: string, forceReinstall: boolean) {
   const baseUrl = channel === "stable"
     ? "https://carrots.electrobunny.ai"
@@ -2803,6 +2891,8 @@ if (channel === "dev") {
   if (refreshErrors.length > 0) {
     console.error("[bunny-ears] dev carrot refresh failures", refreshErrors);
   }
+
+  await ensureDevFoundationCarrotsInstalled();
 } else {
   await installFoundationCarrotsFromR2(channel, false);
 }

@@ -15,6 +15,15 @@ if (!carrotDir) {
 }
 
 const LLAMA_BINARY_NAME = process.platform === "win32" ? "llama-cli.exe" : "llama-cli";
+const requireLlamaCli = process.env.BUNNY_LLAMA_REQUIRE_CLI === "1";
+
+function skipOptionalLlamaCli(message: string) {
+	if (requireLlamaCli) {
+		throw new Error(message);
+	}
+	console.warn(`[llama postBuild] ${message}`);
+	console.warn("[llama postBuild] Continuing without bundled llama-cli.");
+}
 
 // Check for override binary
 const overrideBin = process.env.BUNNY_LLAMA_CLI_BIN;
@@ -27,9 +36,15 @@ if (overrideBin && existsSync(overrideBin)) {
 // Build from source
 const llamaCliSourceDir = join(sourceDir, "llama-cli");
 if (!existsSync(join(llamaCliSourceDir, "build.zig"))) {
-	console.error(`[llama postBuild] Missing llama-cli source at ${llamaCliSourceDir}`);
-	console.error("Run: cd llama/llama-cli && bash setup-llama.sh");
-	process.exit(1);
+	skipOptionalLlamaCli(`Missing llama-cli source at ${llamaCliSourceDir}`);
+	process.exit(0);
+}
+
+if (!existsSync(join(llamaCliSourceDir, "deps", "llama.cpp", "build"))) {
+	skipOptionalLlamaCli(
+		`Missing llama.cpp build outputs. Run: cd ${llamaCliSourceDir} && bash setup-llama.sh and build llama.cpp.`,
+	);
+	process.exit(0);
 }
 
 const zigName = process.platform === "win32" ? "zig.exe" : "zig";
@@ -46,7 +61,12 @@ if (!zigBinary) {
 }
 
 console.log("[llama postBuild] Building llama-cli with Zig...");
-execFileSync(zigBinary, ["build"], { cwd: llamaCliSourceDir, stdio: "pipe" });
+try {
+	execFileSync(zigBinary, ["build"], { cwd: llamaCliSourceDir, stdio: "pipe" });
+} catch (error) {
+	skipOptionalLlamaCli(error instanceof Error ? error.message : String(error));
+	process.exit(0);
+}
 
 const builtBinary = join(llamaCliSourceDir, "zig-out", "bin", LLAMA_BINARY_NAME);
 if (!existsSync(builtBinary)) {

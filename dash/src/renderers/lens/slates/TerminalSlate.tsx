@@ -241,9 +241,10 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
       });
 
       // Create terminal in bun process after listeners and xterm are ready.
+      const requestedShell = _tab.cmd?.trim();
       const id = await electrobun.rpc?.request.createTerminal({
         cwd: _tab.cwd || "/",
-        shell: _tab.cmd,
+        shell: requestedShell || undefined,
       });
 
       if (!id) {

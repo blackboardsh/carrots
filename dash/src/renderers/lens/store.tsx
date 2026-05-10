@@ -742,6 +742,50 @@ export const walkPanes = (
   }
 };
 
+const getFirstPane = (rootPane: PaneLayoutType): LayoutPaneType | undefined => {
+  const pane = walkPanes(rootPane, (_pane) => _pane.type === "pane");
+  return pane?.type === "pane" ? pane : undefined;
+};
+
+const getTargetPaneForNewTab = (
+  _state: AppState,
+  opts: { targetPaneId?: string }
+) => {
+  const rootPane = getRootPane(_state);
+  if (!rootPane) {
+    return;
+  }
+
+  if (opts.targetPaneId) {
+    const targetPane = walkPanesForId(rootPane, opts.targetPaneId);
+    return targetPane?.type === "pane" ? targetPane : undefined;
+  }
+
+  const currentPane = getCurrentPane(_state);
+  if (currentPane?.type === "pane") {
+    return currentPane;
+  }
+
+  return rootPane.type === "pane" ? rootPane : getFirstPane(rootPane);
+};
+
+export const insertPaneTabId = (
+  pane: LayoutPaneType,
+  tabId: string,
+  targetTabIndex?: number
+) => {
+  const nextTabIds = pane.tabIds.filter((id) => id !== tabId);
+
+  if (typeof targetTabIndex === "number") {
+    const insertIndex = Math.max(0, Math.min(targetTabIndex, nextTabIds.length));
+    nextTabIds.splice(insertIndex, 0, tabId);
+  } else {
+    nextTabIds.push(tabId);
+  }
+
+  pane.tabIds = nextTabIds;
+};
+
 export const getCurrentPane = (_state: AppState = state) => {
   const rootPane = getRootPane(_state);
   const currentPaneId = getWindow(_state)?.currentPaneId;
@@ -768,16 +812,7 @@ export const openNewTab = (
         return;
       }
 
-      const rootPane = getRootPane(_state);
-
-      if (!rootPane) {
-        return;
-      }
-
-      const pane =
-        "targetPaneId" in opts
-          ? walkPanesForId(rootPane, opts.targetPaneId)
-          : getCurrentPane(_state) || rootPane;
+      const pane = getTargetPaneForNewTab(_state, opts);
 
       if (pane?.type !== "pane") {
         return;
@@ -797,10 +832,7 @@ export const openNewTab = (
           // close the old preview tab completely and let a new one be created below.
           // This ensures proper component lifecycle (cleanup, fresh state, etc.)
           delete win.tabs[currentTabId];
-          const tabIndex = pane.tabIds.indexOf(currentTabId);
-          if (tabIndex !== -1) {
-            pane.tabIds.splice(tabIndex, 1);
-          }
+          pane.tabIds = pane.tabIds.filter((id) => id !== currentTabId);
         }
       }
 
@@ -814,13 +846,13 @@ export const openNewTab = (
 
       win.tabs[tabId] = newPreviewTab;
 
-      if ("targetTabIndex" in opts && typeof opts.targetTabIndex === "number") {
-        // Note: splice mutates the array
-        pane.tabIds.splice(opts.targetTabIndex, 0, tabId);
-      } else {
-        pane.tabIds.push(tabId);
-      }
+      insertPaneTabId(
+        pane,
+        tabId,
+        "targetTabIndex" in opts ? opts.targetTabIndex : undefined,
+      );
       pane.currentTabId = tabId;
+      win.currentPaneId = pane.id;
     })
   );
   updateSyncedState();
@@ -859,16 +891,7 @@ export const openNewTabForNode = (
         return;
       }
 
-      const rootPane = getRootPane(_state);
-
-      if (!rootPane) {
-        return;
-      }
-
-      const pane =
-        "targetPaneId" in opts
-          ? walkPanesForId(rootPane, opts.targetPaneId)
-          : getCurrentPane(_state) || rootPane;
+      const pane = getTargetPaneForNewTab(_state, opts);
 
       if (pane?.type !== "pane") {
         return;
@@ -891,10 +914,7 @@ export const openNewTabForNode = (
           // close the old preview tab completely and let a new one be created below.
           // This ensures proper component lifecycle (cleanup, fresh state, etc.)
           delete win.tabs[currentTabId];
-          const tabIndex = pane.tabIds.indexOf(currentTabId);
-          if (tabIndex !== -1) {
-            pane.tabIds.splice(tabIndex, 1);
-          }
+          pane.tabIds = pane.tabIds.filter((id) => id !== currentTabId);
         }
       }
 
@@ -924,14 +944,14 @@ export const openNewTabForNode = (
 
       win.tabs[tabId] = newPreviewTab;
 
-      if ("targetTabIndex" in opts && typeof opts.targetTabIndex === "number") {
-        // Note: splice mutates the array
-        pane.tabIds.splice(opts.targetTabIndex, 0, tabId);
-      } else {
-        pane.tabIds.push(tabId);
-      }
+      insertPaneTabId(
+        pane,
+        tabId,
+        "targetTabIndex" in opts ? opts.targetTabIndex : undefined,
+      );
       if (focusNewTab) {
         pane.currentTabId = tabId;
+        win.currentPaneId = pane.id;
       }
     })
   );
@@ -946,7 +966,7 @@ export const openNewTerminalTab = (
     type: "terminal",
     path: cwd || "/",
     cwd: cwd || "/",
-    cmd: "/bin/zsh", // This will be overridden by the terminal manager based on platform
+    cmd: "",
     args: [],
     isPreview: false,
   };
@@ -1087,6 +1107,22 @@ export const closeTab = (tabId: string) => {
       }
 
       const tab = win.tabs[tabId];
+      if (!tab) {
+        const rootPane = getRootPane(_state);
+        if (rootPane) {
+          walkPanes(rootPane, (pane) => {
+            if (pane.type !== "pane") {
+              return false;
+            }
+            pane.tabIds = pane.tabIds.filter((id) => id !== tabId);
+            if (pane.currentTabId === tabId) {
+              pane.currentTabId = pane.tabIds[0] || "";
+            }
+            return false;
+          });
+        }
+        return;
+      }
       
       // If this is a terminal tab, kill the terminal process
       if (tab.type === "terminal" && tab.terminalId) {
@@ -1210,7 +1246,7 @@ export const splitPane = (
 
           win.tabs[clonedTabId] = clonedTab;
 
-          rightChildPane.tabIds.push(clonedTabId);
+          insertPaneTabId(rightChildPane, clonedTabId);
           rightChildPane.currentTabId = clonedTabId;
         }
       }
