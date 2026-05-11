@@ -9,6 +9,6 @@
 		"ears:test:integration": "cd bunny/ears && bun run test:integration"
 	},
 	"dependencies": {
-		"electrobun": "1.17.3-beta.5"
+		"electrobun": "1.18.4-beta.3"
 	}
 }
