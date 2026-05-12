@@ -47,6 +47,21 @@ export type CloudApiAuth = {
   refreshToken: string;
 };
 
+export type CloudUserProfile = {
+  id?: string;
+  email?: string;
+  name?: string;
+  email_verified?: boolean;
+};
+
+export type CloudDeviceToken = {
+  id: string;
+  machine_id: string;
+  name: string;
+  last_used_at: number | null;
+  created_at: number;
+};
+
 export class CloudApi {
   private baseUrl: string;
   private getAuth: () => CloudApiAuth;
@@ -120,6 +135,10 @@ export class CloudApi {
     return (await this.jsonOrThrow<{ instances: CloudInstance[] }>(res)).instances;
   }
 
+  async deleteInstance(id: string): Promise<void> {
+    await this.authedFetch("DELETE", `/v1/instances/${id}`);
+  }
+
   // Workspaces
   async listWorkspaces(): Promise<CloudWorkspace[]> {
     const res = await this.authedFetch("GET", "/v1/workspaces");
@@ -161,6 +180,29 @@ export class CloudApi {
 
   async deleteLens(workspaceId: string, lensId: string): Promise<void> {
     await this.authedFetch("DELETE", `/v1/workspaces/${workspaceId}/lenses/${lensId}`);
+  }
+
+  // User / device tokens
+  async getUserProfile(): Promise<CloudUserProfile> {
+    const res = await this.authedFetch("GET", "/v1/user/profile");
+    return (await this.jsonOrThrow<{ user: CloudUserProfile }>(res)).user;
+  }
+
+  async getDeviceTokens(): Promise<CloudDeviceToken[]> {
+    const res = await this.authedFetch("GET", "/v1/auth/device-tokens");
+    return (await this.jsonOrThrow<{ tokens: CloudDeviceToken[] }>(res)).tokens || [];
+  }
+
+  async createDeviceToken(machineId: string, name: string): Promise<{ id: string; token: string }> {
+    const res = await this.authedFetch("POST", "/v1/auth/device-tokens", {
+      machine_id: machineId,
+      name,
+    });
+    return await this.jsonOrThrow<{ id: string; token: string }>(res);
+  }
+
+  async deleteDeviceToken(tokenId: string): Promise<void> {
+    await this.authedFetch("DELETE", `/v1/auth/device-tokens/${tokenId}`);
   }
 }
 

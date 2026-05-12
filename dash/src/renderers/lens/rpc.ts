@@ -61,6 +61,78 @@ export type WorkspaceRPC = {
   // to bun
   bun: RPCSchema<{
     requests: {
+      openFarm: {
+        params: void;
+        response: {
+          ok: boolean;
+        };
+      };
+      logoutBunnyCloud: {
+        params: void;
+        response: {
+          ok: boolean;
+        };
+      };
+      getBunnyCloudOverview: {
+        params: void;
+        response: any;
+      };
+      loginBunnyCloud: {
+        params: {
+          mode: "login" | "register";
+          email: string;
+          password: string;
+          name?: string;
+        };
+        response: {
+          ok: boolean;
+          error?: string;
+          overview?: any;
+        };
+      };
+      registerCurrentBunnyCloudInstance: {
+        params: void;
+        response: {
+          ok: boolean;
+          error?: string;
+          overview?: any;
+        };
+      };
+      updateCurrentBunnyCloudCarrots: {
+        params: void;
+        response: {
+          ok: boolean;
+          overview?: any;
+        };
+      };
+      createBunnyCloudWorkspace: {
+        params: {
+          name: string;
+          description?: string;
+        };
+        response: {
+          ok: boolean;
+          overview?: any;
+        };
+      };
+      removeBunnyCloudInstance: {
+        params: {
+          instanceId: string;
+        };
+        response: {
+          ok: boolean;
+          overview?: any;
+        };
+      };
+      revokeBunnyCloudDevice: {
+        params: {
+          deviceTokenId: string;
+        };
+        response: {
+          ok: boolean;
+          overview?: any;
+        };
+      };
       getInitialState: {
         params: void;
         response: any;
@@ -1104,6 +1176,22 @@ export type WorkspaceRPC = {
         bunnyDash: {
           currentWorkspaceId: string;
           currentLensId: string;
+          instances: Array<{
+            id: string;
+            name: string;
+            os: string;
+            status: string;
+            isCurrent: boolean;
+            carrots: Array<{
+              id: string;
+              name: string;
+              description: string;
+              version: string;
+              mode: string;
+              permissions: string[];
+              status: string;
+            }>;
+          }>;
           workspaces: Array<{
             id: string;
             name: string;
@@ -1119,6 +1207,37 @@ export type WorkspaceRPC = {
               workspaceId: string;
               isCurrent: boolean;
               isDirty: boolean;
+            }>;
+          }>;
+          cloudWorkspaces: Array<{
+            id: string;
+            name: string;
+            subtitle: string;
+            runtimeWorkspaceId: string;
+            isCurrent: boolean;
+            canExpand: boolean;
+            lenses: Array<{
+              id: string;
+              name: string;
+              description: string;
+              workspaceId: string;
+              runtimeLensId: string;
+              isCurrent: boolean;
+            }>;
+            linkedInstances: Array<{
+              id: string;
+              name: string;
+              os: string;
+              status: string;
+              isCurrent: boolean;
+              mounts: Array<{
+                id: string;
+                workspaceId: string;
+                workspaceName: string;
+                instanceId: string;
+                path: string;
+                name: string;
+              }>;
             }>;
           }>;
         };

@@ -754,12 +754,16 @@ export async function rebuildInstalledDevCarrot(id: string) {
   }
 }
 
-export async function refreshTrackedDevCarrots() {
+export async function refreshTrackedDevCarrots(skipIds: Iterable<string> = []) {
   const errors: Array<{ id: string; error: string }> = [];
   const records = loadAllInstallRecords();
+  const skipped = new Set(skipIds);
 
   for (const record of records) {
     if (record.devMode !== true || record.source.kind !== "local") {
+      continue;
+    }
+    if (skipped.has(record.id)) {
       continue;
     }
 

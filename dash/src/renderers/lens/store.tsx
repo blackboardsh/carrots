@@ -88,6 +88,44 @@ export type BunnyDashWorkspaceTreeType = {
   lenses: BunnyDashLensType[];
 };
 
+export type BunnyDashCloudProjectMountType = {
+  id: string;
+  workspaceId: string;
+  workspaceName: string;
+  instanceId: string;
+  path: string;
+  name: string;
+};
+
+export type BunnyDashCloudWorkspaceLensType = {
+  id: string;
+  name: string;
+  description: string;
+  workspaceId: string;
+  runtimeLensId: string;
+  isCurrent: boolean;
+};
+
+export type BunnyDashCloudLinkedInstanceType = {
+  id: string;
+  name: string;
+  os: string;
+  status: string;
+  isCurrent: boolean;
+  mounts: BunnyDashCloudProjectMountType[];
+};
+
+export type BunnyDashCloudWorkspaceTreeType = {
+  id: string;
+  name: string;
+  subtitle: string;
+  runtimeWorkspaceId: string;
+  isCurrent: boolean;
+  canExpand: boolean;
+  lenses: BunnyDashCloudWorkspaceLensType[];
+  linkedInstances: BunnyDashCloudLinkedInstanceType[];
+};
+
 export type BaseTabType = {
   id: string;
   // todo (yoav): path should only be on file and browser profile tabs
@@ -241,6 +279,7 @@ export interface AppState {
     currentLensId: string;
     instances: BunnyDashInstanceType[];
     workspaces: BunnyDashWorkspaceTreeType[];
+    cloudWorkspaces: BunnyDashCloudWorkspaceTreeType[];
   };
   projects: { [id: string]: CurrentDocumentTypes["projects"] };
   tokens: any[];
@@ -493,6 +532,7 @@ const initialState: AppState = {
     currentLensId: "",
     instances: [],
     workspaces: [],
+    cloudWorkspaces: [],
   },
   windowId: "",
   editors: {},

@@ -4,9 +4,10 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CarrotManifest } from "../carrot-runtime/types";
 import { normalizeCarrotPermissions } from "../carrot-runtime/types";
@@ -74,6 +75,118 @@ function chooseCurrentPlatformBuildDir(platformDirs: Array<string>) {
   throw new Error(
     `No carrot build directory found for ${platformSuffix}. Found: ${platformDirs.join(", ")}`,
   );
+}
+
+function resolveLocalElectrobunPackageDir(sourceDir: string) {
+  let dir = resolve(sourceDir);
+
+  while (dir !== dirname(dir)) {
+    const candidate = join(dir, "electrobun", "package", "package.json");
+    if (existsSync(candidate)) {
+      return join(dir, "electrobun", "package");
+    }
+    dir = dirname(dir);
+  }
+
+  throw new Error(
+    `Unable to find local electrobun/package for carrot build starting from ${sourceDir}`,
+  );
+}
+
+function getDirectorySymlinkType(): "dir" | "junction" {
+  return process.platform === "win32" ? "junction" : "dir";
+}
+
+function readInstallStamp(stampPath: string) {
+  if (!existsSync(stampPath)) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(readFileSync(stampPath, "utf8")) as {
+      packageJsonText?: string;
+    };
+  } catch {
+    return null;
+  }
+}
+
+function ensureLocalElectrobunLink(sourceDir: string, electrobunPackageDir: string) {
+  const nodeModulesDir = join(sourceDir, "node_modules");
+  mkdirSync(nodeModulesDir, { recursive: true });
+
+  const targetLink = join(nodeModulesDir, "electrobun");
+  rmSync(targetLink, { recursive: true, force: true });
+  symlinkSync(electrobunPackageDir, targetLink, getDirectorySymlinkType());
+}
+
+function ensureCarrotPackageDependencies(
+  sourceDir: string,
+  electrobunPackageDir: string,
+  execFileSyncNode: typeof import("node:child_process").execFileSync,
+) {
+  const packageJsonPath = join(sourceDir, "package.json");
+  if (!existsSync(packageJsonPath)) {
+    ensureLocalElectrobunLink(sourceDir, electrobunPackageDir);
+    return;
+  }
+
+  const nodeModulesDir = join(sourceDir, "node_modules");
+  const stampPath = join(nodeModulesDir, ".bunny-ears-install-stamp.json");
+  const packageJsonText = readFileSync(packageJsonPath, "utf8");
+  const previousStamp = readInstallStamp(stampPath);
+  const needsInstall =
+    !existsSync(nodeModulesDir) || previousStamp?.packageJsonText !== packageJsonText;
+
+  if (needsInstall) {
+    console.log(`  Installing Bun dependencies in ${sourceDir}...`);
+    try {
+      const output = execFileSyncNode(process.execPath, ["install"], {
+        cwd: sourceDir,
+        stdio: "pipe",
+        encoding: "utf8",
+        env: process.env,
+      });
+      if (output?.trim()) {
+        console.log(`  [bun install] ${output.trim()}`);
+      }
+    } catch (installError: any) {
+      const stderr = installError.stderr?.toString() || "";
+      const stdout = installError.stdout?.toString() || "";
+      console.error(`  [bun install] FAILED in ${sourceDir}`);
+      if (stderr) console.error(`  stderr: ${stderr.slice(0, 800)}`);
+      if (stdout) console.error(`  stdout: ${stdout.slice(0, 800)}`);
+      throw installError;
+    }
+  }
+
+  ensureLocalElectrobunLink(sourceDir, electrobunPackageDir);
+  writeFileSync(
+    stampPath,
+    JSON.stringify(
+      {
+        packageJsonText,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+function resolveLocalElectrobunBuildCommand(electrobunPackageDir: string) {
+  const binExt = process.platform === "win32" ? ".exe" : "";
+  const compiledBinary = join(electrobunPackageDir, "bin", `electrobun${binExt}`);
+  if (existsSync(compiledBinary)) {
+    return {
+      command: compiledBinary,
+      args: ["build"],
+    };
+  }
+
+  return {
+    command: process.execPath,
+    args: [join(electrobunPackageDir, "bin", "electrobun.cjs"), "build"],
+  };
 }
 
 type CustomBuildContext = {
@@ -298,7 +411,7 @@ async function runCustomBuild(sourceDir: string, outDir: string, manifest: Carro
 
 export async function buildCarrotSource(sourceDir: string, outDir: string) {
   const normalizedSourceDir = resolve(sourceDir);
-  const { execSync: execSyncNode } = await import("node:child_process");
+  const { execFileSync: execFileSyncNode } = await import("node:child_process");
   const { readdirSync } = await import("node:fs");
 
   // Check if this is a new-style carrot (has electrobun.config.ts with build.carrot)
@@ -306,13 +419,22 @@ export async function buildCarrotSource(sourceDir: string, outDir: string) {
   const hasCarrotJson = existsSync(join(normalizedSourceDir, "carrot.json"));
 
   if (hasElectrobunConfig) {
+    const electrobunPackageDir = resolveLocalElectrobunPackageDir(normalizedSourceDir);
+    ensureCarrotPackageDependencies(
+      normalizedSourceDir,
+      electrobunPackageDir,
+      execFileSyncNode,
+    );
+    const buildCommand = resolveLocalElectrobunBuildCommand(electrobunPackageDir);
+
     // New path: run electrobun build and copy the carrot output
     console.log(`  Running electrobun build in ${normalizedSourceDir}...`);
     try {
-      const output = execSyncNode("npx electrobun build", {
+      const output = execFileSyncNode(buildCommand.command, buildCommand.args, {
         cwd: normalizedSourceDir,
         stdio: "pipe",
         encoding: "utf8",
+        env: process.env,
       });
       if (output) console.log(`  [electrobun build] ${output.trim()}`);
     } catch (buildError: any) {

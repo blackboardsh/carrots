@@ -31,6 +31,8 @@ import { getNode } from "./FileWatcher";
 
 import {
 	type AppState,
+	type BunnyDashCloudProjectMountType,
+	type BunnyDashCloudWorkspaceTreeType,
 	type BunnyDashWorkspaceTreeType,
 	editNodeSettings,
 	focusTabWithId,
@@ -592,6 +594,7 @@ export const ProjectsTree = () => {
 
 	const instances = () => state.bunnyDash?.instances || [];
 	const hasInstances = () => instances().length > 0;
+	const getInstance = (id: string) => instances().find((instance) => instance.id === id);
 
 	const projectsByInstance = () => {
 		const groups = new Map<string, typeof state.projects[string][]>();
@@ -603,23 +606,76 @@ export const ProjectsTree = () => {
 		return groups;
 	};
 
-	const instancesWithProjects = () => {
-		const grouped = projectsByInstance();
-		const result: Array<{ instanceId: string; projects: typeof state.projects[string][] }> = [];
-		for (const inst of instances()) {
-			result.push({ instanceId: inst.id, projects: grouped.get(inst.id) || [] });
-		}
-		for (const [instId, projects] of grouped) {
-			if (!instances().some((i) => i.id === instId)) {
-				result.push({ instanceId: instId, projects });
+	const cloudMountsByInstance = createMemo(() => {
+		const groups = new Map<string, BunnyDashCloudProjectMountType[]>();
+		const seenByInstance = new Map<string, Set<string>>();
+		for (const workspace of state.bunnyDash?.cloudWorkspaces || []) {
+			for (const linkedInstance of workspace.linkedInstances) {
+				const instanceId = linkedInstance.isCurrent ? "host-machine" : linkedInstance.id;
+				if (!groups.has(instanceId)) groups.set(instanceId, []);
+				if (!seenByInstance.has(instanceId)) seenByInstance.set(instanceId, new Set());
+				const seen = seenByInstance.get(instanceId)!;
+				for (const mount of linkedInstance.mounts) {
+					if (seen.has(mount.id)) continue;
+					seen.add(mount.id);
+					groups.get(instanceId)!.push(mount);
+				}
 			}
 		}
-		return result;
+
+		for (const mounts of groups.values()) {
+			mounts.sort((left, right) => {
+				const workspaceCompare = left.workspaceName.localeCompare(right.workspaceName);
+				if (workspaceCompare !== 0) return workspaceCompare;
+				return left.name.localeCompare(right.name);
+			});
+		}
+
+		return groups;
+	});
+
+	const instancesWithProjects = () => {
+		const groupedProjects = projectsByInstance();
+		const groupedCloudMounts = cloudMountsByInstance();
+		const instanceIds = new Set<string>();
+
+		for (const instance of instances()) {
+			if (
+				instance.isCurrent ||
+				(groupedProjects.get(instance.id)?.length || 0) > 0 ||
+				(groupedCloudMounts.get(instance.id)?.length || 0) > 0
+			) {
+				instanceIds.add(instance.id);
+			}
+		}
+
+		for (const instanceId of groupedProjects.keys()) {
+			instanceIds.add(instanceId);
+		}
+		for (const instanceId of groupedCloudMounts.keys()) {
+			instanceIds.add(instanceId);
+		}
+
+		return Array.from(instanceIds)
+			.map((instanceId) => ({
+				instanceId,
+				projects: groupedProjects.get(instanceId) || [],
+				cloudMounts: groupedCloudMounts.get(instanceId) || [],
+			}))
+			.sort((left, right) => {
+				const leftCurrent = isCurrentInstance(left.instanceId);
+				const rightCurrent = isCurrentInstance(right.instanceId);
+				if (leftCurrent !== rightCurrent) {
+					return leftCurrent ? -1 : 1;
+				}
+				return getInstanceName(left.instanceId).localeCompare(getInstanceName(right.instanceId));
+			});
 	};
 
-	const getInstanceName = (id: string) => instances().find((i) => i.id === id)?.name || (id === "host-machine" ? "This Machine" : id);
-	const getInstanceStatus = (id: string) => instances().find((i) => i.id === id)?.status || "local";
-	const getInstanceOs = (id: string) => instances().find((i) => i.id === id)?.os || "";
+	const getInstanceName = (id: string) => getInstance(id)?.name || (id === "host-machine" ? "This Machine" : id);
+	const getInstanceStatus = (id: string) => getInstance(id)?.status || "local";
+	const getInstanceOs = (id: string) => getInstance(id)?.os || "";
+	const isCurrentInstance = (id: string) => getInstance(id)?.isCurrent ?? id === "host-machine";
 
 	return (
 		<>
@@ -637,9 +693,12 @@ export const ProjectsTree = () => {
 				</For>
 			}>
 				<For each={instancesWithProjects()}>
-					{({ instanceId, projects }) => {
+					{({ instanceId, projects, cloudMounts }) => {
+						const resolvedCloudMounts = () => cloudMounts;
 						const [expanded, setExpanded] = createSignal(
-							getInstanceStatus(instanceId) === "online" || instanceId === "host-machine"
+							getInstanceStatus(instanceId) === "online" ||
+								instanceId === "host-machine" ||
+								resolvedCloudMounts().length > 0
 						);
 						const [isHovered, setIsHovered] = createSignal(false);
 						const [isAddHovered, setIsAddHovered] = createSignal(false);
@@ -661,7 +720,14 @@ export const ProjectsTree = () => {
 											"font-size": "12px",
 											cursor: "pointer",
 											color: "#222",
-											background: isHovered() ? "rgba(0, 0, 0, 0.15)" : "transparent",
+											background: isCurrentInstance(instanceId)
+												? isHovered()
+													? "rgba(0, 150, 255, 0.38)"
+													: "rgba(0, 150, 255, 0.22)"
+												: isHovered()
+													? "rgba(0, 0, 0, 0.15)"
+													: "transparent",
+											"border-radius": "4px",
 										}}
 									>
 										<span style={{
@@ -678,6 +744,21 @@ export const ProjectsTree = () => {
 										<span style={{ "font-weight": "500", flex: "1", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>
 											{getInstanceName(instanceId)}
 										</span>
+										<Show when={isCurrentInstance(instanceId)}>
+											<span
+												style={{
+													color: "#0b4f79",
+													"font-size": "10px",
+													"font-weight": "600",
+													"flex-shrink": "0",
+													padding: "1px 6px",
+													"border-radius": "999px",
+													background: "rgba(255, 255, 255, 0.6)",
+												}}
+											>
+												This instance
+											</span>
+										</Show>
 										<Show when={getInstanceOs(instanceId)}>
 											<span style={{ color: "#555", "font-size": "10px", "flex-shrink": "0" }}>{getInstanceOs(instanceId)}</span>
 										</Show>
@@ -722,6 +803,29 @@ export const ProjectsTree = () => {
 													<Show when={node()}>
 														<TreeUL><FileTree node={node()!} /></TreeUL>
 													</Show>
+												);
+											}}
+										</For>
+										<For each={resolvedCloudMounts()}>
+											{(mount) => {
+												const mountNode = {
+													type: "dir" as const,
+													name: mount.name,
+													path: `__BUNNY_CLOUD_MOUNT__/${mount.id}`,
+													children: [],
+												};
+
+												return (
+													<TreeUL>
+														<TreeLI node={mountNode as any}>
+															<WorkspaceTreeRow
+																node={mountNode as any}
+																label={mount.name}
+																icon="views://assets/file-icons/folder.svg"
+																subtitle={`${mount.workspaceName} · ${mount.path}`}
+															/>
+														</TreeLI>
+													</TreeUL>
 												);
 											}}
 										</For>
@@ -1013,10 +1117,10 @@ export const WorkspaceLensesTree = () => {
 
 	const openCreateLensSettings = async (workspaceId: string) => {
 		const name =
-			(await electrobun.rpc?.request.getUniqueLensName({
+			String((await electrobun.rpc?.request.getUniqueLensName({
 				workspaceId,
 				baseName: "Lens",
-			})) || "Lens 1";
+			})) || "Lens 1");
 
 		setState("settingsPane", {
 			type: "lens-settings",
@@ -1123,7 +1227,7 @@ export const WorkspaceLensesTree = () => {
 
 	return (
 		<>
-			<CategoryRow label="Workspaces" />
+			<CategoryRow label="Local Sessions" />
 			<Show when={state.bunnyDash.workspaces.length > 0}>
 				<TreeUL>
 					<For each={state.bunnyDash.workspaces}>
@@ -1234,6 +1338,261 @@ export const WorkspaceLensesTree = () => {
 				</TreeUL>
 			</Show>
 		</>
+	);
+};
+
+export const CloudWorkspacesTree = () => {
+	const [expandedWorkspaceIds, setExpandedWorkspaceIds] = createSignal<Set<string>>(new Set());
+	const [expandedInstanceIds, setExpandedInstanceIds] = createSignal<Set<string>>(new Set());
+
+	createEffect(() => {
+		const next = new Set(expandedWorkspaceIds());
+		const workspaces = state.bunnyDash.cloudWorkspaces;
+		let changed = false;
+		if (workspaces.length > 0 && next.size === 0) {
+			next.add(workspaces[0]!.id);
+			changed = true;
+		}
+		for (const workspace of workspaces) {
+			if (workspace.isCurrent && !next.has(workspace.id)) {
+				next.add(workspace.id);
+				changed = true;
+			}
+		}
+		if (changed) {
+			setExpandedWorkspaceIds(next);
+		}
+	});
+
+	const toggleWorkspace = (workspaceId: string) => {
+		setExpandedWorkspaceIds((current) => {
+			const next = new Set(current);
+			if (next.has(workspaceId)) {
+				next.delete(workspaceId);
+			} else {
+				next.add(workspaceId);
+			}
+			return next;
+		});
+	};
+
+	const toggleLinkedInstance = (workspaceId: string, instanceId: string) => {
+		const key = `${workspaceId}:${instanceId}`;
+		setExpandedInstanceIds((current) => {
+			const next = new Set(current);
+			if (next.has(key)) {
+				next.delete(key);
+			} else {
+				next.add(key);
+			}
+			return next;
+		});
+	};
+
+	const openCloudWorkspace = async (workspace: BunnyDashCloudWorkspaceTreeType) => {
+		await runInWindowTransition(workspace.name, async () => {
+			await syncWorkspaceNow();
+			await electrobun.rpc?.request.openWorkspace({
+				workspaceId: workspace.runtimeWorkspaceId,
+			});
+			await refreshDashStateFromWorker();
+		});
+	};
+
+	const openCloudLens = async (
+		workspace: BunnyDashCloudWorkspaceTreeType,
+		lens: BunnyDashCloudWorkspaceTreeType["lenses"][number],
+	) => {
+		const label = `${workspace.name} · ${lens.name}`;
+		await runInWindowTransition(label, async () => {
+			await syncWorkspaceNow();
+			await electrobun.rpc?.request.openLens({ lensId: lens.runtimeLensId });
+			await refreshDashStateFromWorker();
+		});
+	};
+
+	const openCreateLensSettings = async (workspaceId: string) => {
+		const name =
+			String((await electrobun.rpc?.request.getUniqueLensName({
+				workspaceId,
+				baseName: "Lens",
+			})) || "Lens 1");
+
+		setState("settingsPane", {
+			type: "lens-settings",
+			data: {
+				mode: "create",
+				workspaceId,
+				name,
+				description: "",
+			},
+		});
+	};
+
+	const overwriteCurrentLens = async () => {
+		await syncWorkspaceNow();
+		await electrobun.rpc?.request.overwriteCurrentLens();
+		await refreshDashStateFromWorker();
+	};
+
+	return (
+		<Show when={state.bunnyDash.cloudWorkspaces.length > 0}>
+			<>
+				<CategoryRow label="Cloud Workspaces" />
+				<TreeUL>
+					<For each={state.bunnyDash.cloudWorkspaces}>
+						{(workspace: BunnyDashCloudWorkspaceTreeType) => {
+							const isExpanded = () => expandedWorkspaceIds().has(workspace.id);
+							const workspaceNode = {
+								type: "dir" as const,
+								name: workspace.name,
+								path: `__BUNNY_CLOUD_WORKSPACE__/${workspace.id}`,
+								children: [],
+							};
+
+							return (
+								<TreeLI node={workspaceNode as any}>
+									<WorkspaceTreeRow
+										node={workspaceNode as any}
+										label={workspace.name}
+										icon="views://assets/file-icons/browser-add-bookmark.svg"
+										subtitle={workspace.isCurrent ? "Current" : workspace.subtitle || "Cloud"}
+										hasChildren={workspace.canExpand}
+										expanded={isExpanded}
+										isCurrent={workspace.isCurrent}
+										onToggle={() => toggleWorkspace(workspace.id)}
+										onActivate={() => {
+											void openCloudWorkspace(workspace);
+										}}
+										actions={
+											workspace.isCurrent
+												? [
+														{
+															label: "Save",
+															onClick: () => {
+																void openCreateLensSettings(workspace.runtimeWorkspaceId);
+															},
+														},
+													]
+												: []
+										}
+									/>
+									<Show when={isExpanded()}>
+										<TreeUL showLeftBar={true}>
+											<For each={workspace.lenses}>
+												{(lens) => {
+													const lensNode = {
+														type: "file" as const,
+														name: lens.name,
+														path: `__BUNNY_CLOUD_LENS__/${lens.id}`,
+														persistedContent: "",
+														isDirty: false,
+														model: null,
+														editors: {},
+													};
+
+													return (
+														<TreeLI node={lensNode as any}>
+															<WorkspaceTreeRow
+																node={lensNode as any}
+																label={lens.name}
+																icon="views://assets/file-icons/bookmark.svg"
+																isCurrent={lens.isCurrent}
+																subtitle={lens.description || "Cloud lens"}
+																onActivate={() => {
+																	void openCloudLens(workspace, lens);
+																}}
+																actions={
+																	lens.isCurrent
+																		? [
+																				{
+																					label: "Save",
+																					onClick: () => {
+																						void overwriteCurrentLens();
+																					},
+																				},
+																			]
+																		: []
+																}
+															/>
+														</TreeLI>
+													);
+												}}
+											</For>
+											<For each={workspace.linkedInstances}>
+												{(linkedInstance) => {
+													const linkedInstanceKey = `${workspace.id}:${linkedInstance.id}`;
+													const isInstanceExpanded = () =>
+														expandedInstanceIds().has(linkedInstanceKey);
+													const instanceNode = {
+														type: "dir" as const,
+														name: linkedInstance.name,
+														path: `__BUNNY_CLOUD_INSTANCE__/${linkedInstance.id}`,
+														children: [],
+													};
+
+													return (
+														<TreeLI node={instanceNode as any}>
+															<WorkspaceTreeRow
+																node={instanceNode as any}
+																label={linkedInstance.name}
+																icon="views://assets/file-icons/terminal.svg"
+																subtitle={[
+																	linkedInstance.isCurrent ? "This instance" : "",
+																	linkedInstance.os,
+																	linkedInstance.status,
+																]
+																	.filter(Boolean)
+																	.join(" · ")}
+																hasChildren={linkedInstance.mounts.length > 0}
+																expanded={isInstanceExpanded}
+																onToggle={() =>
+																	toggleLinkedInstance(workspace.id, linkedInstance.id)
+																}
+																onActivate={() => {
+																	if (linkedInstance.mounts.length > 0) {
+																		toggleLinkedInstance(workspace.id, linkedInstance.id);
+																	}
+																}}
+															/>
+															<Show when={isInstanceExpanded()}>
+																<TreeUL showLeftBar={true}>
+																	<For each={linkedInstance.mounts}>
+																		{(mount) => {
+																			const mountNode = {
+																				type: "dir" as const,
+																				name: mount.name,
+																				path: `__BUNNY_CLOUD_MOUNT__/${mount.id}`,
+																				children: [],
+																			};
+
+																			return (
+																				<TreeLI node={mountNode as any}>
+																					<WorkspaceTreeRow
+																						node={mountNode as any}
+																						label={mount.name}
+																						icon="views://assets/file-icons/folder.svg"
+																						subtitle={mount.path}
+																					/>
+																				</TreeLI>
+																			);
+																		}}
+																	</For>
+																</TreeUL>
+															</Show>
+														</TreeLI>
+													);
+												}}
+											</For>
+										</TreeUL>
+									</Show>
+								</TreeLI>
+							);
+						}}
+					</For>
+				</TreeUL>
+			</>
+		</Show>
 	);
 };
 

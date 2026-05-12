@@ -684,14 +684,38 @@ class CarrotInstance {
         const token = String((params as any)?.token || "");
         if (token) {
           (runtime as any).saveAuthToken(token);
+          (runtime as any).registerInstanceWithToken(token).catch(() => {});
           // Notify all running carrots about the new token
           for (const carrot of runtime.carrots.values()) {
             if (carrot.status === "running") {
               carrot.sendEvent("auth-token-changed", { token });
             }
           }
+        } else {
+          (runtime as any).signOutFromCloud();
         }
         return { ok: true };
+      }
+      case "set-device-token": {
+        const token = String((params as any)?.token || "");
+        const tokenId = typeof (params as any)?.tokenId === "string" ? (params as any).tokenId : undefined;
+        if (!token) {
+          throw new Error("Missing device token");
+        }
+        (runtime as any).saveDeviceToken(token, tokenId);
+        try { runtime.hopWs?.close(); } catch {}
+        runtime.hopWs = null;
+        (runtime as any).connectToHop();
+        (runtime as any).refreshAccessTokenFromDevice().catch(() => {});
+        return { ok: true };
+      }
+      case "get-machine-info": {
+        const os = require("node:os");
+        return {
+          machineId: runtime.getMachineId(),
+          hostname: os.hostname() || "",
+          platform: process.platform === "darwin" ? "macos" : process.platform,
+        };
       }
       case "list-carrots": {
         return runtime.summaries();
@@ -1216,8 +1240,10 @@ class BunnyEarsRuntime {
         }
       }, 60_000);
     } else if (!this.deviceToken) {
-      // No auth and no device token — open Farm for login (non-blocking)
-      this.openFarmForLogin().catch(() => {});
+      // Local mode should work without an account. Farm remains available as an
+      // explicit sign-in path from Dash/tray, but first-run boot should land in
+      // the local IDE flow instead of forcing auth.
+      console.log("[bunny-ears] no Bunny Cloud session found; continuing in local-only mode");
     }
 
     // Check for updates on boot and every hour
@@ -1675,6 +1701,53 @@ class BunnyEarsRuntime {
     try { if (fs.existsSync(idPath)) fs.unlinkSync(idPath); } catch {}
   }
 
+  private clearSavedAuthToken() {
+    const fs = require("node:fs");
+    const tokenPath = this.getAuthTokenPath();
+    this.authToken = null;
+    try {
+      if (fs.existsSync(tokenPath)) {
+        fs.unlinkSync(tokenPath);
+      }
+    } catch {}
+  }
+
+  private signOutFromCloud(options?: {
+    revokeDeviceTokenOnServer?: boolean;
+    markInstanceOffline?: boolean;
+  }) {
+    const revokeDeviceTokenOnServer = options?.revokeDeviceTokenOnServer ?? true;
+    const markInstanceOffline = options?.markInstanceOffline ?? true;
+
+    const oldAccessToken = this.authToken;
+    const oldDeviceTokenId = this.deviceTokenId;
+    const oldInstanceId = this.instanceId;
+
+    this.clearSavedAuthToken();
+    this.clearDeviceToken();
+    this.instanceId = null;
+
+    try { this.hopWs?.close(); } catch {}
+    this.hopWs = null;
+
+    for (const carrot of this.carrots.values()) {
+      if (carrot.status === "running") {
+        carrot.sendEvent("auth-token-cleared");
+      }
+    }
+
+    console.log("[bunny-ears] Bunny Cloud session cleared");
+
+    if (oldAccessToken) {
+      if (markInstanceOffline && oldInstanceId) {
+        this.markInstanceOfflineOnServer(oldInstanceId, oldAccessToken).catch(() => {});
+      }
+      if (revokeDeviceTokenOnServer && oldDeviceTokenId) {
+        this.revokeDeviceTokenOnServer(oldDeviceTokenId, oldAccessToken).catch(() => {});
+      }
+    }
+  }
+
   // Mark this instance as offline on the API. Best-effort, fire-and-forget.
   // Used on logout so the instance immediately appears offline in Farm.
   private async markInstanceOfflineOnServer(instanceId: string, accessToken: string) {
@@ -1765,28 +1838,8 @@ class BunnyEarsRuntime {
         if (resp.status === 401) {
           // Device token has been revoked or is otherwise invalid.
           // Clear everything and notify carrots so dash logs out.
-          const oldAccessToken = this.authToken;
-          const oldInstanceId = this.instanceId;
-          this.clearDeviceToken();
-          this.authToken = null;
-          try {
-            const fs = require("node:fs");
-            const tokenPath = this.getAuthTokenPath();
-            if (fs.existsSync(tokenPath)) fs.unlinkSync(tokenPath);
-          } catch {}
-          try { this.hopWs?.close(); } catch {}
-          this.hopWs = null;
-          for (const carrot of this.carrots.values()) {
-            if (carrot.status === "running") {
-              carrot.sendEvent("auth-token-cleared");
-            }
-          }
+          this.signOutFromCloud({ revokeDeviceTokenOnServer: false, markInstanceOffline: true });
           console.log("[bunny-ears] device token revoked — signed out");
-          // If we still have a (soon-to-expire) access token, use it to mark
-          // the instance offline so Farm reflects it immediately.
-          if (oldInstanceId && oldAccessToken) {
-            this.markInstanceOfflineOnServer(oldInstanceId, oldAccessToken).catch(() => {});
-          }
         }
         return null;
       }
@@ -1870,39 +1923,7 @@ class BunnyEarsRuntime {
               return { machineId: this.getMachineId() || "" };
             },
             clearAuthToken: () => {
-              // Capture values before clearing so we can do server-side cleanup
-              const oldAccessToken = this.authToken;
-              const oldDeviceTokenId = this.deviceTokenId;
-              const oldInstanceId = this.instanceId;
-
-              this.authToken = null;
-              // Delete saved access token
-              try {
-                const fs = require("node:fs");
-                const tokenPath = this.getAuthTokenPath();
-                if (fs.existsSync(tokenPath)) fs.unlinkSync(tokenPath);
-              } catch {}
-              // Also clear the device token (logout means full sign-out)
-              this.clearDeviceToken();
-              // Disconnect from Hop
-              try { this.hopWs?.close(); } catch {}
-              this.hopWs = null;
-              // Notify all running carrots
-              for (const carrot of this.carrots.values()) {
-                if (carrot.status === "running") {
-                  carrot.sendEvent("auth-token-cleared");
-                }
-              }
-              console.log("[bunny-ears] auth + device token cleared");
-              // Best-effort server-side cleanup (fire-and-forget).
-              if (oldAccessToken) {
-                if (oldInstanceId) {
-                  this.markInstanceOfflineOnServer(oldInstanceId, oldAccessToken).catch(() => {});
-                }
-                if (oldDeviceTokenId) {
-                  this.revokeDeviceTokenOnServer(oldDeviceTokenId, oldAccessToken).catch(() => {});
-                }
-              }
+              this.signOutFromCloud();
               return { ok: true };
             },
             updateCarrots: () => {
@@ -2249,9 +2270,13 @@ class BunnyEarsRuntime {
   }
 
   buildTrayMenu() {
+    const cloudLabel = this.authToken || this.deviceToken
+      ? "Open Bunny Cloud"
+      : "Sign In to Bunny Cloud";
+
     const baseItems = [
       { type: "normal" as const, label: "Open Bunny Dash", action: "open-dash" },
-      { type: "normal" as const, label: "Open Bunny Farm", action: "open-farm" },
+      { type: "normal" as const, label: cloudLabel, action: "open-farm" },
     ];
 
     // Dash extension: workspaces, lenses, carrot controls — set by the dash carrot
@@ -2789,6 +2814,7 @@ const DEV_FOUNDATION_CARROTS = [
   { id: "bunny.llama", directory: "llama" },
   { id: "bunny-dash", directory: "dash" },
 ] as const;
+const FOUNDATION_CARROT_IDS = new Set<string>(DEV_FOUNDATION_CARROTS.map((carrot) => carrot.id));
 
 function isHopDisabled() {
   const value = process.env.BUNNY_DISABLE_HOP || process.env.BUNNY_EARS_DISABLE_HOP;
@@ -2802,12 +2828,21 @@ function looksLikeCarrotsRepoRoot(path: string) {
 }
 
 function resolveDevCarrotsBaseDir() {
-  const candidates = [
-    process.env.CARROTS_BASE_DIR,
-    resolve(process.cwd(), "../.."),
-    resolve(import.meta.dir, "..", "..", "..", ".."),
-    resolve(import.meta.dir, "..", "..", "..", "..", ".."),
-  ].filter((candidate): candidate is string => typeof candidate === "string" && candidate.length > 0);
+  const candidates = new Set<string>();
+
+  const addCandidate = (candidate?: string | null) => {
+    if (!candidate || candidate.length === 0) {
+      return;
+    }
+    candidates.add(candidate);
+  };
+
+  addCandidate(process.env.CARROTS_BASE_DIR);
+  addCandidate(process.env.PWD ? resolve(process.env.PWD, "../..") : null);
+  addCandidate(process.env.INIT_CWD ? resolve(process.env.INIT_CWD, "../..") : null);
+  addCandidate(resolve(process.cwd(), "../.."));
+  addCandidate(resolve(import.meta.dir, "..", "..", "..", ".."));
+  addCandidate(resolve(import.meta.dir, "..", "..", "..", "..", ".."));
 
   for (const candidate of candidates) {
     if (looksLikeCarrotsRepoRoot(candidate)) {
@@ -2837,14 +2872,12 @@ async function ensureDevFoundationCarrotsInstalled() {
       installed.install.source.kind === "local" &&
       resolve(installed.install.source.path) === carrotPath;
 
-    if (alreadyDevSource) {
-      continue;
-    }
-
-    console.log(`[bunny-ears] Installing ${carrot.id} from ${carrotPath}...`);
+    console.log(
+      `[bunny-ears] ${alreadyDevSource ? "Rebuilding" : "Installing"} ${carrot.id} from ${carrotPath}...`,
+    );
     try {
       await installDevCarrotFromSource(carrotPath);
-      console.log(`[bunny-ears] Installed ${carrot.id}`);
+      console.log(`[bunny-ears] ${alreadyDevSource ? "Rebuilt" : "Installed"} ${carrot.id}`);
     } catch (error) {
       console.error(
         `[bunny-ears] Failed to install ${carrot.id}:`,
@@ -2887,7 +2920,7 @@ pruneLegacyPrototypeCarrots();
 // In dev mode, rebuild carrots from source. In staging/prod, download pre-built artifacts.
 const channel = await Updater.localInfo.channel().catch(() => "dev");
 if (channel === "dev") {
-  const refreshErrors = await refreshTrackedDevCarrots();
+  const refreshErrors = await refreshTrackedDevCarrots(FOUNDATION_CARROT_IDS);
   if (refreshErrors.length > 0) {
     console.error("[bunny-ears] dev carrot refresh failures", refreshErrors);
   }

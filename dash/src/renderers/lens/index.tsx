@@ -90,6 +90,7 @@ import type {
 } from "../../shared/types/types";
 
 import {
+	CloudWorkspacesTree,
 	FindAllResultsTree,
 	OpenFilesTree,
 	ProjectsTree,
@@ -4583,6 +4584,7 @@ const Sidebar = () => {
 							<TemplateNodes />
 							<OpenFilesTree />
 							<WorkspaceLensesTree />
+							<CloudWorkspacesTree />
 							<ProjectsTree />
 						</>
 					)}

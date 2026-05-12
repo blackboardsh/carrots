@@ -14,7 +14,14 @@ import {
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { hostname } from "node:os";
-import { CloudApi, getApiBaseUrl, type CloudInstance } from "./cloudApi";
+import {
+  CloudApi,
+  getApiBaseUrl,
+  type CloudDeviceToken,
+  type CloudInstance,
+  type CloudUserProfile,
+  type CloudWorkspace,
+} from "./cloudApi";
 import {
   ApplicationMenu,
   BrowserWindow,
@@ -104,6 +111,35 @@ type PersistedBunnyDashState = {
   workspaces?: Record<string, BunnyWorkspace>;
   appSettings?: BunnyAppSettings;
   tokens?: any[];
+};
+
+type BunnyCloudMachineInfo = {
+  machineId: string;
+  hostname: string;
+  platform: string;
+  instanceName: string;
+};
+
+type BunnyCloudOverview = {
+  connected: boolean;
+  currentMachine: BunnyCloudMachineInfo;
+  user: CloudUserProfile | null;
+  instances: CloudInstance[];
+  workspaces: CloudWorkspace[];
+  devices: CloudDeviceToken[];
+  currentInstanceId: string | null;
+  currentDeviceTokenId: string | null;
+  currentCarrots: CachedCarrotSummary[];
+};
+
+type CachedCarrotSummary = {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  mode: string;
+  permissions: string[];
+  status: string;
 };
 
 type TreeNode = {
@@ -236,6 +272,37 @@ type BunnyDashWorkspaceLensPayload = {
       isDirty: boolean;
     }>;
   }>;
+  cloudWorkspaces: Array<{
+    id: string;
+    name: string;
+    subtitle: string;
+    runtimeWorkspaceId: string;
+    isCurrent: boolean;
+    canExpand: boolean;
+    lenses: Array<{
+      id: string;
+      name: string;
+      description: string;
+      workspaceId: string;
+      runtimeLensId: string;
+      isCurrent: boolean;
+    }>;
+    linkedInstances: Array<{
+      id: string;
+      name: string;
+      os: string;
+      status: string;
+      isCurrent: boolean;
+      mounts: Array<{
+        id: string;
+        workspaceId: string;
+        workspaceName: string;
+        instanceId: string;
+        path: string;
+        name: string;
+      }>;
+    }>;
+  }>;
 };
 
 let statePath = "";
@@ -256,6 +323,8 @@ let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let ptyHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 const LIVE_WINDOW_ID_SEPARATOR = "::";
 const WORKSPACE_CURRENT_LENS_PREFIX = "__workspace-current__:";
+const CLOUD_WORKSPACE_SHADOW_PREFIX = "__cloud_workspace__:";
+const CLOUD_LENS_SHADOW_PREFIX = "__cloud_lens__:";
 const PTY_CARROT_ID = "bunny.pty";
 const SEARCH_CARROT_ID = "bunny.search";
 const GIT_CARROT_ID = "bunny.git";
@@ -415,7 +484,9 @@ const UNHANDLED_DASH_REQUEST = Symbol("unhandled-bunny-dash-request");
 // Cloud API state
 let cloudApi: CloudApi | null = null;
 let cloudInstances: CloudInstance[] = [];
-let cachedCarrotList: Array<{ id: string; name: string; description: string; version: string; mode: string; permissions: string[]; status: string }> = [];
+let cloudWorkspaces: CloudWorkspace[] = [];
+let cloudCurrentInstanceId: string | null = null;
+let cachedCarrotList: CachedCarrotSummary[] = [];
 
 function initCloudApi(): CloudApi | null {
   // Use auth token from Bunny Ears (passed via init context) or from persisted dash state
@@ -442,12 +513,44 @@ function initCloudApi(): CloudApi | null {
 
 async function refreshCloudData() {
   if (!cloudApi) return;
-  try {
-    cloudInstances = await cloudApi.getInstances();
-    log(`cloud: ${cloudInstances.length} instance(s)`);
-  } catch (err) {
-    log(`cloud refresh failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
+  const [instances, workspaces, currentMachine] = await Promise.all([
+    cloudApi.getInstances().catch(() => []),
+    cloudApi.listWorkspaces().catch(() => []),
+    getCurrentMachineInfo().catch(() => null),
+  ]);
+  cloudInstances = instances;
+  cloudWorkspaces = workspaces;
+  cloudCurrentInstanceId = currentMachine?.machineId
+    ? instances.find((instance) => instance.machine_id === currentMachine.machineId)?.id || null
+    : null;
+  syncCloudShadowState();
+  log(
+    `cloud: ${cloudInstances.length} instance(s), ${cloudWorkspaces.length} workspace(s)`,
+  );
+}
+
+function cloudShadowWorkspaceKey(cloudWorkspaceId: string) {
+  return `${CLOUD_WORKSPACE_SHADOW_PREFIX}${cloudWorkspaceId}`;
+}
+
+function cloudShadowLensKey(cloudLensId: string) {
+  return `${CLOUD_LENS_SHADOW_PREFIX}${cloudLensId}`;
+}
+
+function isCloudShadowWorkspaceKey(workspaceId: string) {
+  return workspaceId.startsWith(CLOUD_WORKSPACE_SHADOW_PREFIX);
+}
+
+function isCloudShadowLensKey(lensId: string) {
+  return lensId.startsWith(CLOUD_LENS_SHADOW_PREFIX);
+}
+
+function cloudWorkspaceIdFromShadowKey(workspaceId: string) {
+  return workspaceId.replace(CLOUD_WORKSPACE_SHADOW_PREFIX, "");
+}
+
+function cloudLensIdFromShadowKey(lensId: string) {
+  return lensId.replace(CLOUD_LENS_SHADOW_PREFIX, "");
 }
 
 async function refreshCarrotList() {
@@ -463,6 +566,313 @@ async function refreshCarrotList() {
       status: c.status,
     }));
   } catch {}
+}
+
+function getCloudChannel() {
+  return runtimeChannel || app.channel || (manifestVersion === "0.0.1" ? "dev" : undefined);
+}
+
+function getCloudBaseUrl() {
+  return getApiBaseUrl(getCloudChannel());
+}
+
+function getCurrentCloudAccessToken() {
+  return runtimeAuthToken || app.authToken || bunnyDashState.appSettings?.bunnyCloud?.accessToken || "";
+}
+
+async function getCurrentMachineInfo(): Promise<BunnyCloudMachineInfo> {
+  const info = await app.getMachineInfo().catch(() => ({
+    machineId: "",
+    hostname: "",
+    platform: "",
+  }));
+  const hostnameValue = info.hostname || hostname() || "Bunny Ears";
+  const platformValue = info.platform || process.platform;
+  return {
+    machineId: info.machineId || "",
+    hostname: hostnameValue,
+    platform: platformValue,
+    instanceName: platformValue ? `${hostnameValue} (${platformValue})` : hostnameValue,
+  };
+}
+
+async function cloudFetch<T>(
+  path: string,
+  options: RequestInit & { accessToken?: string } = {},
+): Promise<T> {
+  const accessToken = options.accessToken ?? getCurrentCloudAccessToken();
+  if (!accessToken) {
+    throw new Error("Not signed in to Bunny Cloud");
+  }
+  const headers: Record<string, string> = {
+    ...((options.headers as Record<string, string>) || {}),
+    Authorization: `Bearer ${accessToken}`,
+  };
+  if (options.body) {
+    headers["Content-Type"] = "application/json";
+  }
+  const response = await fetch(`${getCloudBaseUrl()}${path}`, {
+    ...options,
+    headers,
+  });
+  if (!response.ok) {
+    throw new Error(`API ${response.status}: ${await response.text()}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+function persistBunnyCloudUser(user: CloudUserProfile | null, auth?: { accessToken?: string; refreshToken?: string }) {
+  if (!bunnyDashState.appSettings) {
+    bunnyDashState.appSettings = structuredClone(defaultBunnyAppSettings);
+  }
+  const bunnyCloud = bunnyDashState.appSettings.bunnyCloud;
+  if (auth?.accessToken !== undefined) {
+    bunnyCloud.accessToken = auth.accessToken;
+  }
+  if (auth?.refreshToken !== undefined) {
+    bunnyCloud.refreshToken = auth.refreshToken;
+  }
+  if (user) {
+    bunnyCloud.userId = user.id || "";
+    bunnyCloud.email = user.email || "";
+    bunnyCloud.name = user.name || "";
+    bunnyCloud.emailVerified = !!user.email_verified;
+    bunnyCloud.connectedAt = Date.now();
+  }
+}
+
+async function createDeviceTokenForCurrentMachine(accessToken?: string) {
+  const machine = await getCurrentMachineInfo();
+  if (!machine.machineId) {
+    return null;
+  }
+  return cloudFetch<{ id: string; token: string }>("/v1/auth/device-tokens", {
+    method: "POST",
+    accessToken,
+    body: JSON.stringify({
+      machine_id: machine.machineId,
+      name: machine.instanceName,
+    }),
+  });
+}
+
+async function getBunnyCloudOverview(): Promise<BunnyCloudOverview> {
+  const currentMachine = await getCurrentMachineInfo();
+  const accessToken = getCurrentCloudAccessToken();
+  if (!accessToken) {
+    return {
+      connected: false,
+      currentMachine,
+      user: null,
+      instances: [],
+      workspaces: [],
+      devices: [],
+      currentInstanceId: null,
+      currentDeviceTokenId: null,
+      currentCarrots: cachedCarrotList,
+    };
+  }
+
+  cloudApi = initCloudApi();
+  if (!cloudApi) {
+    return {
+      connected: false,
+      currentMachine,
+      user: null,
+      instances: [],
+      workspaces: [],
+      devices: [],
+      currentInstanceId: null,
+      currentDeviceTokenId: null,
+      currentCarrots: cachedCarrotList,
+    };
+  }
+
+  const [user, instances, workspaces, devices] = await Promise.all([
+    cloudApi.getUserProfile().catch(() => null),
+    cloudApi.getInstances().catch(() => []),
+    cloudApi.listWorkspaces().catch(() => []),
+    cloudApi.getDeviceTokens().catch(() => []),
+  ]);
+
+  cloudInstances = instances;
+  cloudWorkspaces = workspaces;
+
+  if (user) {
+    persistBunnyCloudUser(user);
+    await writePersistedDashState().catch(() => {});
+  }
+
+  const currentInstanceId = currentMachine.machineId
+    ? instances.find((instance) => instance.machine_id === currentMachine.machineId)?.id || null
+    : null;
+  cloudCurrentInstanceId = currentInstanceId;
+  syncCloudShadowState();
+  const currentDeviceTokenId = currentMachine.machineId
+    ? devices.find((device) => device.machine_id === currentMachine.machineId)?.id || null
+    : null;
+
+  return {
+    connected: true,
+    currentMachine,
+    user,
+    instances,
+    workspaces,
+    devices,
+    currentInstanceId,
+    currentDeviceTokenId,
+    currentCarrots: cachedCarrotList,
+  };
+}
+
+function buildCloudWorkspacePayload(): BunnyDashWorkspaceLensPayload["cloudWorkspaces"] {
+  const instancesById = new Map(cloudInstances.map((instance) => [instance.id, instance]));
+  const activeRuntimeWindow =
+    runtimeWindows.find((window) => window.id === state.currentWindowId) || getCurrentWindowUnsafe();
+  const activeWorkspaceId = activeRuntimeWindow?.workspaceId || "";
+  const activeLensId = activeRuntimeWindow ? getLensIdForWindow(activeRuntimeWindow) : state.currentLayoutId;
+
+  return cloudWorkspaces
+    .slice()
+    .sort((left, right) => (left.sort_order || 0) - (right.sort_order || 0))
+    .map((workspace) => {
+    const runtimeWorkspaceId = cloudShadowWorkspaceKey(workspace.id);
+    const mountsByInstance = new Map<string, NonNullable<CloudWorkspace["mounts"]>>();
+    for (const mount of workspace.mounts || []) {
+      if (!mountsByInstance.has(mount.instance_id)) {
+        mountsByInstance.set(mount.instance_id, []);
+      }
+      mountsByInstance.get(mount.instance_id)!.push(mount);
+    }
+
+    const linkedInstances = Array.from(mountsByInstance.entries())
+      .map(([instanceId, mounts]) => {
+        const instance = instancesById.get(instanceId);
+        return {
+          id: instanceId,
+          name: instance?.name || "Linked Instance",
+          os: instance?.os || "",
+          status: instance?.status || "unknown",
+          isCurrent: instanceId === cloudCurrentInstanceId,
+          mounts: mounts
+            .slice()
+            .sort((left, right) => (left.sort_order || 0) - (right.sort_order || 0))
+            .map((mount) => ({
+              id: mount.id,
+              workspaceId: workspace.id,
+              workspaceName: workspace.name,
+              instanceId,
+              path: mount.path,
+              name: mount.name,
+            })),
+        };
+      })
+      .sort((left, right) => {
+        if (left.isCurrent !== right.isCurrent) {
+          return left.isCurrent ? -1 : 1;
+        }
+        return left.name.localeCompare(right.name);
+      });
+
+    const lenses = (workspace.lenses || [])
+      .slice()
+      .sort((left, right) => (left.sort_order || 0) - (right.sort_order || 0))
+      .map((lens) => ({
+        id: lens.id,
+        name: lens.name,
+        description: lens.description,
+        workspaceId: workspace.id,
+        runtimeLensId: cloudShadowLensKey(lens.id),
+        isCurrent:
+          runtimeWorkspaceId === activeWorkspaceId &&
+          cloudShadowLensKey(lens.id) === activeLensId,
+      }));
+
+    const subtitleParts = [
+      workspace.description || "",
+      lenses.length > 0 ? `${lenses.length} lens${lenses.length === 1 ? "" : "es"}` : "",
+      linkedInstances.length > 0
+        ? `${linkedInstances.length} instance${linkedInstances.length === 1 ? "" : "s"}`
+        : "",
+    ].filter(Boolean);
+
+      return {
+        id: workspace.id,
+        name: workspace.name,
+        subtitle: subtitleParts.join(" · "),
+        runtimeWorkspaceId,
+        isCurrent: runtimeWorkspaceId === activeWorkspaceId,
+        canExpand: lenses.length > 0 || linkedInstances.length > 0,
+        lenses,
+        linkedInstances,
+      };
+    });
+}
+
+async function loginToBunnyCloud(params: {
+  mode: "login" | "register";
+  email: string;
+  password: string;
+  name?: string;
+}) {
+  const endpoint = params.mode === "register" ? "/v1/auth/register" : "/v1/auth/login";
+  const body: Record<string, string> = {
+    email: params.email,
+    password: params.password,
+  };
+  if (params.mode === "register" && params.name?.trim()) {
+    body.name = params.name.trim();
+  }
+
+  const response = await fetch(`${getCloudBaseUrl()}${endpoint}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await response.json() as {
+    error?: string;
+    accessToken?: string;
+    refreshToken?: string;
+    user?: CloudUserProfile;
+  };
+
+  if (!response.ok || !data.accessToken || !data.refreshToken || !data.user) {
+    throw new Error(data.error || `API ${response.status}`);
+  }
+
+  persistBunnyCloudUser(data.user, {
+    accessToken: data.accessToken,
+    refreshToken: data.refreshToken,
+  });
+  await app.setAuthToken(data.accessToken);
+
+  const deviceToken = await createDeviceTokenForCurrentMachine(data.accessToken).catch(() => null);
+  if (deviceToken?.token) {
+    await app.setDeviceToken(deviceToken.token, deviceToken.id);
+  }
+
+  cloudApi = initCloudApi();
+  await refreshCloudData();
+  await writePersistedDashState().catch(() => {});
+  broadcastAppSettings();
+  return getBunnyCloudOverview();
+}
+
+async function registerCurrentCloudInstance() {
+  const accessToken = getCurrentCloudAccessToken();
+  if (!accessToken) {
+    throw new Error("Sign in to Bunny Cloud first");
+  }
+
+  await app.setAuthToken(accessToken);
+  const deviceToken = await createDeviceTokenForCurrentMachine(accessToken).catch(() => null);
+  if (deviceToken?.token) {
+    await app.setDeviceToken(deviceToken.token, deviceToken.id);
+  }
+
+  cloudApi = initCloudApi();
+  await refreshCloudData();
+  return getBunnyCloudOverview();
 }
 
 const ACTIVE_SLATE_CONFIG_FILE = ".bunny.json";
@@ -574,6 +984,72 @@ function getOrCreateBrowserWindow(windowId = state.currentWindowId, title?: stri
     handlers: {
       requests: {
         openFarm: r(() => { app.openManager(); return { ok: true }; }),
+        logoutBunnyCloud: r(async () => {
+          await app.setAuthToken("");
+          return { ok: true };
+        }),
+        getBunnyCloudOverview: r(async () => getBunnyCloudOverview()),
+        loginBunnyCloud: r(async (params) => {
+          try {
+            const overview = await loginToBunnyCloud({
+              mode: params?.mode === "register" ? "register" : "login",
+              email: String(params?.email || "").trim(),
+              password: String(params?.password || ""),
+              name: typeof params?.name === "string" ? params.name : undefined,
+            });
+            emitSetProjects();
+            return { ok: true, overview };
+          } catch (error) {
+            return {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }),
+        registerCurrentBunnyCloudInstance: r(async () => {
+          try {
+            const overview = await registerCurrentCloudInstance();
+            emitSetProjects();
+            return { ok: true, overview };
+          } catch (error) {
+            return {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }),
+        updateCurrentBunnyCloudCarrots: r(async () => {
+          await app.updateCarrots();
+          await refreshCarrotList();
+          emitSetProjects();
+          return { ok: true, overview: await getBunnyCloudOverview() };
+        }),
+        createBunnyCloudWorkspace: r(async (params) => {
+          if (!cloudApi) {
+            throw new Error("Not signed in to Bunny Cloud");
+          }
+          await cloudApi.createWorkspace(String(params?.name || "").trim(), typeof params?.description === "string" ? params.description : undefined);
+          await refreshCloudData();
+          emitSetProjects();
+          return { ok: true, overview: await getBunnyCloudOverview() };
+        }),
+        removeBunnyCloudInstance: r(async (params) => {
+          if (!cloudApi) {
+            throw new Error("Not signed in to Bunny Cloud");
+          }
+          await cloudApi.deleteInstance(String(params?.instanceId || ""));
+          await refreshCloudData();
+          emitSetProjects();
+          return { ok: true, overview: await getBunnyCloudOverview() };
+        }),
+        revokeBunnyCloudDevice: r(async (params) => {
+          if (!cloudApi) {
+            throw new Error("Not signed in to Bunny Cloud");
+          }
+          await cloudApi.deleteDeviceToken(String(params?.deviceTokenId || ""));
+          emitSetProjects();
+          return { ok: true, overview: await getBunnyCloudOverview() };
+        }),
         getInitialState: r(() => {
           const workspace = currentBunnyWorkspace();
           ensureBunnyWorkspaceWindow(getCurrentWindow());
@@ -1488,11 +1964,16 @@ app.on("auth-token-cleared", () => {
   runtimeAuthToken = null;
   cloudApi = null;
   cloudInstances = [];
+  cloudWorkspaces = [];
+  cloudCurrentInstanceId = null;
+  fallbackToVisibleLocalWorkspace();
+  syncCloudShadowState();
   if (bunnyDashState.appSettings?.bunnyCloud) {
     bunnyDashState.appSettings.bunnyCloud = structuredClone(defaultBunnyAppSettings.bunnyCloud);
   }
   writePersistedDashState().catch(() => {});
   broadcastAppSettings();
+  emitSetProjects();
 });
 
 function broadcastAppSettings() {
@@ -1540,6 +2021,7 @@ async function syncAuthFromEars() {
   }
   await writePersistedDashState().catch(() => {});
   broadcastAppSettings();
+  emitSetProjects();
 }
 
 ApplicationMenu.on("application-menu-clicked", (event: any) => {
@@ -1600,6 +2082,10 @@ function listWorkspaces() {
   return [...(ensureDb().collection("workspaces").query().data || [])].sort(
     (a, b) => a.sortOrder - b.sortOrder,
   );
+}
+
+function listVisibleLocalWorkspaces() {
+  return listWorkspaces().filter((workspace) => !isCloudShadowWorkspaceKey(workspace.key));
 }
 
 function listProjectMounts() {
@@ -1708,6 +2194,138 @@ function getProjectMountsForWorkspace(workspaceId: string) {
   return listProjectMounts().filter((project) => project.workspaceId === workspaceId);
 }
 
+function fallbackToVisibleLocalWorkspace() {
+  const fallbackWorkspace = listVisibleLocalWorkspaces()[0];
+  if (!fallbackWorkspace) {
+    return;
+  }
+  const fallbackLens = ensureWorkspaceCurrentLens(fallbackWorkspace.key);
+  for (const runtimeWindow of runtimeWindows) {
+    if (!isCloudShadowWorkspaceKey(runtimeWindow.workspaceId)) {
+      continue;
+    }
+    const restored = buildRuntimeWindowFromLens(fallbackLens, runtimeWindow.id);
+    runtimeWindow.workspaceId = restored.workspaceId;
+    runtimeWindow.lensId = restored.lensId;
+    runtimeWindow.title = restored.title;
+    runtimeWindow.mainTabIds = [...restored.mainTabIds];
+    runtimeWindow.sideTabIds = [...restored.sideTabIds];
+    runtimeWindow.currentMainTabId = restored.currentMainTabId;
+    runtimeWindow.currentSideTabId = restored.currentSideTabId;
+    removeBunnyWindowFromAllWorkspaces(runtimeWindow.id);
+    upsertBunnyWindowForWorkspace(restored.workspaceId, makeDefaultBunnyWindow(runtimeWindow.id));
+  }
+  if (isCloudShadowLensKey(state.currentLayoutId)) {
+    state.currentLayoutId = fallbackLens.key;
+  }
+  const currentRuntimeWindow = runtimeWindows.find((window) => window.id === state.currentWindowId);
+  if (currentRuntimeWindow && isCloudShadowWorkspaceKey(currentRuntimeWindow.workspaceId)) {
+    state.currentLayoutId = fallbackLens.key;
+    currentRuntimeWindow.workspaceId = fallbackWorkspace.key;
+    currentRuntimeWindow.lensId = fallbackLens.key;
+  }
+  state.activeTreeNodeId = `workspace-overview:${fallbackWorkspace.key}`;
+}
+
+function syncCloudShadowState() {
+  const db = ensureDb();
+  const activeWorkspaceShadowKeys = new Set<string>();
+  const activeLensShadowKeys = new Set<string>();
+
+  for (const cloudWorkspace of cloudWorkspaces) {
+    const shadowWorkspaceKey = cloudShadowWorkspaceKey(cloudWorkspace.id);
+    activeWorkspaceShadowKeys.add(shadowWorkspaceKey);
+    const subtitle = cloudWorkspace.description?.trim()
+      ? cloudWorkspace.description
+      : "Cloud workspace";
+    const existingWorkspace = findWorkspaceByKey(shadowWorkspaceKey);
+
+    if (existingWorkspace) {
+      db.collection("workspaces").update(existingWorkspace.id, {
+        name: cloudWorkspace.name,
+        subtitle,
+        sortOrder: 10000 + (cloudWorkspace.sort_order || 0),
+      });
+    } else {
+      db.collection("workspaces").insert({
+        key: shadowWorkspaceKey,
+        name: cloudWorkspace.name,
+        subtitle,
+        sortOrder: 10000 + (cloudWorkspace.sort_order || 0),
+      });
+    }
+
+    const existingCurrentLens = findLensByKey(workspaceCurrentLensKey(shadowWorkspaceKey));
+    const currentLens = existingCurrentLens || ensureWorkspaceCurrentLens(shadowWorkspaceKey);
+    if (existingCurrentLens) {
+      db.collection("layouts").update(currentLens.id, {
+        name: "Current",
+        description: `Current working state for ${cloudWorkspace.name}.`,
+        workspaceId: shadowWorkspaceKey,
+      });
+    } else {
+      const currentWindowTemplate = buildDefaultCloudWindowTemplate(
+        shadowWorkspaceKey,
+        cloudWorkspace.name,
+      );
+      db.collection("layouts").update(currentLens.id, {
+        name: "Current",
+        description: `Current working state for ${cloudWorkspace.name}.`,
+        workspaceId: shadowWorkspaceKey,
+        windowStateJson: serializeBunnyWindow(makeDefaultBunnyWindow("main")),
+        windows: [currentWindowTemplate],
+      });
+    }
+
+    for (const cloudLens of cloudWorkspace.lenses || []) {
+      const shadowLensKey = cloudShadowLensKey(cloudLens.id);
+      activeLensShadowKeys.add(shadowLensKey);
+      const parsed = parseCloudLensLayout(
+        cloudLens.layout_json,
+        shadowWorkspaceKey,
+        cloudWorkspace.name,
+        cloudLens.name,
+      );
+      const existingLens = findLensByKey(shadowLensKey);
+      const updates = {
+        name: cloudLens.name,
+        description: cloudLens.description || "",
+        workspaceId: shadowWorkspaceKey,
+        windowStateJson: serializeBunnyWindow(parsed.bunnyWindow),
+        sortOrder: 10000 + (cloudLens.sort_order || 0),
+        windows: parsed.windows,
+      };
+
+      if (existingLens) {
+        db.collection("layouts").update(existingLens.id, updates);
+      } else {
+        db.collection("layouts").insert({
+          key: shadowLensKey,
+          ...updates,
+        });
+      }
+    }
+  }
+
+  for (const workspace of listWorkspaces()) {
+    if (!isCloudShadowWorkspaceKey(workspace.key)) continue;
+    if (activeWorkspaceShadowKeys.has(workspace.key)) continue;
+    const currentLens = findLensByKey(workspaceCurrentLensKey(workspace.key));
+    if (currentLens) {
+      db.collection("layouts").remove(currentLens.id);
+    }
+    db.collection("workspaces").remove(workspace.id);
+  }
+
+  for (const lens of listLenses()) {
+    if (!isCloudShadowLensKey(lens.key)) continue;
+    if (activeLensShadowKeys.has(lens.key)) continue;
+    db.collection("layouts").remove(lens.id);
+  }
+
+  flushDb();
+}
+
 function getDashHomeDir() {
   return dirname(statePath);
 }
@@ -1750,6 +2368,97 @@ function cloneBunnyWindow(value: BunnyWindow) {
 
 function serializeBunnyWindow(value: BunnyWindow) {
   return JSON.stringify(value);
+}
+
+function buildDefaultCloudWindowTemplate(workspaceId: string, workspaceName: string): LensWindow {
+  return {
+    id: "main",
+    title: `${workspaceName} · Main`,
+    workspaceId,
+    mainTabIds: ["workspace"],
+    sideTabIds: ["current-state"],
+    currentMainTabId: "workspace",
+    currentSideTabId: "current-state",
+  };
+}
+
+function serializeCloudLensLayout(currentBunnyWindow: BunnyWindow, currentWindow: LensWindow) {
+  return JSON.stringify({
+    version: 1,
+    bunnyWindow: cloneBunnyWindow(currentBunnyWindow),
+    windowTemplate: toLensTemplateWindow(currentWindow),
+  });
+}
+
+function parseCloudLensLayout(
+  layoutJson: string | undefined,
+  workspaceId: string,
+  workspaceName: string,
+  fallbackLensName: string,
+) {
+  const defaultTemplate = buildDefaultCloudWindowTemplate(workspaceId, workspaceName);
+  const defaultWindowState = makeDefaultBunnyWindow(defaultTemplate.id);
+
+  if (!layoutJson || !layoutJson.trim() || layoutJson.trim() === "{}") {
+    return {
+      bunnyWindow: defaultWindowState,
+      windows: [defaultTemplate],
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(layoutJson) as {
+      bunnyWindow?: BunnyWindow;
+      windowTemplate?: Partial<LensWindow>;
+    };
+    const nextBunnyWindow = parsed?.bunnyWindow
+      ? cloneBunnyWindow(parsed.bunnyWindow)
+      : defaultWindowState;
+    const nextTemplate: LensWindow = {
+      ...defaultTemplate,
+      ...(parsed?.windowTemplate || {}),
+      id: "main",
+      workspaceId,
+      title:
+        typeof parsed?.windowTemplate?.title === "string" &&
+        parsed.windowTemplate.title.trim()
+          ? parsed.windowTemplate.title
+          : `${workspaceName} · ${fallbackLensName}`,
+      mainTabIds:
+        Array.isArray(parsed?.windowTemplate?.mainTabIds) &&
+        parsed.windowTemplate.mainTabIds.length > 0
+          ? (parsed.windowTemplate.mainTabIds as WindowTabId[])
+          : defaultTemplate.mainTabIds,
+      sideTabIds:
+        Array.isArray(parsed?.windowTemplate?.sideTabIds) &&
+        parsed.windowTemplate.sideTabIds.length > 0
+          ? (parsed.windowTemplate.sideTabIds as WindowTabId[])
+          : defaultTemplate.sideTabIds,
+      currentMainTabId:
+        typeof parsed?.windowTemplate?.currentMainTabId === "string"
+          ? (parsed.windowTemplate.currentMainTabId as WindowTabId)
+          : defaultTemplate.currentMainTabId,
+      currentSideTabId:
+        typeof parsed?.windowTemplate?.currentSideTabId === "string"
+          ? (parsed.windowTemplate.currentSideTabId as WindowTabId)
+          : defaultTemplate.currentSideTabId,
+    };
+
+    return {
+      bunnyWindow: nextBunnyWindow,
+      windows: [nextTemplate],
+    };
+  } catch (error) {
+    log(
+      `failed to parse cloud lens layout: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return {
+      bunnyWindow: defaultWindowState,
+      windows: [defaultTemplate],
+    };
+  }
 }
 
 function parseStoredBunnyWindow(lens: LensDoc) {
@@ -2359,7 +3068,7 @@ function buildWorkspaceLensPayload(windowId = state.currentWindowId): BunnyDashW
         carrots: [] as typeof cachedCarrotList,
       })),
     ],
-    workspaces: listWorkspaces().map((workspace) => ({
+    workspaces: listVisibleLocalWorkspaces().map((workspace) => ({
       id: workspace.key,
       name: workspace.name,
       subtitle: workspace.subtitle,
@@ -2383,6 +3092,7 @@ function buildWorkspaceLensPayload(windowId = state.currentWindowId): BunnyDashW
             : false,
       })),
     })),
+    cloudWorkspaces: buildCloudWorkspacePayload(),
   };
 }
 
@@ -3440,6 +4150,18 @@ async function loadState() {
     }
   }
 
+  const needsCloudShadowRestore =
+    isCloudShadowLensKey(state.currentLayoutId) ||
+    runtimeWindows.some((window) => isCloudShadowWorkspaceKey(window.workspaceId));
+  if (needsCloudShadowRestore) {
+    cloudApi = initCloudApi();
+    if (cloudApi) {
+      await refreshCloudData();
+    } else {
+      fallbackToVisibleLocalWorkspace();
+    }
+  }
+
   expandedFsDirs.clear();
   for (const project of listProjectMounts()) {
     if (existsSync(project.path)) {
@@ -3732,7 +4454,6 @@ async function restoreCurrentState() {
 }
 
 async function overwriteCurrentLens() {
-  const db = ensureDb();
   const lens = getCurrentLens();
   const currentWindow = getCurrentWindow();
   await syncRuntimeWindowFrameFromHost(currentWindow.id);
@@ -3740,6 +4461,27 @@ async function overwriteCurrentLens() {
   log(
     `overwriteCurrentLens begin: ${lens.key} rootPane=${currentBunnyWindow.rootPane.type} currentPane=${currentBunnyWindow.currentPaneId}`,
   );
+  if (isCloudShadowLensKey(lens.key)) {
+    if (!cloudApi) {
+      throw new Error("Not signed in to Bunny Cloud");
+    }
+    const cloudWorkspaceId = cloudWorkspaceIdFromShadowKey(getLensWorkspaceId(lens));
+    const cloudLensId = cloudLensIdFromShadowKey(lens.key);
+    await cloudApi.updateLens(cloudWorkspaceId, cloudLensId, {
+      name: lens.name,
+      description: lens.description,
+      layout_json: serializeCloudLensLayout(currentBunnyWindow, currentWindow),
+    });
+    await refreshCloudData();
+    await saveState();
+    syncTray();
+    emitSetProjectsForWindow(currentWindow.id);
+    broadcastRuntimeEventToDashWindows("refreshBunnyDashState");
+    emitSnapshot();
+    log(`cloud lens overwritten: ${lens.name}`);
+    return;
+  }
+  const db = ensureDb();
   db.collection("layouts").update(lens.id, {
     workspaceId: currentWindow.workspaceId,
     windowStateJson: serializeBunnyWindow(currentBunnyWindow),
@@ -3762,7 +4504,6 @@ async function createLens(
   const workspace = getWorkspaceByKey(workspaceId);
   const lenses = listLenses();
   const cleanName = getUniqueLensDisplayName(workspace.key, name);
-  const key = uniqueKey(cleanName, lenses.map((lens) => lens.key));
   const currentWindow = getCurrentWindow();
   const sourceLens = sourceLensId ? getLensByKey(sourceLensId) : null;
   const useCurrentWindowState =
@@ -3799,6 +4540,29 @@ async function createLens(
     );
   }
 
+  if (isCloudShadowWorkspaceKey(workspace.key)) {
+    if (!cloudApi) {
+      throw new Error("Not signed in to Bunny Cloud");
+    }
+    const createdCloudLens = await cloudApi.createLens(
+      cloudWorkspaceIdFromShadowKey(workspace.key),
+      cleanName,
+      serializeCloudLensLayout(sourceBunnyWindow, sourceRuntimeWindow),
+      description.trim() || (sourceLens ? `Forked from ${sourceLens.name}` : `Saved from ${workspace.name}`),
+    );
+    await refreshCloudData();
+    if (useCurrentWindowState) {
+      await openLens(cloudShadowLensKey(createdCloudLens.id));
+    } else {
+      emitSetProjects();
+      broadcastRuntimeEventToDashWindows("refreshBunnyDashState");
+      emitSnapshot();
+    }
+    log(sourceLens ? `cloud lens forked: ${createdCloudLens.name}` : `cloud lens created: ${createdCloudLens.name}`);
+    return snapshot();
+  }
+
+  const key = uniqueKey(cleanName, lenses.map((lens) => lens.key));
   const created = ensureDb().collection("layouts").insert({
     key,
     name: cleanName,
@@ -3952,6 +4716,27 @@ async function renameLens(lensId: string, name: string, description = "") {
 
   const workspace = getWorkspaceByKey(getLensWorkspaceId(lens));
   const cleanName = getUniqueLensDisplayName(workspace.key, name, lens.key);
+  if (isCloudShadowLensKey(lens.key)) {
+    if (!cloudApi) {
+      throw new Error("Not signed in to Bunny Cloud");
+    }
+    await cloudApi.updateLens(
+      cloudWorkspaceIdFromShadowKey(workspace.key),
+      cloudLensIdFromShadowKey(lens.key),
+      {
+        name: cleanName,
+        description: description.trim(),
+      },
+    );
+    await refreshCloudData();
+    await saveState();
+    syncTray();
+    emitSetProjects();
+    broadcastRuntimeEventToDashWindows("refreshBunnyDashState");
+    emitSnapshot();
+    log(`cloud lens renamed: ${cleanName}`);
+    return snapshot();
+  }
   ensureDb().collection("layouts").update(lens.id, {
     name: cleanName,
     description: description.trim(),
@@ -4260,7 +5045,7 @@ function buildWorkspaceLensSidebarData() {
     currentWindowId: currentWindow.id,
     currentWorkspaceId: currentWindow.workspaceId,
     currentLensId,
-    workspaces: listWorkspaces().map((workspace) => ({
+    workspaces: listVisibleLocalWorkspaces().map((workspace) => ({
       id: workspace.key,
       name: workspace.name,
       lenses: getLensesForWorkspace(workspace.key).map((lens) => ({
@@ -4327,6 +5112,78 @@ async function handleBunnyDashRequest(method: string, params: any) {
     case "openFarm": {
       app.openManager();
       return { ok: true };
+    }
+    case "logoutBunnyCloud": {
+      await app.setAuthToken("");
+      emitSetProjects();
+      return { ok: true };
+    }
+    case "getBunnyCloudOverview": {
+      return getBunnyCloudOverview();
+    }
+    case "loginBunnyCloud": {
+      try {
+        const overview = await loginToBunnyCloud({
+          mode: params?.mode === "register" ? "register" : "login",
+          email: String(params?.email || "").trim(),
+          password: String(params?.password || ""),
+          name: typeof params?.name === "string" ? params.name : undefined,
+        });
+        emitSetProjects();
+        return { ok: true, overview };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+    case "registerCurrentBunnyCloudInstance": {
+      try {
+        const overview = await registerCurrentCloudInstance();
+        emitSetProjects();
+        return { ok: true, overview };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+    case "updateCurrentBunnyCloudCarrots": {
+      await app.updateCarrots();
+      await refreshCarrotList();
+      emitSetProjects();
+      return { ok: true, overview: await getBunnyCloudOverview() };
+    }
+    case "createBunnyCloudWorkspace": {
+      if (!cloudApi) {
+        throw new Error("Not signed in to Bunny Cloud");
+      }
+      await cloudApi.createWorkspace(
+        String(params?.name || "").trim(),
+        typeof params?.description === "string" ? params.description : undefined,
+      );
+      await refreshCloudData();
+      emitSetProjects();
+      return { ok: true, overview: await getBunnyCloudOverview() };
+    }
+    case "removeBunnyCloudInstance": {
+      if (!cloudApi) {
+        throw new Error("Not signed in to Bunny Cloud");
+      }
+      await cloudApi.deleteInstance(String(params?.instanceId || ""));
+      await refreshCloudData();
+      emitSetProjects();
+      return { ok: true, overview: await getBunnyCloudOverview() };
+    }
+    case "revokeBunnyCloudDevice": {
+      if (!cloudApi) {
+        throw new Error("Not signed in to Bunny Cloud");
+      }
+      await cloudApi.deleteDeviceToken(String(params?.deviceTokenId || ""));
+      emitSetProjects();
+      return { ok: true, overview: await getBunnyCloudOverview() };
     }
     case "getInitialState": {
       const workspace = currentBunnyWorkspace();

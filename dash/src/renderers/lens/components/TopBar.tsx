@@ -16,6 +16,21 @@ import {
 import { For, type JSX, Show, createEffect, createSignal, createMemo } from "solid-js";
 
 export const TopBar = () => {
+  const isCloudConnected = () => {
+    return !!(
+      state.appSettings.bunnyCloud?.accessToken &&
+      state.appSettings.bunnyCloud?.email
+    );
+  };
+
+  const toggleBunnyCloudSettings = () => {
+    if (state.settingsPane.type === "bunny-cloud-settings") {
+      setState("settingsPane", { type: "", data: {} });
+      return;
+    }
+    setState("settingsPane", { type: "bunny-cloud-settings", data: {} });
+  };
+
   const setCommandPaletteOpen = (value: boolean) => {
     setState("ui", "showCommandPalette", value);
     if (!value) {
@@ -177,18 +192,40 @@ export const TopBar = () => {
         </div>
       </div>
 
-      {/* Bunny Cloud button — opens Farm */}
+      {/* Bunny Cloud button */}
       <div
-        style="font-size: 13px; margin: 8px 4px; cursor: pointer; display: flex; align-items: center; gap: 4px; background: #2d4a3e; border-radius: 4px; padding: 2px 8px;"
-        title="Open Bunny Farm"
+        style={`font-size: 13px; margin: 8px 4px; cursor: pointer; display: flex; align-items: center; gap: 4px; background: ${
+          isCloudConnected() ? "#2d4a3e" : "#303030"
+        }; border-radius: 4px; padding: 2px 8px; border: 1px solid ${
+          isCloudConnected() ? "#356047" : "#3d3d3d"
+        };`}
+        title={
+          isCloudConnected()
+            ? "Bunny Cloud connected - click to manage cloud settings"
+            : "Local mode active - click to sign in to Bunny Cloud"
+        }
         onClick={() => {
-          electrobun.rpc?.request.openFarm();
+          toggleBunnyCloudSettings();
         }}
       >
-        <svg style="width: 14px; height: 14px;" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2">
+        <svg
+          style="width: 14px; height: 14px;"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke={isCloudConnected() ? "#4ade80" : "#a3a3a3"}
+          stroke-width="2"
+        >
           <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path>
         </svg>
-        <span style="color: #4ade80; font-weight: 500; font-size: 12px;">Cloud</span>
+        <span
+          style={{
+            color: isCloudConnected() ? "#4ade80" : "#d0d0d0",
+            "font-weight": "500",
+            "font-size": "12px",
+          }}
+        >
+          {isCloudConnected() ? "Cloud" : "Sign In"}
+        </span>
       </div>
 
       {/* Bunny Dash button */}

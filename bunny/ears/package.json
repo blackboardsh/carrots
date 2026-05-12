@@ -5,13 +5,14 @@
   "type": "module",
   "scripts": {
     "start": "electrobun dev",
-    "dev": "electrobun dev --watch",
+    "dev": "electrobun dev",
+    "dev:watch": "electrobun dev --watch",
     "build:canary": "electrobun build --env=canary",
     "build:stable": "electrobun build --env=stable",
     "test:integration": "bun test tests/carrot.integration.test.ts"
   },
   "dependencies": {
-    "electrobun": "1.18.4-beta.3",
+    "electrobun": "file:../../../electrobun/package",
     "goldfishdb": "*"
   }
 }
