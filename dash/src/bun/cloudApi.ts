@@ -166,6 +166,8 @@ export class CloudApi {
 
 export function getApiBaseUrl(channel?: string): string {
   if (channel === "dev") return "http://localhost:8787";
-  if (channel === "staging") return "https://staging-api.electrobunny.ai";
+  if (channel === "staging" || channel === "canary") {
+    return "https://staging-api.electrobunny.ai";
+  }
   return "https://api.electrobunny.ai";
 }

@@ -63,9 +63,21 @@ const SCHEMA_VERSION = 1;
  */
 function getApiBaseUrl(): string {
   const channel = state.buildVars.channel;
-  if (channel === 'dev') return 'http://127.0.0.1:8788';
-  if (channel === 'canary') return 'https://canary-cloud.blackboard.sh';
-  return 'https://cloud.blackboard.sh';
+  const host = typeof window !== "undefined" ? window.location.hostname : "";
+
+  if (channel === "dev" || host === "localhost" || host === "127.0.0.1") {
+    return "http://127.0.0.1:8788";
+  }
+
+  if (
+    channel === "canary" ||
+    channel === "staging" ||
+    host.includes("staging")
+  ) {
+    return "https://staging-api.electrobunny.ai";
+  }
+
+  return "https://api.electrobunny.ai";
 }
 
 /**

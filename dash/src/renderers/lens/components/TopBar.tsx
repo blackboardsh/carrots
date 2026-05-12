@@ -195,7 +195,7 @@ export const TopBar = () => {
       <div
         style={`font-size: 13px;margin: 8px 0px; margin-right: -2px; cursor: pointer; display: flex; align-items: center; gap: 6px; background: ${
           state.buildVars.channel === "dev" ? "#5a1616" :
-          state.buildVars.channel === "canary" ? "#076310" :
+          (state.buildVars.channel === "canary" || state.buildVars.channel === "staging") ? "#076310" :
           "#184d8b"
         }; border-radius: 4px; padding: 2px 8px 2px 4px;`}
         title="This is a beta version of Bunny Dash"
@@ -210,6 +210,7 @@ export const TopBar = () => {
         />
         <span style="color: #fff; font-weight: bold;">Bunny Dash{state.buildVars.channel === "dev" ? " - dev" :
           state.buildVars.channel === "canary" ? " - canary" :
+          state.buildVars.channel === "staging" ? " - staging" :
           ""}</span>
       </div>
 

@@ -187,7 +187,7 @@ export const updateSyncedAppSettings = () => {
 export interface AppState {
   port: null | MessagePort;
   buildVars: {
-    channel: "stable" | "canary" | "dev" | "";
+    channel: "stable" | "canary" | "staging" | "dev" | "";
     version: string;
     hash: string;
   };
@@ -416,7 +416,7 @@ export interface AppState {
 
 const initialState: AppState = {
   port: null,
-  buildVars: { channel: "", version: "" },
+  buildVars: { channel: "", version: "", hash: "" },
   update: {
     status: null,
     info: null,
