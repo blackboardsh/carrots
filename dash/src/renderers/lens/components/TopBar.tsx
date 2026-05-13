@@ -168,7 +168,7 @@ export const TopBar = () => {
         <div
           data-bunny-tip
           style="position: absolute; right: 100%; top: 50%; transform: translateX(8px); margin-right: 6px; white-space: nowrap; background: #111; color: #c0c0c0; font-size: 12px; padding: 4px 10px; border-radius: 4px; border: 1px solid #333; z-index: 9999; pointer-events: none; opacity: 0; transition: opacity 0.3s ease, transform 0.3s ease; translate: 0 -50%;"
-        >Bunny Dash is built with Electrobun</div>
+        >Dash is built with Electrobun</div>
         <div
           data-bunny-btn
           style={{
@@ -249,7 +249,7 @@ export const TopBar = () => {
           }}
           src="views://assets/icon_32x32@2x.png"
         />
-        <span style="color: #fff; font-weight: bold;">Bunny Dash{state.buildVars.channel === "dev" ? " - dev" :
+        <span style="color: #fff; font-weight: bold;">Dash{state.buildVars.channel === "dev" ? " - dev" :
           state.buildVars.channel === "canary" ? " - canary" :
           state.buildVars.channel === "staging" ? " - staging" :
           ""}</span>
