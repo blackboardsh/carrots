@@ -32,6 +32,7 @@ import { getNode } from "./FileWatcher";
 import {
 	type AppState,
 	type BunnyDashCloudProjectMountType,
+	type BunnyDashKnownLocalProjectType,
 	type BunnyDashCloudWorkspaceTreeType,
 	type BunnyDashWorkspaceTreeType,
 	editNodeSettings,
@@ -588,117 +589,174 @@ export const TemplateNodes = () => {
 };
 
 export const ProjectsTree = () => {
-	const projectsAsArray = () => {
-		return Object.values(state.projects);
-	};
-
+	const localProjects = () => state.bunnyDash?.knownLocalProjects || [];
 	const instances = () => state.bunnyDash?.instances || [];
 	const hasInstances = () => instances().length > 0;
 	const getInstance = (id: string) => instances().find((instance) => instance.id === id);
+	const normalizeInstanceId = (instanceId: string, isCurrent = false) =>
+		isCurrent || instanceId === "host-machine" ? "host-machine" : instanceId;
 
-	const projectsByInstance = () => {
-		const groups = new Map<string, typeof state.projects[string][]>();
-		for (const project of projectsAsArray()) {
-			const instId = (project as any).instanceId || "host-machine";
-			if (!groups.has(instId)) groups.set(instId, []);
-			groups.get(instId)!.push(project);
-		}
-		return groups;
-	};
+	const currentWorkspace = createMemo(() =>
+		(state.bunnyDash?.cloudWorkspaces || []).find(
+			(workspace) => workspace.runtimeWorkspaceId === state.bunnyDash.currentWorkspaceId,
+		),
+	);
+	const isWorkspaceContext = () => Boolean(currentWorkspace());
 
-	const cloudMountsByInstance = createMemo(() => {
-		const groups = new Map<string, BunnyDashCloudProjectMountType[]>();
-		const seenByInstance = new Map<string, Set<string>>();
-		for (const workspace of state.bunnyDash?.cloudWorkspaces || []) {
-			for (const linkedInstance of workspace.linkedInstances) {
-				const instanceId = linkedInstance.isCurrent ? "host-machine" : linkedInstance.id;
-				if (!groups.has(instanceId)) groups.set(instanceId, []);
-				if (!seenByInstance.has(instanceId)) seenByInstance.set(instanceId, new Set());
-				const seen = seenByInstance.get(instanceId)!;
-				for (const mount of linkedInstance.mounts) {
-					if (seen.has(mount.id)) continue;
-					seen.add(mount.id);
-					groups.get(instanceId)!.push(mount);
-				}
-			}
+	const localProjectsByInstance = createMemo(() => {
+		const groups = new Map<string, BunnyDashKnownLocalProjectType[]>();
+		for (const project of localProjects()) {
+			const instanceId = normalizeInstanceId(project.instanceId);
+			if (!groups.has(instanceId)) groups.set(instanceId, []);
+			groups.get(instanceId)!.push(project);
 		}
 
-		for (const mounts of groups.values()) {
-			mounts.sort((left, right) => {
-				const workspaceCompare = left.workspaceName.localeCompare(right.workspaceName);
-				if (workspaceCompare !== 0) return workspaceCompare;
-				return left.name.localeCompare(right.name);
-			});
+		for (const projects of groups.values()) {
+			projects.sort((left, right) => left.name.localeCompare(right.name));
 		}
 
 		return groups;
 	});
 
-	const instancesWithProjects = () => {
-		const groupedProjects = projectsByInstance();
-		const groupedCloudMounts = cloudMountsByInstance();
-		const instanceIds = new Set<string>();
-
-		for (const instance of instances()) {
-			if (
-				instance.isCurrent ||
-				(groupedProjects.get(instance.id)?.length || 0) > 0 ||
-				(groupedCloudMounts.get(instance.id)?.length || 0) > 0
-			) {
-				instanceIds.add(instance.id);
-			}
+	const workspaceMountsByInstance = createMemo(() => {
+		const groups = new Map<string, BunnyDashCloudProjectMountType[]>();
+		for (const linkedInstance of currentWorkspace()?.linkedInstances || []) {
+			const instanceId = normalizeInstanceId(linkedInstance.id, linkedInstance.isCurrent);
+			if (!groups.has(instanceId)) groups.set(instanceId, []);
+			groups.get(instanceId)!.push(...linkedInstance.mounts);
 		}
 
-		for (const instanceId of groupedProjects.keys()) {
-			instanceIds.add(instanceId);
-		}
-		for (const instanceId of groupedCloudMounts.keys()) {
-			instanceIds.add(instanceId);
+		for (const mounts of groups.values()) {
+			mounts.sort((left, right) => left.name.localeCompare(right.name));
 		}
 
-		return Array.from(instanceIds)
-			.map((instanceId) => ({
-				instanceId,
-				projects: groupedProjects.get(instanceId) || [],
-				cloudMounts: groupedCloudMounts.get(instanceId) || [],
-			}))
-			.sort((left, right) => {
-				const leftCurrent = isCurrentInstance(left.instanceId);
-				const rightCurrent = isCurrentInstance(right.instanceId);
-				if (leftCurrent !== rightCurrent) {
-					return leftCurrent ? -1 : 1;
-				}
-				return getInstanceName(left.instanceId).localeCompare(getInstanceName(right.instanceId));
-			});
-	};
+		return groups;
+	});
 
 	const getInstanceName = (id: string) => getInstance(id)?.name || (id === "host-machine" ? "This Machine" : id);
 	const getInstanceStatus = (id: string) => getInstance(id)?.status || "local";
 	const getInstanceOs = (id: string) => getInstance(id)?.os || "";
 	const isCurrentInstance = (id: string) => getInstance(id)?.isCurrent ?? id === "host-machine";
 
+	const workspaceInstanceRows = createMemo(() => {
+		const instanceIds = new Set<string>();
+		for (const instanceId of workspaceMountsByInstance().keys()) {
+			instanceIds.add(instanceId);
+		}
+		if ((localProjectsByInstance().get("host-machine") || []).length > 0) {
+			instanceIds.add("host-machine");
+		}
+
+		return Array.from(instanceIds).sort((left, right) => {
+			const leftCurrent = isCurrentInstance(left);
+			const rightCurrent = isCurrentInstance(right);
+			if (leftCurrent !== rightCurrent) {
+				return leftCurrent ? -1 : 1;
+			}
+			return getInstanceName(left).localeCompare(getInstanceName(right));
+		});
+	});
+
+	const localSessionInstanceRows = createMemo(() => {
+		const instanceIds = new Set<string>();
+		for (const instanceId of localProjectsByInstance().keys()) {
+			instanceIds.add(instanceId);
+		}
+		if (instanceIds.size === 0 && hasInstances()) {
+			instanceIds.add("host-machine");
+		}
+
+		return Array.from(instanceIds).sort((left, right) => {
+			const leftCurrent = isCurrentInstance(left);
+			const rightCurrent = isCurrentInstance(right);
+			if (leftCurrent !== rightCurrent) {
+				return leftCurrent ? -1 : 1;
+			}
+			return getInstanceName(left).localeCompare(getInstanceName(right));
+		});
+	});
+
+	const SectionLabel = (props: { label: string; subtitle?: string }) => (
+		<div
+			style={{
+				padding: "6px 12px 4px 26px",
+				color: "#6f6f6f",
+				"font-size": "10px",
+				"font-weight": "700",
+				"text-transform": "uppercase",
+				"letter-spacing": "0.08em",
+			}}
+		>
+			{props.label}
+			<Show when={props.subtitle}>
+				<span
+					style={{
+						"text-transform": "none",
+						"letter-spacing": "0",
+						"font-weight": "500",
+						color: "#888",
+						"margin-left": "6px",
+					}}
+				>
+					{props.subtitle}
+				</span>
+			</Show>
+		</div>
+	);
+
 	return (
 		<>
-			<CategoryRow label="Projects" showAddButton={false} />
-			<Show when={hasInstances()} fallback={
-				<For each={projectsAsArray()}>
-					{(project) => {
-						const node = () => getNode(project.path);
-						return (
-							<Show when={node()}>
-								<TreeUL><FileTree node={node()!} /></TreeUL>
-							</Show>
+			<CategoryRow
+				label={isWorkspaceContext() ? "Workspace Resources" : "Projects"}
+				showAddButton={false}
+			/>
+			<Show
+				when={hasInstances()}
+				fallback={
+					<For each={localProjects()}>
+						{(project) => {
+							const node = () => getNode(project.path);
+							return (
+								<Show when={node()}>
+									<TreeUL><FileTree node={node()!} /></TreeUL>
+								</Show>
+							);
+						}}
+					</For>
+				}
+			>
+				<For each={isWorkspaceContext() ? workspaceInstanceRows() : localSessionInstanceRows()}>
+					{(instanceId) => {
+						const projects = createMemo(
+							() => localProjectsByInstance().get(instanceId) || [],
 						);
-					}}
-				</For>
-			}>
-				<For each={instancesWithProjects()}>
-					{({ instanceId, projects, cloudMounts }) => {
-						const resolvedCloudMounts = () => cloudMounts;
+						const workspaceMounts = createMemo(
+							() => workspaceMountsByInstance().get(instanceId) || [],
+						);
+						const exposedPaths = createMemo(
+							() => new Set(workspaceMounts().map((mount) => mount.path)),
+						);
+						const exposedProjects = createMemo(() =>
+							projects().filter((project) => exposedPaths().has(project.path)),
+						);
+						const availableProjects = createMemo(() =>
+							projects().filter((project) => !exposedPaths().has(project.path)),
+						);
+						const mountOnlyEntries = createMemo(() =>
+							workspaceMounts().filter(
+								(mount) => !projects().some((project) => project.path === mount.path),
+							),
+						);
+						const hasWorkspaceResources = createMemo(
+							() =>
+								exposedProjects().length > 0 ||
+								availableProjects().length > 0 ||
+								mountOnlyEntries().length > 0,
+						);
 						const [expanded, setExpanded] = createSignal(
-							getInstanceStatus(instanceId) === "online" ||
-								instanceId === "host-machine" ||
-								resolvedCloudMounts().length > 0
+							isWorkspaceContext()
+								? isCurrentInstance(instanceId) || workspaceMounts().length > 0
+								: true,
 						);
 						const [isHovered, setIsHovered] = createSignal(false);
 						const [isAddHovered, setIsAddHovered] = createSignal(false);
@@ -707,7 +765,10 @@ export const ProjectsTree = () => {
 							<TreeUL>
 								<li
 									onMouseEnter={() => setIsHovered(true)}
-									onMouseLeave={() => { setIsHovered(false); setIsAddHovered(false); }}
+									onMouseLeave={() => {
+										setIsHovered(false);
+										setIsAddHovered(false);
+									}}
 								>
 									<div
 										onClick={() => setExpanded(!expanded())}
@@ -730,18 +791,34 @@ export const ProjectsTree = () => {
 											"border-radius": "4px",
 										}}
 									>
-										<span style={{
-											"font-size": "8px",
-											transition: "transform 0.15s",
-											transform: expanded() ? "rotate(90deg)" : "rotate(0deg)",
-											color: "#888",
-										}}>▶</span>
-										<span style={{
-											width: "7px", height: "7px", "border-radius": "50%",
-											background: getInstanceStatus(instanceId) === "online" ? "#51cf66" : "#666",
-											"flex-shrink": "0",
-										}} />
-										<span style={{ "font-weight": "500", flex: "1", overflow: "hidden", "text-overflow": "ellipsis", "white-space": "nowrap" }}>
+										<span
+											style={{
+												"font-size": "8px",
+												transition: "transform 0.15s",
+												transform: expanded() ? "rotate(90deg)" : "rotate(0deg)",
+												color: "#888",
+											}}
+										>
+											▶
+										</span>
+										<span
+											style={{
+												width: "7px",
+												height: "7px",
+												"border-radius": "50%",
+												background: getInstanceStatus(instanceId) === "online" ? "#51cf66" : "#666",
+												"flex-shrink": "0",
+											}}
+										/>
+										<span
+											style={{
+												"font-weight": "500",
+												flex: "1",
+												overflow: "hidden",
+												"text-overflow": "ellipsis",
+												"white-space": "nowrap",
+											}}
+										>
 											{getInstanceName(instanceId)}
 										</span>
 										<Show when={isCurrentInstance(instanceId)}>
@@ -760,9 +837,16 @@ export const ProjectsTree = () => {
 											</span>
 										</Show>
 										<Show when={getInstanceOs(instanceId)}>
-											<span style={{ color: "#555", "font-size": "10px", "flex-shrink": "0" }}>{getInstanceOs(instanceId)}</span>
+											<span
+												style={{
+													color: "#555",
+													"font-size": "10px",
+													"flex-shrink": "0",
+												}}
+											>
+												{getInstanceOs(instanceId)}
+											</span>
 										</Show>
-										{/* Add project button */}
 										<div
 											onClick={(e) => {
 												e.stopPropagation();
@@ -772,8 +856,28 @@ export const ProjectsTree = () => {
 														setState("settingsPane", {
 															type: "add-node",
 															data: {
-																node: { ...newNode, slate: { v: 1, name: newNode.name, type: "project", url: "", icon: "views://assets/file-icons/folder.svg", config: {} } },
-																previewNode: { ...newNode, slate: { v: 1, name: newNode.name, type: "project", url: "", icon: "views://assets/file-icons/folder.svg", config: {} } },
+																node: {
+																	...newNode,
+																	slate: {
+																		v: 1,
+																		name: newNode.name,
+																		type: "project",
+																		url: "",
+																		icon: "views://assets/file-icons/folder.svg",
+																		config: {},
+																	},
+																},
+																previewNode: {
+																	...newNode,
+																	slate: {
+																		v: 1,
+																		name: newNode.name,
+																		type: "project",
+																		url: "",
+																		icon: "views://assets/file-icons/folder.svg",
+																		config: {},
+																	},
+																},
 															},
 														});
 													});
@@ -781,54 +885,147 @@ export const ProjectsTree = () => {
 											onMouseEnter={() => setIsAddHovered(true)}
 											onMouseLeave={() => setIsAddHovered(false)}
 											style={{
-												width: "18px", height: "18px",
-												"text-align": "center", "line-height": "17px",
-												"font-size": "14px", "font-weight": "500",
+												width: "18px",
+												height: "18px",
+												"text-align": "center",
+												"line-height": "17px",
+												"font-size": "14px",
+												"font-weight": "500",
 												"border-radius": "3px",
-												opacity: isHovered() ? 1 : 0,
+												opacity: !isWorkspaceContext() && isHovered() ? 1 : 0,
 												cursor: "pointer",
-												color: isAddHovered() ? "rgba(59, 130, 246, 0.9)" : "rgba(0, 0, 0, 0.5)",
-												background: isAddHovered() ? "rgba(59, 130, 246, 0.15)" : "rgba(0, 0, 0, 0.08)",
-												border: isAddHovered() ? "1px solid rgba(59, 130, 246, 0.4)" : "1px solid rgba(0, 0, 0, 0.15)",
+												"pointer-events": !isWorkspaceContext() && isHovered() ? "auto" : "none",
+												color: isAddHovered()
+													? "rgba(59, 130, 246, 0.9)"
+													: "rgba(0, 0, 0, 0.5)",
+												background: isAddHovered()
+													? "rgba(59, 130, 246, 0.15)"
+													: "rgba(0, 0, 0, 0.08)",
+												border: isAddHovered()
+													? "1px solid rgba(59, 130, 246, 0.4)"
+													: "1px solid rgba(0, 0, 0, 0.15)",
 												transition: "all 0.15s ease",
 												"flex-shrink": "0",
 											}}
-										>+</div>
+										>
+											+
+										</div>
 									</div>
-									<Show when={expanded()}>
-										<For each={projects}>
-											{(project) => {
-												const node = () => getNode(project.path);
-												return (
-													<Show when={node()}>
-														<TreeUL><FileTree node={node()!} /></TreeUL>
-													</Show>
-												);
-											}}
-										</For>
-										<For each={resolvedCloudMounts()}>
-											{(mount) => {
-												const mountNode = {
-													type: "dir" as const,
-													name: mount.name,
-													path: `__BUNNY_CLOUD_MOUNT__/${mount.id}`,
-													children: [],
-												};
+									<Show
+										when={expanded()}
+										fallback={null}
+									>
+										<Show
+											when={isWorkspaceContext()}
+											fallback={
+												<For each={projects()}>
+													{(project) => {
+														const node = () => getNode(project.path);
+														return (
+															<Show when={node()}>
+																<TreeUL><FileTree node={node()!} /></TreeUL>
+															</Show>
+														);
+													}}
+												</For>
+											}
+										>
+											<Show
+												when={hasWorkspaceResources()}
+												fallback={
+													<div
+														style={{
+															padding: "8px 12px 10px 26px",
+															color: "#777",
+															"font-size": "12px",
+														}}
+													>
+														No projects are visible here yet.
+													</div>
+												}
+											>
+												<Show when={isCurrentInstance(instanceId) && (exposedProjects().length > 0 || mountOnlyEntries().length > 0)}>
+													<SectionLabel label="In This Workspace" />
+													<For each={exposedProjects()}>
+														{(project) => {
+															const node = () => getNode(project.path);
+															return (
+																<Show when={node()}>
+																	<TreeUL><FileTree node={node()!} /></TreeUL>
+																</Show>
+															);
+														}}
+													</For>
+													<For each={mountOnlyEntries()}>
+														{(mount) => {
+															const mountNode = {
+																type: "dir" as const,
+																name: mount.name,
+																path: `__BUNNY_CLOUD_MOUNT__/${mount.id}`,
+																children: [],
+															};
 
-												return (
-													<TreeUL>
-														<TreeLI node={mountNode as any}>
-															<WorkspaceTreeRow
-																node={mountNode as any}
-																label={mount.name}
-																icon="views://assets/file-icons/folder.svg"
-																subtitle={`${mount.workspaceName} · ${mount.path}`}
-															/>
-														</TreeLI>
-													</TreeUL>
-												);
-											}}
-										</For>
+															return (
+																<TreeUL>
+																	<TreeLI node={mountNode as any}>
+																		<WorkspaceTreeRow
+																			node={mountNode as any}
+																			label={mount.name}
+																			icon="views://assets/file-icons/folder.svg"
+																			subtitle={mount.path}
+																		/>
+																	</TreeLI>
+																</TreeUL>
+															);
+														}}
+													</For>
+												</Show>
+
+												<Show when={isCurrentInstance(instanceId) && availableProjects().length > 0}>
+													<SectionLabel
+														label="Available On This Instance"
+														subtitle="Not exposed to this workspace yet"
+													/>
+													<For each={availableProjects()}>
+														{(project) => {
+															const node = () => getNode(project.path);
+															return (
+																<Show when={node()}>
+																	<TreeUL><FileTree node={node()!} /></TreeUL>
+																</Show>
+															);
+														}}
+													</For>
+												</Show>
+
+												<Show when={!isCurrentInstance(instanceId) && workspaceMounts().length > 0}>
+													<SectionLabel label="Exposed In Workspace" />
+													<For each={workspaceMounts()}>
+														{(mount) => {
+															const mountNode = {
+																type: "dir" as const,
+																name: mount.name,
+																path: `__BUNNY_CLOUD_MOUNT__/${mount.id}`,
+																children: [],
+															};
+
+															return (
+																<TreeUL>
+																	<TreeLI node={mountNode as any}>
+																		<WorkspaceTreeRow
+																			node={mountNode as any}
+																			label={mount.name}
+																			icon="views://assets/file-icons/folder.svg"
+																			subtitle={mount.path}
+																		/>
+																	</TreeLI>
+																</TreeUL>
+															);
+														}}
+													</For>
+												</Show>
+											</Show>
+										</Show>
 									</Show>
 								</li>
 							</TreeUL>

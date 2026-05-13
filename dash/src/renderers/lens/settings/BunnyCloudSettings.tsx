@@ -446,7 +446,7 @@ export const BunnyCloudSettings = (): JSXElement => {
                   <Show
                     when={isConnected()}
                     fallback={
-                      <>Bunny Dash works on this machine without an account. Sign in here to unlock cloud workspaces, linked instances, and synced settings.</>
+                      <>Bunny Dash works on this machine without an account. Sign in here to unlock workspaces, linked instances, and synced settings.</>
                     }
                   >
                     Signed in as {currentUserEmail() || currentUserName()}.
@@ -702,7 +702,7 @@ export const BunnyCloudSettings = (): JSXElement => {
                 fallback={
                   <SettingsPaneField label="">
                     <div style="font-size: 11px; color: #888;">
-                      Sign in to Bunny Cloud to create and manage shared workspaces.
+                      Sign in to Bunny Cloud to create and manage workspaces.
                     </div>
                   </SettingsPaneField>
                 }
@@ -727,10 +727,10 @@ export const BunnyCloudSettings = (): JSXElement => {
                   </div>
                 </SettingsPaneField>
 
-                <SettingsPaneField label="Cloud Workspaces">
+                <SettingsPaneField label="Workspaces">
                   <Show
                     when={(cloudOverview()?.workspaces || []).length > 0}
-                    fallback={<div style="font-size: 11px; color: #888;">No cloud workspaces yet.</div>}
+                    fallback={<div style="font-size: 11px; color: #888;">No workspaces yet.</div>}
                   >
                     <div style="display: flex; flex-direction: column; gap: 8px;">
                       <For each={cloudOverview()?.workspaces || []}>

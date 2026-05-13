@@ -115,6 +115,16 @@ export type BunnyDashCloudLinkedInstanceType = {
   mounts: BunnyDashCloudProjectMountType[];
 };
 
+export type BunnyDashKnownLocalProjectType = {
+  id: string;
+  name: string;
+  path: string;
+  instanceId: string;
+  instanceLabel: string;
+  kind: string;
+  status: string;
+};
+
 export type BunnyDashCloudWorkspaceTreeType = {
   id: string;
   name: string;
@@ -280,6 +290,7 @@ export interface AppState {
     instances: BunnyDashInstanceType[];
     workspaces: BunnyDashWorkspaceTreeType[];
     cloudWorkspaces: BunnyDashCloudWorkspaceTreeType[];
+    knownLocalProjects: BunnyDashKnownLocalProjectType[];
   };
   projects: { [id: string]: CurrentDocumentTypes["projects"] };
   tokens: any[];
@@ -533,6 +544,7 @@ const initialState: AppState = {
     instances: [],
     workspaces: [],
     cloudWorkspaces: [],
+    knownLocalProjects: [],
   },
   windowId: "",
   editors: {},

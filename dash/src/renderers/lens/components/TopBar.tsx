@@ -294,7 +294,7 @@ const WorkspaceLensSwitcher = () => {
       (workspace: BunnyDashWorkspaceTreeType) => ({
         id: workspace.id,
         name: workspace.name,
-        subtitle: workspace.subtitle || "Local Session",
+        subtitle: workspace.subtitle || "Workspace",
         isCloud: false,
         isCurrent: workspace.isCurrent,
         lenses: workspace.lenses.map((lens) => ({
@@ -309,7 +309,7 @@ const WorkspaceLensSwitcher = () => {
       (workspace: BunnyDashCloudWorkspaceTreeType) => ({
         id: workspace.runtimeWorkspaceId,
         name: workspace.name,
-        subtitle: workspace.subtitle || "Remote Workspace",
+        subtitle: workspace.subtitle || "Cloud Workspace",
         isCloud: true,
         isCurrent: workspace.isCurrent,
         lenses: workspace.lenses.map((lens) => ({
@@ -348,7 +348,7 @@ const WorkspaceLensSwitcher = () => {
   };
 
   const currentWorkspacePill = () =>
-    currentWorkspace()?.isCloud ? "Remote" : "Local";
+    currentWorkspace()?.isCloud ? "Cloud Workspace" : "Workspace";
 
   const currentContextLabel = () =>
     `${currentWorkspaceName()} · ${currentLensName()}`;
@@ -618,7 +618,7 @@ const WorkspaceLensSwitcher = () => {
                         </div>
                       </div>
                       <div style={{ color: "#7f7f7f", "font-size": "11px", "flex-shrink": "0" }}>
-                        {workspace.isCloud ? "Remote" : "Local"}
+                        {workspace.isCloud ? "Cloud Workspace" : "Workspace"}
                       </div>
                     </div>
 

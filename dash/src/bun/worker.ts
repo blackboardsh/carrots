@@ -303,6 +303,15 @@ type BunnyDashWorkspaceLensPayload = {
       }>;
     }>;
   }>;
+  knownLocalProjects: Array<{
+    id: string;
+    name: string;
+    path: string;
+    instanceId: string;
+    instanceLabel: string;
+    kind: string;
+    status: string;
+  }>;
 };
 
 let statePath = "";
@@ -1229,6 +1238,13 @@ function getOrCreateBrowserWindow(windowId = state.currentWindowId, title?: stri
         overwriteCurrentLens: r(async () => { await overwriteCurrentLens(); return snapshot(); }),
         updateCurrentLayout: r(async () => { await overwriteCurrentLens(); return snapshot(); }),
         addProjectMount: r(async (params) => addProjectMount({ workspaceId: params?.workspaceId, name: params?.name, path: String(params?.path || ""), instanceId: params?.instanceId, instanceLabel: params?.instanceLabel, kind: params?.kind })),
+        removeProjectMount: r(async (params) =>
+          removeProjectMountFromWorkspace({
+            workspaceId: params?.workspaceId,
+            projectId: typeof params?.projectId === "string" ? params.projectId : undefined,
+            mountId: typeof params?.mountId === "string" ? params.mountId : undefined,
+          })
+        ),
         saveLens: r(async (params) => saveLens(String(params?.name || ""), String(params?.description || ""))),
         saveLayout: r(async (params) => saveLens(String(params?.name || ""), String(params?.description || ""))),
         createLens: r(async (params) => createLens(String(params?.workspaceId || getCurrentWorkspace().key), String(params?.name || ""), String(params?.description || ""), typeof params?.sourceLensId === "string" ? params.sourceLensId : undefined)),
@@ -2595,6 +2611,30 @@ function bunnyProjectsForWorkspace(workspaceId: string) {
   }));
 }
 
+function bunnyKnownLocalProjects() {
+  const dedupedByPath = new Map<string, ReturnType<typeof bunnyProjectsForWorkspace>[number]>();
+
+  for (const project of listProjectMounts()) {
+    if (!project.path || dedupedByPath.has(project.path)) {
+      continue;
+    }
+
+    dedupedByPath.set(project.path, {
+      id: project.key,
+      name: project.name,
+      path: project.path,
+      instanceId: project.instanceId || "host-machine",
+      instanceLabel: project.instanceLabel || "This Machine",
+      kind: project.kind || "code",
+      status: project.status || "ready",
+    });
+  }
+
+  return Array.from(dedupedByPath.values()).sort((left, right) =>
+    left.name.localeCompare(right.name)
+  );
+}
+
 function bunnyBuildVars() {
   return {
     channel: "dev",
@@ -3093,6 +3133,7 @@ function buildWorkspaceLensPayload(windowId = state.currentWindowId): BunnyDashW
       })),
     })),
     cloudWorkspaces: buildCloudWorkspacePayload(),
+    knownLocalProjects: bunnyKnownLocalProjects(),
   };
 }
 
@@ -4643,9 +4684,7 @@ async function addProjectMount(params: {
 }) {
   const workspaceId = params.workspaceId || getCurrentWorkspace().key;
   const workspace = getWorkspaceByKey(workspaceId);
-  const projects = listProjectMounts();
   const projectName = params.name?.trim() || basename(params.path) || "project";
-  const existingWorkspaceProjects = getProjectMountsForWorkspace(workspace.key);
   const resolvedPath = params.path.trim();
 
   if (!resolvedPath) {
@@ -4659,6 +4698,48 @@ async function addProjectMount(params: {
   if (!statSync(resolvedPath).isDirectory()) {
     throw new Error(`Project path is not a directory: ${resolvedPath}`);
   }
+
+  if (isCloudShadowWorkspaceKey(workspace.key)) {
+    if (!cloudApi) {
+      throw new Error("Not signed in to Bunny Cloud");
+    }
+
+    const cloudWorkspaceId = cloudWorkspaceIdFromShadowKey(workspace.key);
+    const cloudWorkspace = cloudWorkspaces.find((candidate) => candidate.id === cloudWorkspaceId);
+    const currentCloudInstanceId = cloudCurrentInstanceId;
+    if (!currentCloudInstanceId) {
+      throw new Error("This instance is not registered to Bunny Cloud");
+    }
+
+    const targetInstanceId =
+      params.instanceId && params.instanceId !== "host-machine"
+        ? params.instanceId
+        : currentCloudInstanceId;
+
+    if (
+      cloudWorkspace?.mounts?.some(
+        (mount) =>
+          mount.instance_id === targetInstanceId &&
+          (mount.path === resolvedPath || mount.name === projectName),
+      )
+    ) {
+      throw new Error(`Workspace ${workspace.name} already contains ${projectName}`);
+    }
+
+    await cloudApi.createProjectMount(
+      cloudWorkspaceId,
+      targetInstanceId,
+      resolvedPath,
+      projectName,
+    );
+    await refreshCloudData();
+    emitSetProjects();
+    await writePersistedDashState();
+    return snapshot();
+  }
+
+  const projects = listProjectMounts();
+  const existingWorkspaceProjects = getProjectMountsForWorkspace(workspace.key);
 
   if (
     existingWorkspaceProjects.some(
@@ -4691,6 +4772,44 @@ async function addProjectMount(params: {
   syncTray();
   emitSnapshot();
   log(`project added: ${created.name}`);
+  return snapshot();
+}
+
+async function removeProjectMountFromWorkspace(params: {
+  workspaceId?: string;
+  projectId?: string;
+  mountId?: string;
+}) {
+  const workspaceId = params.workspaceId || getCurrentWorkspace().key;
+  const workspace = getWorkspaceByKey(workspaceId);
+
+  if (isCloudShadowWorkspaceKey(workspace.key)) {
+    if (!cloudApi) {
+      throw new Error("Not signed in to Bunny Cloud");
+    }
+    const mountId = String(params.mountId || "");
+    if (!mountId) {
+      throw new Error("Workspace mount id is required");
+    }
+    await cloudApi.deleteProjectMount(
+      cloudWorkspaceIdFromShadowKey(workspace.key),
+      mountId,
+    );
+    await refreshCloudData();
+    emitSetProjects();
+    await writePersistedDashState();
+    return snapshot();
+  }
+
+  const projectId = String(params.projectId || "");
+  if (!projectId) {
+    throw new Error("Local project id is required");
+  }
+  ensureDb().collection("projectMounts").remove(projectId);
+  flushDb();
+  syncProjectWatchers();
+  emitSetProjects();
+  await writePersistedDashState();
   return snapshot();
 }
 

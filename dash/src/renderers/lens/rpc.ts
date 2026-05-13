@@ -215,6 +215,25 @@ export type WorkspaceRPC = {
         };
         response: any;
       };
+      addProjectMount: {
+        params: {
+          workspaceId?: string;
+          name?: string;
+          path: string;
+          instanceId?: string;
+          instanceLabel?: string;
+          kind?: string;
+        };
+        response: any;
+      };
+      removeProjectMount: {
+        params: {
+          workspaceId?: string;
+          projectId?: string;
+          mountId?: string;
+        };
+        response: any;
+      };
       getFaviconForUrl: {
         params: {
           url: string;
@@ -1239,6 +1258,15 @@ export type WorkspaceRPC = {
                 name: string;
               }>;
             }>;
+          }>;
+          knownLocalProjects: Array<{
+            id: string;
+            name: string;
+            path: string;
+            instanceId: string;
+            instanceLabel: string;
+            kind: string;
+            status: string;
           }>;
         };
       };
