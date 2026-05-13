@@ -152,8 +152,25 @@ fn spawnShell(shell: []const u8, cwd: []const u8, cols: u32, rows: u32) !void {
         const login_flag_z = try allocator.dupeZ(u8, "-l");
         defer allocator.free(login_flag_z);
 
-        const args = [_:null]?[*:0]u8{ shell_z.ptr, login_flag_z.ptr, null };
-        _ = c.execvp(shell_z.ptr, &args);
+        const shell_name = std.fs.path.basename(shell);
+        if (std.mem.eql(u8, shell_name, "zsh")) {
+            const option_flag_z = try allocator.dupeZ(u8, "-o");
+            defer allocator.free(option_flag_z);
+            const no_prompt_sp_z = try allocator.dupeZ(u8, "no_prompt_sp");
+            defer allocator.free(no_prompt_sp_z);
+
+            const args = [_:null]?[*:0]u8{
+                shell_z.ptr,
+                option_flag_z.ptr,
+                no_prompt_sp_z.ptr,
+                login_flag_z.ptr,
+                null,
+            };
+            _ = c.execvp(shell_z.ptr, &args);
+        } else {
+            const args = [_:null]?[*:0]u8{ shell_z.ptr, login_flag_z.ptr, null };
+            _ = c.execvp(shell_z.ptr, &args);
+        }
         c.exit(1);
     } else {
         child_pid = pid;
