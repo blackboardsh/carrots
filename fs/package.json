@@ -1,0 +1,9 @@
+{
+  "name": "bunny-fs",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "dependencies": {
+    "electrobun": "1.18.4-beta.3"
+  }
+}

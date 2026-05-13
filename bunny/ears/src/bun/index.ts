@@ -2798,6 +2798,7 @@ class BunnyEarsRuntime {
 const FOUNDATION_CARROTS = [
   { id: "bunny.git", artifact: "bunny.git-0.1.0.tar.zst" },
   { id: "bunny.pty", artifact: "bunny.pty-0.1.0.tar.zst" },
+  { id: "bunny.fs", artifact: "bunny.fs-0.1.0.tar.zst" },
   { id: "bunny.search", artifact: "bunny.search-0.1.0.tar.zst" },
   { id: "bunny.tsserver", artifact: "bunny.tsserver-0.1.0.tar.zst" },
   { id: "bunny.biome", artifact: "bunny.biome-0.1.0.tar.zst" },
@@ -2808,6 +2809,7 @@ const FOUNDATION_CARROTS = [
 const DEV_FOUNDATION_CARROTS = [
   { id: "bunny.git", directory: "git" },
   { id: "bunny.pty", directory: "pty" },
+  { id: "bunny.fs", directory: "fs" },
   { id: "bunny.search", directory: "search" },
   { id: "bunny.tsserver", directory: "tsserver" },
   { id: "bunny.biome", directory: "biome" },

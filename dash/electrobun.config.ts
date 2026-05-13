@@ -23,7 +23,7 @@ export default {
 			},
 			dependencies: {
 				"bunny.pty": "file:../pty",
-				"bunny.search": "file:../search",
+				"bunny.fs": "file:../fs",
 				"bunny.git": "file:../git",
 				"bunny.tsserver": "file:../tsserver",
 				"bunny.biome": "file:../biome",

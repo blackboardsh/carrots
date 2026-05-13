@@ -1,16 +1,9 @@
 import {
-  cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
-  renameSync,
-  rmSync,
   statSync,
-  lstatSync,
-  watch,
-  writeFileSync,
-  type FSWatcher,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { hostname } from "node:os";
@@ -325,8 +318,6 @@ const browserWindows = new Map<string, BrowserWindow>();
 let tray: Tray | null = null;
 const terminalWindowOwners = new Map<string, string>();
 const expandedFsDirs = new Set<string>();
-type ProjectDirectoryWatcher = { close: () => void };
-const directoryWatchers = new Map<string, ProjectDirectoryWatcher>();
 const framePersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let ptyHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -335,7 +326,7 @@ const WORKSPACE_CURRENT_LENS_PREFIX = "__workspace-current__:";
 const CLOUD_WORKSPACE_SHADOW_PREFIX = "__cloud_workspace__:";
 const CLOUD_LENS_SHADOW_PREFIX = "__cloud_lens__:";
 const PTY_CARROT_ID = "bunny.pty";
-const SEARCH_CARROT_ID = "bunny.search";
+const FS_CARROT_ID = "bunny.fs";
 const GIT_CARROT_ID = "bunny.git";
 const TSSERVER_CARROT_ID = "bunny.tsserver";
 const BIOME_CARROT_ID = "bunny.biome";
@@ -884,7 +875,6 @@ async function registerCurrentCloudInstance() {
   return getBunnyCloudOverview();
 }
 
-const ACTIVE_SLATE_CONFIG_FILE = ".bunny.json";
 const ACTIVE_INTERNAL_PREFIX = "__BUNNY_INTERNAL__";
 const ACTIVE_TEMPLATE_PREFIX = "__BUNNY_TEMPLATE__";
 
@@ -1090,19 +1080,19 @@ function getOrCreateBrowserWindow(windowId = state.currentWindowId, title?: stri
         }),
         syncAppSettings: r(async (params) => { bunnyDashState.appSettings = params.appSettings; await writePersistedDashState(); }),
         openFileDialog: r((params) => Utils.openFileDialog({ startingFolder: params?.startingFolder, allowedFileTypes: params?.allowedFileTypes, canChooseFiles: params?.canChooseFiles, canChooseDirectory: params?.canChooseDirectory, allowsMultipleSelection: params?.allowsMultipleSelection })),
-        getNode: r((params) => getNodeForPath(String(params?.path || ""))),
-        readSlateConfigFile: r((params) => readSlateConfig(String(params?.path || ""))),
-        readFile: r((params) => { const path = String(params?.path || ""); const textContent = readFileSync(path, "utf8"); return { textContent, isBinary: false, loadedBytes: textContent.length, totalBytes: textContent.length }; }),
-        writeFile: r((params) => { try { writeFileSync(String(params?.path || ""), String(params?.value || "")); emitFileWatchEvent(String(params?.path || "")); return { success: true }; } catch (error) { return { success: false, error: error instanceof Error ? error.message : String(error) }; } }),
-        touchFile: r((params) => { try { const path = String(params?.path || ""); writeFileSync(path, String(params?.contents || ""), { flag: existsSync(path) ? "a" : "w" }); emitFileWatchEvent(path); return { success: true }; } catch (error) { return { success: false, error: error instanceof Error ? error.message : String(error) }; } }),
-        rename: r((params) => { try { renameSync(String(params?.oldPath || ""), String(params?.newPath || "")); emitFileWatchEvent(String(params?.oldPath || "")); emitFileWatchEvent(String(params?.newPath || "")); return { success: true }; } catch (error) { return { success: false, error: error instanceof Error ? error.message : String(error) }; } }),
-        exists: r((params) => existsSync(String(params?.path || ""))),
-        isFolder: r((params) => { const path = String(params?.path || ""); try { return existsSync(path) && statSync(path).isDirectory(); } catch { return false; } }),
-        mkdir: r((params) => { try { mkdirSync(String(params?.path || ""), { recursive: true }); emitFileWatchEvent(String(params?.path || "")); return { success: true }; } catch (error) { return { success: false, error: error instanceof Error ? error.message : String(error) }; } }),
+        getNode: r((params) => invokeFsCarrot("getNode", { path: String(params?.path || "") })),
+        readSlateConfigFile: r((params) => invokeFsCarrot("readSlateConfigFile", { path: String(params?.path || "") })),
+        readFile: r((params) => invokeFsCarrot("readFile", { path: String(params?.path || "") })),
+        writeFile: r((params) => invokeFsCarrot("writeFile", { path: String(params?.path || ""), value: String(params?.value || "") })),
+        touchFile: r((params) => invokeFsCarrot("touchFile", { path: String(params?.path || ""), contents: String(params?.contents || "") })),
+        rename: r((params) => invokeFsCarrot("rename", { oldPath: String(params?.oldPath || ""), newPath: String(params?.newPath || "") })),
+        exists: r((params) => invokeFsCarrot("exists", { path: String(params?.path || "") })),
+        isFolder: r((params) => invokeFsCarrot("isFolder", { path: String(params?.path || "") })),
+        mkdir: r((params) => invokeFsCarrot("mkdir", { path: String(params?.path || "") })),
         showInFinder: r(async (params) => { await Utils.showItemInFolder(String(params?.path || "")); }),
-        copy: r((params) => { cpSync(String(params?.src || ""), String(params?.dest || ""), { recursive: true }); emitFileWatchEvent(String(params?.dest || "")); }),
-        safeDeleteFileOrFolder: r((params) => { rmSync(String(params?.path || ""), { recursive: true, force: true }); emitFileWatchEvent(String(params?.path || "")); }),
-        safeTrashFileOrFolder: r((params) => { rmSync(String(params?.path || ""), { recursive: true, force: true }); emitFileWatchEvent(String(params?.path || "")); }),
+        copy: r((params) => invokeFsCarrot("copy", { src: String(params?.src || ""), dest: String(params?.dest || "") })),
+        safeDeleteFileOrFolder: r((params) => invokeFsCarrot("safeDeleteFileOrFolder", { path: String(params?.path || "") })),
+        safeTrashFileOrFolder: r((params) => invokeFsCarrot("safeTrashFileOrFolder", { path: String(params?.path || "") })),
         execSpawnSync: r((params) => {
           const cmd = String(params?.cmd || "");
           const args = Array.isArray(params?.args) ? params.args.map(String) : [];
@@ -1123,10 +1113,10 @@ function getOrCreateBrowserWindow(windowId = state.currentWindowId, title?: stri
         getTerminalCwd: r((params) => invokePtyCarrot<string | null>("getTerminalCwd", { terminalId: String(params?.terminalId || "") })),
         getWorkspaceLensSidebar: r(() => buildWorkspaceLensSidebarData()),
         activateLens: r((params) => activateLens(String(params?.lensId || state.currentLayoutId))),
-        findFilesInWorkspace: r((params) => invokeSearchCarrot<string[]>("findFilesInWorkspace", { query: String(params?.query || ""), targets: buildSearchTargetsForWorkspace() }, { windowId: getCurrentWindow().id })),
-        findAllInWorkspace: r((params) => invokeSearchCarrot<Array<{ path: string; line: number; column: number; match: string }>>("findAllInWorkspace", { query: String(params?.query || ""), targets: buildSearchTargetsForWorkspace() }, { windowId: getCurrentWindow().id })),
-        cancelFileSearch: r(() => invokeSearchCarrot<boolean>("cancelFileSearch", {}, { windowId: getCurrentWindow().id })),
-        cancelFindAll: r(() => invokeSearchCarrot<boolean>("cancelFindAll", {}, { windowId: getCurrentWindow().id })),
+        findFilesInWorkspace: r((params) => invokeFsCarrot<string[]>("findFilesInWorkspace", { query: String(params?.query || ""), targets: buildSearchTargetsForWorkspace() }, { windowId: getCurrentWindow().id })),
+        findAllInWorkspace: r((params) => invokeFsCarrot<Array<{ path: string; line: number; column: number; match: string }>>("findAllInWorkspace", { query: String(params?.query || ""), targets: buildSearchTargetsForWorkspace() }, { windowId: getCurrentWindow().id })),
+        cancelFileSearch: r(() => invokeFsCarrot<boolean>("cancelFileSearch", {}, { windowId: getCurrentWindow().id })),
+        cancelFindAll: r(() => invokeFsCarrot<boolean>("cancelFindAll", {}, { windowId: getCurrentWindow().id })),
         // Git operations — all forwarded to git carrot
         gitShow: r((params) => invokeGitCarrot("gitShow", params, { windowId: getCurrentWindow().id })),
         gitCommit: r((params) => invokeGitCarrot("gitCommit", params, { windowId: getCurrentWindow().id })),
@@ -1171,10 +1161,10 @@ function getOrCreateBrowserWindow(windowId = state.currentWindowId, title?: stri
         gitDeleteBranch: r((params) => invokeGitCarrot("gitDeleteBranch", params, { windowId: getCurrentWindow().id })),
         gitTrackRemoteBranch: r((params) => invokeGitCarrot("gitTrackRemoteBranch", params, { windowId: getCurrentWindow().id })),
         initGit: r((params) => invokeGitCarrot("initGit", params, { windowId: getCurrentWindow().id })),
-        findFirstNestedGitRepo: r((params) => invokeSearchCarrot<string | null>("findFirstNestedGitRepo", { searchPath: String(params?.searchPath || ""), timeoutMs: Number(params?.timeoutMs || 5_000) })),
-        getUniqueNewName: r((params) => getUniqueNewName(String(params?.parentPath || ""), String(params?.baseName || "untitled"))),
+        findFirstNestedGitRepo: r((params) => invokeFsCarrot<string | null>("findFirstNestedGitRepo", { searchPath: String(params?.searchPath || ""), timeoutMs: Number(params?.timeoutMs || 5_000) })),
+        getUniqueNewName: r((params) => invokeFsCarrot("getUniqueNewName", { parentPath: String(params?.parentPath || ""), baseName: String(params?.baseName || "untitled") })),
         getUniqueLensName: r((params) => getUniqueLensNameForWorkspace(String(params?.workspaceId || getCurrentWorkspace().key), String(params?.baseName || "Lens"))),
-        makeFileNameSafe: r((params) => makeFileNameSafe(String(params?.value || ""))),
+        makeFileNameSafe: r((params) => invokeFsCarrot("makeFileNameSafe", { value: String(params?.value || "") })),
         getFaviconForUrl: r(() => "views://assets/file-icons/bookmark.svg"),
         showContextMenu: r((params) => { ContextMenu.showContextMenu(Array.isArray(params?.menuItems) ? params.menuItems : []); }),
         // Plugin stubs
@@ -1275,9 +1265,19 @@ function getOrCreateBrowserWindow(windowId = state.currentWindowId, title?: stri
         fullyDeleteProjectFromDiskAndBunnyDash: m(async (payload) => {
           const projectId = String(payload?.projectId || "");
           const project = findProjectMountByKey(projectId);
-          if (project) { rmSync(project.path, { recursive: true, force: true }); const db = ensureDb(); db.collection("projectMounts").remove(project.id); flushDb(); syncProjectWatchers(); emitSetProjects(); await writePersistedDashState(); }
+          if (project) {
+            await invokeFsCarrot("safeDeleteFileOrFolder", { path: project.path });
+            const db = ensureDb();
+            db.collection("projectMounts").remove(project.id);
+            flushDb();
+            syncProjectWatchers();
+            emitSetProjects();
+            await writePersistedDashState();
+          }
         }),
-        fullyDeleteNodeFromDisk: m((payload) => { rmSync(String(payload?.nodePath || ""), { recursive: true, force: true }); emitFileWatchEvent(String(payload?.nodePath || "")); }),
+        fullyDeleteNodeFromDisk: m(async (payload) => {
+          await invokeFsCarrot("safeDeleteFileOrFolder", { path: String(payload?.nodePath || "") });
+        }),
         editProject: m(async (payload) => {
           const project = findProjectMountByKey(String(payload?.projectId || ""));
           if (!project) return;
@@ -1294,7 +1294,10 @@ function getOrCreateBrowserWindow(windowId = state.currentWindowId, title?: stri
         deleteWorkspaceCompletely: m(async () => {
           const workspaces = listWorkspaces(); if (workspaces.length <= 1) return;
           const current = getCurrentWorkspace(); const db = ensureDb();
-          for (const project of getProjectMountsForWorkspace(current.key)) { rmSync(project.path, { recursive: true, force: true }); db.collection("projectMounts").remove(project.id); }
+          for (const project of getProjectMountsForWorkspace(current.key)) {
+            await invokeFsCarrot("safeDeleteFileOrFolder", { path: project.path });
+            db.collection("projectMounts").remove(project.id);
+          }
           db.collection("workspaces").remove(current.id); delete (bunnyDashState.workspaces || {})[current.key]; flushDb();
           await openWorkspace(listWorkspaces()[0]!.key); emitSetProjects(); await writePersistedDashState();
         }),
@@ -1594,9 +1597,6 @@ async function handleContextMenuAction(action: string, data: any) {
         return;
       }
       await invokeGitCarrot("initGit", { repoRoot: nodePath }, { windowId });
-      emitFileWatchEvent(join(nodePath, ".git"));
-      emitFileWatchEvent(join(nodePath, ".gitignore"));
-      emitFileWatchEvent(nodePath);
       return;
     }
     case "copy_path_to_clipboard":
@@ -1626,8 +1626,7 @@ async function handleContextMenuAction(action: string, data: any) {
           flushDb();
         }
       }
-      rmSync(nodePath, { recursive: true, force: true });
-      emitFileWatchEvent(nodePath);
+      await invokeFsCarrot("safeDeleteFileOrFolder", { path: nodePath });
       emitSetProjects();
       return;
     }
@@ -2110,26 +2109,12 @@ function listProjectMounts() {
   );
 }
 
-const WATCH_IGNORED_DIR_NAMES = new Set([
-  ".cache",
-  ".git",
-  ".turbo",
-  "artifacts",
-  "build",
-  "dist",
-  "node_modules",
-]);
-
 function isIgnoredPath(path: string) {
   const parts = path.split(/[\\/]+/);
   return parts.includes("node_modules") || parts.includes(".git") || path.endsWith("/.DS_Store");
 }
 
-function isIgnoredWatchDirectory(path: string) {
-  return WATCH_IGNORED_DIR_NAMES.has(basename(path)) || isIgnoredPath(path);
-}
-
-function scheduleRefresh(reason: string) {
+function scheduleRefresh() {
   if (refreshTimer) {
     clearTimeout(refreshTimer);
   }
@@ -2137,8 +2122,19 @@ function scheduleRefresh(reason: string) {
   refreshTimer = setTimeout(() => {
     refreshTimer = null;
     emitSnapshot();
-    log(`filesystem refresh: ${reason}`);
   }, 80);
+}
+
+function syncProjectWatchers() {
+  void invokeFsCarrot<boolean>("syncProjectWatchers", {
+    projects: listProjectMounts().map((project) => ({
+      watchId: project.key,
+      workspaceId: project.workspaceId,
+      path: project.path,
+    })),
+  }).catch((error) => {
+    log(`bunny.fs watcher sync failed: ${error instanceof Error ? error.message : String(error)}`);
+  });
 }
 
 function listLenses() {
@@ -2803,12 +2799,12 @@ async function invokePtyCarrot<T = unknown>(
   return Carrots.invoke<T>(PTY_CARROT_ID, method, params, options);
 }
 
-async function invokeSearchCarrot<T = unknown>(
+async function invokeFsCarrot<T = unknown>(
   method: string,
   params?: unknown,
   options?: { windowId?: string },
 ) {
-  return Carrots.invoke<T>(SEARCH_CARROT_ID, method, params, options);
+  return Carrots.invoke<T>(FS_CARROT_ID, method, params, options);
 }
 
 async function invokeGitCarrot<T = unknown>(
@@ -2965,7 +2961,44 @@ function ensurePtyHeartbeatLoop() {
   }, ptyHeartbeatIntervalMs);
 }
 
-function handleSearchFindAllResults(payload: unknown) {
+function handleFsFileWatchEvent(payload: unknown) {
+  const eventPayload =
+    payload && typeof payload === "object"
+      ? (payload as {
+          absolutePath?: string;
+          workspaceId?: string | null;
+          exists?: boolean;
+          isDelete?: boolean;
+          isAdding?: boolean;
+          isFile?: boolean;
+          isDir?: boolean;
+        })
+      : {};
+
+  const targetWindows =
+    typeof eventPayload.workspaceId === "string" && eventPayload.workspaceId
+      ? runtimeWindows.filter((window) => window.workspaceId === eventPayload.workspaceId)
+      : runtimeWindows;
+
+  for (const window of targetWindows) {
+    emitViewMessage(
+      "fileWatchEvent",
+      {
+        absolutePath: String(eventPayload.absolutePath || ""),
+        exists: Boolean(eventPayload.exists),
+        isDelete: Boolean(eventPayload.isDelete),
+        isAdding: Boolean(eventPayload.isAdding),
+        isFile: Boolean(eventPayload.isFile),
+        isDir: Boolean(eventPayload.isDir),
+      },
+      window.id,
+    );
+  }
+
+  scheduleRefresh();
+}
+
+function handleFsFindAllResults(payload: unknown) {
   const eventPayload =
     payload && typeof payload === "object"
       ? (payload as {
@@ -2997,7 +3030,7 @@ function handleSearchFindAllResults(payload: unknown) {
   );
 }
 
-function handleSearchFindFilesResults(payload: unknown) {
+function handleFsFindFilesResults(payload: unknown) {
   const eventPayload =
     payload && typeof payload === "object"
       ? (payload as {
@@ -3143,195 +3176,6 @@ function emitSetProjects(workspaceId?: string) {
     : runtimeWindows;
   for (const window of windows) {
     emitSetProjectsForWindow(window.id);
-  }
-}
-
-function emitFileWatchEvent(absolutePath: string, workspaceId?: string) {
-  const exists = existsSync(absolutePath);
-  let isFile = false;
-  let isDir = false;
-
-  if (exists) {
-    try {
-      const stat = statSync(absolutePath);
-      isFile = stat.isFile();
-      isDir = stat.isDirectory();
-    } catch {}
-  }
-
-  const targetWindows = workspaceId
-    ? runtimeWindows.filter((window) => window.workspaceId === workspaceId)
-    : runtimeWindows;
-  for (const window of targetWindows) {
-    emitViewMessage(
-      "fileWatchEvent",
-      {
-        absolutePath,
-        exists,
-        isDelete: !exists,
-        isAdding: exists,
-        isFile,
-        isDir,
-      },
-      window.id,
-    );
-  }
-}
-
-function attachWatcherErrorHandler(watcher: ProjectDirectoryWatcher, label: string) {
-  (watcher as FSWatcher).on?.("error", (error) => {
-    log(`watch failed for ${label}: ${error instanceof Error ? error.message : String(error)}`);
-  });
-}
-
-function createProjectDirectoryWatcher(
-  rootPath: string,
-  onChange: (absolutePath: string) => void,
-): ProjectDirectoryWatcher {
-  if (process.platform !== "linux") {
-    const watcher = watch(
-      rootPath,
-      { recursive: true },
-      (_eventType, relativePath) => {
-        if (!relativePath) {
-          return;
-        }
-        onChange(join(rootPath, relativePath));
-      },
-    );
-    attachWatcherErrorHandler(watcher, rootPath);
-    return watcher;
-  }
-
-  const watchers: FSWatcher[] = [];
-  const watchedDirs = new Set<string>();
-  let closed = false;
-  let loggedFailures = 0;
-
-  const logWatchFailure = (dir: string, error: unknown) => {
-    if (loggedFailures < 5) {
-      log(`watch failed for ${dir}: ${error instanceof Error ? error.message : String(error)}`);
-    } else if (loggedFailures === 5) {
-      log("additional project watch failures suppressed");
-    }
-    loggedFailures += 1;
-  };
-
-  const addDirectory = (dir: string, isRoot = false) => {
-    if (closed || watchedDirs.has(dir)) {
-      return;
-    }
-    if (!isRoot && isIgnoredWatchDirectory(dir)) {
-      return;
-    }
-
-    try {
-      const stat = lstatSync(dir);
-      if (!stat.isDirectory() || stat.isSymbolicLink()) {
-        return;
-      }
-    } catch {
-      return;
-    }
-
-    try {
-      const watcher = watch(dir, { recursive: false }, (_eventType, relativePath) => {
-        if (closed || !relativePath) {
-          return;
-        }
-
-        const absolutePath = join(dir, relativePath);
-        if (isIgnoredPath(absolutePath)) {
-          return;
-        }
-
-        if (existsSync(absolutePath)) {
-          try {
-            const stat = lstatSync(absolutePath);
-            if (stat.isDirectory() && !stat.isSymbolicLink()) {
-              addDirectory(absolutePath);
-            }
-          } catch {}
-        }
-
-        onChange(absolutePath);
-      });
-      attachWatcherErrorHandler(watcher, dir);
-      watchers.push(watcher);
-      watchedDirs.add(dir);
-    } catch (error) {
-      if (isRoot) {
-        throw error;
-      }
-      logWatchFailure(dir, error);
-      return;
-    }
-
-    let entries: ReturnType<typeof readdirSync>;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.isSymbolicLink()) {
-        continue;
-      }
-      addDirectory(join(dir, entry.name));
-    }
-  };
-
-  addDirectory(rootPath, true);
-
-  return {
-    close: () => {
-      closed = true;
-      for (const watcher of watchers) {
-        try {
-          watcher.close();
-        } catch {}
-      }
-    },
-  };
-}
-
-function syncProjectWatchers() {
-  const projects = listProjectMounts();
-  const nextKeys = new Set(
-    projects.filter((project) => existsSync(project.path)).map((project) => project.key),
-  );
-
-  for (const [projectKey, watcher] of directoryWatchers.entries()) {
-    if (nextKeys.has(projectKey)) {
-      continue;
-    }
-    watcher.close();
-    directoryWatchers.delete(projectKey);
-  }
-
-  for (const project of projects) {
-    if (!existsSync(project.path) || directoryWatchers.has(project.key)) {
-      continue;
-    }
-
-    try {
-      const watcher = createProjectDirectoryWatcher(project.path, (absolutePath) => {
-        if (isIgnoredPath(absolutePath)) {
-          return;
-        }
-
-        emitFileWatchEvent(absolutePath, project.workspaceId);
-        scheduleRefresh(`project ${project.name}`);
-      });
-      directoryWatchers.set(project.key, watcher);
-    } catch (error) {
-      log(
-        `watch failed for ${project.name}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
   }
 }
 
@@ -5111,51 +4955,6 @@ function syncTray() {
   ]);
 }
 
-function getNodeForPath(path: string) {
-  if (!existsSync(path)) {
-    return null;
-  }
-
-  const name = basename(path);
-  const stat = statSync(path);
-
-  if (stat.isDirectory()) {
-    const children = readdirSync(path)
-      .filter((entry) => !isIgnoredPath(join(path, entry)))
-      .sort((left, right) => left.localeCompare(right));
-    return {
-      name,
-      type: "dir" as const,
-      path,
-      children,
-    };
-  }
-
-  return {
-    name,
-    type: "file" as const,
-    path,
-    persistedContent: "",
-    isDirty: false,
-    model: null,
-    editors: {},
-    isCached: false,
-  };
-}
-
-function readSlateConfig(path: string) {
-  const configPath = statSync(path).isDirectory() ? join(path, ACTIVE_SLATE_CONFIG_FILE) : path;
-  if (!existsSync(configPath)) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(readFileSync(configPath, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
 function buildWorkspaceLensSidebarData() {
   const currentWindow = getCurrentWindow();
   const currentLensId = getLensIdForWindow(currentWindow);
@@ -5369,75 +5168,43 @@ async function handleBunnyDashRequest(method: string, params: any) {
         allowsMultipleSelection: params?.allowsMultipleSelection,
       });
     case "getNode":
-      return getNodeForPath(String(params?.path || ""));
+      return invokeFsCarrot("getNode", { path: String(params?.path || "") });
     case "readSlateConfigFile":
-      return readSlateConfig(String(params?.path || ""));
-    case "readFile": {
-      const path = String(params?.path || "");
-      const textContent = readFileSync(path, "utf8");
-      return {
-        textContent,
-        isBinary: false,
-        loadedBytes: textContent.length,
-        totalBytes: textContent.length,
-      };
-    }
+      return invokeFsCarrot("readSlateConfigFile", { path: String(params?.path || "") });
+    case "readFile":
+      return invokeFsCarrot("readFile", { path: String(params?.path || "") });
     case "writeFile":
-      try {
-        writeFileSync(String(params?.path || ""), String(params?.value || ""));
-        emitFileWatchEvent(String(params?.path || ""));
-        return { success: true };
-      } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) };
-      }
+      return invokeFsCarrot("writeFile", {
+        path: String(params?.path || ""),
+        value: String(params?.value || ""),
+      });
     case "touchFile":
-      try {
-        const path = String(params?.path || "");
-        writeFileSync(path, String(params?.contents || ""), { flag: existsSync(path) ? "a" : "w" });
-        emitFileWatchEvent(path);
-        return { success: true };
-      } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) };
-      }
+      return invokeFsCarrot("touchFile", {
+        path: String(params?.path || ""),
+        contents: String(params?.contents || ""),
+      });
     case "rename":
-      try {
-        renameSync(String(params?.oldPath || ""), String(params?.newPath || ""));
-        emitFileWatchEvent(String(params?.oldPath || ""));
-        emitFileWatchEvent(String(params?.newPath || ""));
-        return { success: true };
-      } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) };
-      }
+      return invokeFsCarrot("rename", {
+        oldPath: String(params?.oldPath || ""),
+        newPath: String(params?.newPath || ""),
+      });
     case "exists":
-      return existsSync(String(params?.path || ""));
-    case "isFolder": {
-      const path = String(params?.path || "");
-      try {
-        return existsSync(path) && statSync(path).isDirectory();
-      } catch {
-        return false;
-      }
-    }
+      return invokeFsCarrot("exists", { path: String(params?.path || "") });
+    case "isFolder":
+      return invokeFsCarrot("isFolder", { path: String(params?.path || "") });
     case "mkdir":
-      try {
-        mkdirSync(String(params?.path || ""), { recursive: true });
-        emitFileWatchEvent(String(params?.path || ""));
-        return { success: true };
-      } catch (error) {
-        return { success: false, error: error instanceof Error ? error.message : String(error) };
-      }
+      return invokeFsCarrot("mkdir", { path: String(params?.path || "") });
     case "showInFinder":
       await Utils.showItemInFolder(String(params?.path || ""));
       return;
     case "copy":
-      cpSync(String(params?.src || ""), String(params?.dest || ""), { recursive: true });
-      emitFileWatchEvent(String(params?.dest || ""));
-      return;
+      return invokeFsCarrot("copy", {
+        src: String(params?.src || ""),
+        dest: String(params?.dest || ""),
+      });
     case "safeDeleteFileOrFolder":
     case "safeTrashFileOrFolder":
-      rmSync(String(params?.path || ""), { recursive: true, force: true });
-      emitFileWatchEvent(String(params?.path || ""));
-      return;
+      return invokeFsCarrot(method, { path: String(params?.path || "") });
     case "execSpawnSync": {
       const cmd = String(params?.cmd || "");
       const args = Array.isArray(params?.args) ? params.args.map(String) : [];
@@ -5494,7 +5261,7 @@ async function handleBunnyDashRequest(method: string, params: any) {
     case "activateLens":
       return activateLens(String(params?.lensId || state.currentLayoutId));
     case "findFilesInWorkspace":
-      return invokeSearchCarrot<string[]>(
+      return invokeFsCarrot<string[]>(
         "findFilesInWorkspace",
         {
           query: String(params?.query || ""),
@@ -5503,7 +5270,7 @@ async function handleBunnyDashRequest(method: string, params: any) {
         { windowId: getCurrentWindow().id },
       );
     case "findAllInWorkspace":
-      return invokeSearchCarrot<
+      return invokeFsCarrot<
         Array<{ path: string; line: number; column: number; match: string }>
       >(
         "findAllInWorkspace",
@@ -5514,11 +5281,11 @@ async function handleBunnyDashRequest(method: string, params: any) {
         { windowId: getCurrentWindow().id },
       );
     case "cancelFileSearch":
-      return invokeSearchCarrot<boolean>("cancelFileSearch", {}, {
+      return invokeFsCarrot<boolean>("cancelFileSearch", {}, {
         windowId: getCurrentWindow().id,
       });
     case "cancelFindAll":
-      return invokeSearchCarrot<boolean>("cancelFindAll", {}, {
+      return invokeFsCarrot<boolean>("cancelFindAll", {}, {
         windowId: getCurrentWindow().id,
       });
     case "gitShow":
@@ -5568,19 +5335,24 @@ async function handleBunnyDashRequest(method: string, params: any) {
         windowId: getCurrentWindow().id,
       });
     case "findFirstNestedGitRepo":
-      return invokeSearchCarrot<string | null>("findFirstNestedGitRepo", {
+      return invokeFsCarrot<string | null>("findFirstNestedGitRepo", {
         searchPath: String(params?.searchPath || ""),
         timeoutMs: Number(params?.timeoutMs || 5_000),
       });
     case "getUniqueNewName":
-      return getUniqueNewName(String(params?.parentPath || ""), String(params?.baseName || "untitled"));
+      return invokeFsCarrot("getUniqueNewName", {
+        parentPath: String(params?.parentPath || ""),
+        baseName: String(params?.baseName || "untitled"),
+      });
     case "getUniqueLensName":
       return getUniqueLensNameForWorkspace(
         String(params?.workspaceId || getCurrentWorkspace().key),
         String(params?.baseName || "Lens"),
       );
     case "makeFileNameSafe":
-      return makeFileNameSafe(String(params?.value || ""));
+      return invokeFsCarrot("makeFileNameSafe", {
+        value: String(params?.value || ""),
+      });
     case "getFaviconForUrl":
       return "views://assets/file-icons/bookmark.svg";
     case "showContextMenu":
@@ -5686,7 +5458,7 @@ async function handleBunnyDashSend(name: string, payload: any) {
       const projectId = String(payload?.projectId || "");
       const project = findProjectMountByKey(projectId);
       if (project) {
-        rmSync(project.path, { recursive: true, force: true });
+        await invokeFsCarrot("safeDeleteFileOrFolder", { path: project.path });
         const db = ensureDb();
         db.collection("projectMounts").remove(project.id);
         flushDb();
@@ -5697,8 +5469,7 @@ async function handleBunnyDashSend(name: string, payload: any) {
       return;
     }
     case "fullyDeleteNodeFromDisk":
-      rmSync(String(payload?.nodePath || ""), { recursive: true, force: true });
-      emitFileWatchEvent(String(payload?.nodePath || ""));
+      await invokeFsCarrot("safeDeleteFileOrFolder", { path: String(payload?.nodePath || "") });
       return;
     case "editProject": {
       const project = findProjectMountByKey(String(payload?.projectId || ""));
@@ -5726,7 +5497,7 @@ async function handleBunnyDashSend(name: string, payload: any) {
       const projects = getProjectMountsForWorkspace(current.key);
       for (const project of projects) {
         if (name === "deleteWorkspaceCompletely") {
-          rmSync(project.path, { recursive: true, force: true });
+          await invokeFsCarrot("safeDeleteFileOrFolder", { path: project.path });
         }
         db.collection("projectMounts").remove(project.id);
       }
@@ -5810,13 +5581,18 @@ self.onmessage = async (event) => {
   if (message.type === "event") {
     await ensureBootPromise();
 
-    if (message.name === "search-find-all-results") {
-      handleSearchFindAllResults(message.payload);
+    if (message.name === "fs-file-watch-event") {
+      handleFsFileWatchEvent(message.payload);
       return;
     }
 
-    if (message.name === "search-find-files-results") {
-      handleSearchFindFilesResults(message.payload);
+    if (message.name === "fs-find-all-results" || message.name === "search-find-all-results") {
+      handleFsFindAllResults(message.payload);
+      return;
+    }
+
+    if (message.name === "fs-find-files-results" || message.name === "search-find-files-results") {
+      handleFsFindFilesResults(message.payload);
       return;
     }
 

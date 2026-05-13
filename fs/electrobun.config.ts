@@ -1,0 +1,29 @@
+import type { ElectrobunConfig } from "electrobun";
+
+export default {
+	app: {
+		name: "Bunny FS",
+		identifier: "bunny.fs",
+		version: "0.1.0",
+	},
+	build: {
+		bun: {
+			entrypoint: "src/bun/worker.ts",
+		},
+		carrot: {
+			id: "bunny.fs",
+			name: "Bunny FS",
+			description: "Filesystem operations, watchers, and search for Bunny Dash.",
+			mode: "background",
+			carrotOnly: true,
+			permissions: {
+				host: { storage: true },
+				bun: { read: true, write: true, run: true },
+				isolation: "shared-worker",
+			},
+		},
+	},
+	scripts: {
+		postBuild: "build.ts",
+	},
+} satisfies ElectrobunConfig;

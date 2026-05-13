@@ -953,7 +953,7 @@ describe("Bunny Ears carrots", () => {
     expect(built.manifest.id).toBe("bunny-dash");
     expect(built.manifest.dependencies).toEqual({
       "bunny.pty": "file:../foundation-carrots/pty",
-      "bunny.search": "file:../foundation-carrots/search",
+      "bunny.fs": "file:../foundation-carrots/fs",
       "bunny.git": "file:../foundation-carrots/git",
       "bunny.tsserver": "file:../foundation-carrots/tsserver",
       "bunny.biome": "file:../foundation-carrots/biome",
@@ -2095,8 +2095,8 @@ describe("Bunny Ears carrots", () => {
     expect(typeof closeWindowResult.shutdown).toBe("boolean");
   }, 20000);
 
-  test("Bunny Dash uses bunny.search as its workspace search backend", async () => {
-    const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-search-build-");
+  test("Bunny Dash uses bunny.fs as its workspace file/search backend", async () => {
+    const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-fs-build-");
     const carrot = await startBuiltCarrot(built);
     const projectDir = makeTempDir("bunny-dash-search-project-");
     mkdirSync(join(projectDir, "src"), { recursive: true });
