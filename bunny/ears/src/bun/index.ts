@@ -9,7 +9,7 @@ import {
   type RPCSchema,
   Updater,
 } from "electrobun/bun";
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type {
   CarrotPermissionConsentRequest,
@@ -250,6 +250,33 @@ class CarrotInstance {
 
   private getPrimaryControllerWindowId() {
     return this.controllerWindows.keys().next().value ?? "main";
+  }
+
+  private async handleControllerWindowClosed(windowId: string, win: BrowserWindow) {
+    this.removeControllerWindow(windowId, win);
+    this.restoreApplicationMenuIfActive();
+
+    if (!(runtime as any).shutdownInProgress) {
+      if (this.carrot.manifest.id === "bunny-dash" && this.status === "running") {
+        try {
+          await this.invoke("hostWindowClosed", { windowId });
+        } catch (error) {
+          this.pushLog(
+            `hostWindowClosed failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      } else {
+        this.sendEvent("window-closed", { windowId });
+      }
+    }
+
+    if (this.status === "running" && this.carrot.manifest.mode === "window") {
+      if (this.controllerWindows.size === 0) {
+        await this.stop();
+      }
+    }
   }
 
   async start() {
@@ -542,14 +569,7 @@ class CarrotInstance {
     });
 
     win.on("close", () => {
-      this.removeControllerWindow(windowId, win);
-      this.restoreApplicationMenuIfActive();
-      this.sendEvent("window-closed", { windowId });
-      if (this.status === "running" && this.carrot.manifest.mode === "window") {
-        if (this.controllerWindows.size === 0) {
-          void this.stop();
-        }
-      }
+      void this.handleControllerWindowClosed(windowId, win);
     });
 
     return win;
@@ -782,9 +802,7 @@ class CarrotInstance {
           return;
         }
         if (this.carrot.manifest.id === "bunny-dash") {
-          // Dash carrot extends the runtime tray instead of owning its own
-          runtime.dashTrayExtension = (payload as any[]) || [];
-          runtime.tray?.setMenu(runtime.buildTrayMenu());
+          // Dash no longer owns or extends the system tray.
         } else if (this.tray) {
           this.tray.setMenu(payload as any);
         }
@@ -1113,13 +1131,13 @@ class CarrotInstance {
 
 class BunnyEarsRuntime {
   tray: Tray | null;
-  dashTrayExtension: any[] = [];
   managerWindow: BrowserWindow | null = null;
   hopWs: WebSocket | null = null;
   channel: string = "dev";
   carrots = new Map<string, CarrotInstance>();
   activeApplicationMenuOwnerId: string | null = null;
   activeContextMenuOwnerId: string | null = null;
+  shutdownInProgress = false;
   updateStatus: "idle" | "checking" | "downloading" | "update-ready" | "error" = "idle";
   pendingConsent: {
     request: CarrotPermissionConsentRequest;
@@ -1134,9 +1152,8 @@ class BunnyEarsRuntime {
       this.carrots.set(carrot.manifest.id, new CarrotInstance(carrot));
     }
 
-    // Bunny Ears owns the system tray. The dash carrot extends it with
-    // workspaces/lenses/carrots via the set-tray-menu action.
-    this.tray = new Tray({ title: "Electrobunny" });
+    // Bunny Ears owns the system tray.
+    this.tray = new Tray({ title: "Dash" });
     this.tray.setMenu(this.buildTrayMenu());
     this.tray.on("tray-clicked", (event: any) => {
       const action = event.data?.action;
@@ -1146,12 +1163,12 @@ class BunnyEarsRuntime {
 
     ApplicationMenu.on("application-menu-clicked", (event: any) => {
       const action = event?.data?.action;
-      if (!this.activeApplicationMenuOwnerId) {
+      if (action === "quit") {
+        void this.shutdown(0);
         return;
       }
 
-      if (action === "quit") {
-        process.exit(0);
+      if (!this.activeApplicationMenuOwnerId) {
         return;
       }
 
@@ -1213,11 +1230,6 @@ class BunnyEarsRuntime {
 
     this.startWebBridge();
 
-    // Auto-open dash for development
-    this.handleTrayAction("open-dash").catch((err) => {
-      console.error("[bunny-ears] auto-open dash failed:", err);
-    });
-
     // Auth + instance registration — non-blocking, doesn't gate carrots
     this.loadAuthToken();
     this.loadDeviceToken();
@@ -1266,7 +1278,77 @@ class BunnyEarsRuntime {
     // fire a close event (can happen with network/sleep transitions).
     this.startHopKeepalive();
 
+    const dashSnapshotInfo = this.getDashOpenWindowsSnapshotInfo();
+    console.log(
+      `[bunny-ears] Dash boot restore check: path=${dashSnapshotInfo.path || "missing"} windows=${dashSnapshotInfo.windowCount}`,
+    );
+    if (dashSnapshotInfo.windowCount > 0) {
+      await this.handleTrayAction("open-dash");
+    }
+
     bootLog("runtime boot complete");
+  }
+
+  async shutdown(exitCode = 0) {
+    if (this.shutdownInProgress) {
+      return;
+    }
+    this.shutdownInProgress = true;
+
+    try {
+      for (const carrot of this.carrots.values()) {
+        if (carrot.status !== "running") {
+          continue;
+        }
+        try {
+          await carrot.stop();
+        } catch (error) {
+          console.error(
+            `[bunny-ears] Failed to stop ${carrot.carrot.manifest.id} during shutdown:`,
+            error instanceof Error ? error.message : error,
+          );
+        }
+      }
+    } finally {
+      try {
+        this.tray?.remove();
+      } catch {
+        // Best effort cleanup.
+      }
+      process.exit(exitCode);
+    }
+  }
+
+  private getDashOpenWindowsSnapshotInfo() {
+    const dashCarrot = this.carrots.get("bunny-dash");
+    if (!dashCarrot || !existsSync(dashCarrot.statePath)) {
+      return { path: dashCarrot?.statePath || null, windowCount: 0 };
+    }
+
+    try {
+      const persisted = JSON.parse(readFileSync(dashCarrot.statePath, "utf8")) as {
+        sessionSnapshot?: { windows?: unknown[] };
+        currentState?: { windows?: unknown[] };
+      };
+
+      const sessionWindows = Array.isArray(persisted.sessionSnapshot?.windows)
+        ? persisted.sessionSnapshot.windows
+        : null;
+      if (sessionWindows) {
+        return { path: dashCarrot.statePath, windowCount: sessionWindows.length };
+      }
+
+      const currentWindows = Array.isArray(persisted.currentState?.windows)
+        ? persisted.currentState.windows
+        : [];
+      return { path: dashCarrot.statePath, windowCount: currentWindows.length };
+    } catch (error) {
+      console.error(
+        "[bunny-ears] Failed to inspect Dash state for boot restore:",
+        error instanceof Error ? error.message : error,
+      );
+      return { path: dashCarrot.statePath, windowCount: 0 };
+    }
   }
 
   private lastWakeCheckAt = Date.now();
@@ -2275,14 +2357,9 @@ class BunnyEarsRuntime {
       : "Sign In to Bunny Cloud";
 
     const baseItems = [
-      { type: "normal" as const, label: "Open Bunny Dash", action: "open-dash" },
+      { type: "normal" as const, label: "Open Dash", action: "open-dash" },
       { type: "normal" as const, label: cloudLabel, action: "open-farm" },
     ];
-
-    // Dash extension: workspaces, lenses, carrot controls — set by the dash carrot
-    const dashItems = this.dashTrayExtension.length > 0
-      ? [{ type: "divider" as const }, ...this.dashTrayExtension]
-      : [];
 
     const updateLabel = this.updateStatus === "update-ready"
       ? "Restart to Update"
@@ -2295,11 +2372,11 @@ class BunnyEarsRuntime {
       { type: "normal" as const, label: updateLabel, action: "check-for-updates" },
       { type: "normal" as const, label: "Update Carrots", action: "update-carrots" },
       { type: "normal" as const, label: "Reset Local State", action: "emergency-reset" },
-      { type: "normal" as const, label: "Quit Bunny Ears", action: "quit" },
+      { type: "normal" as const, label: "Quit Dash", action: "quit" },
       { type: "normal" as const, label: "Test 1", action: "test" },
     ];
 
-    return [...baseItems, ...dashItems, ...emergencyItems];
+    return [...baseItems, ...emergencyItems];
   }
 
   private async handleTrayAction(action: string) {
@@ -2382,7 +2459,7 @@ class BunnyEarsRuntime {
       return;
     }
     if (action === "quit") {
-      process.exit(0);
+      await this.shutdown(0);
       return;
     }
     if (action === "emergency-reset") {
@@ -2420,12 +2497,6 @@ class BunnyEarsRuntime {
     if (verb === "rebuild") {
       await this.reinstallCarrot(carrotId);
       return;
-    }
-
-    // Forward unhandled actions to the dash carrot (workspace/lens/carrot actions)
-    const dashCarrot = this.carrots.get("bunny-dash");
-    if (dashCarrot && dashCarrot.status === "running") {
-      dashCarrot.sendEvent("tray", { action });
     }
   }
 
@@ -2933,4 +3004,11 @@ if (channel === "dev") {
 }
 
 const runtime = new BunnyEarsRuntime();
+const handleShutdownSignal = (signal: string) => {
+  console.log(`[bunny-ears] ${signal} received, shutting down...`);
+  void runtime.shutdown(0);
+};
+
+process.once("SIGINT", () => handleShutdownSignal("SIGINT"));
+process.once("SIGTERM", () => handleShutdownSignal("SIGTERM"));
 await runtime.boot();

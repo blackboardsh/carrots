@@ -21,7 +21,6 @@ import {
   Carrots,
   ContextMenu,
   defineElectrobunRPC,
-  Tray,
   Utils,
   app,
 } from "electrobun/bun";
@@ -315,7 +314,6 @@ let runtimeChannel = "dev";
 let runtimeAuthToken: string | null = null;
 let runtimeWindows: LensWindow[] = [];
 const browserWindows = new Map<string, BrowserWindow>();
-let tray: Tray | null = null;
 const terminalWindowOwners = new Map<string, string>();
 const expandedFsDirs = new Set<string>();
 const framePersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -1354,6 +1352,11 @@ function getOrCreateBrowserWindow(windowId = state.currentWindowId, title?: stri
     schedulePersistWindowFrame(windowId);
   });
 
+  win.on("close", () => {
+    log(`browser window close event: ${windowId}`);
+    void handleHostWindowClosed(windowId);
+  });
+
   return win;
 }
 
@@ -1373,20 +1376,6 @@ function closeWindow(windowId?: string) {
 
 function stopCarrot() {
   app.quit();
-}
-
-async function reopenRuntimeWindowsOnBoot() {
-  if (runtimeWindows.length === 0) {
-    return;
-  }
-
-  for (const runtimeWindow of runtimeWindows) {
-    getOrCreateBrowserWindow(runtimeWindow.id, runtimeWindow.title);
-  }
-
-  if (runtimeWindows.some((window) => window.id === state.currentWindowId)) {
-    focusWindow(state.currentWindowId, getCurrentWindow().title);
-  }
 }
 
 function getMenuStartingFolder() {
@@ -1947,7 +1936,6 @@ function ensureBootPromise() {
       await refreshBiomePeerDependencyStatus();
       await refreshGitPeerDependencyStatus();
       syncApplicationMenu();
-      await reopenRuntimeWindowsOnBoot();
       post({ type: "ready" });
       syncTray();
       emitSnapshot();
@@ -3962,6 +3950,9 @@ async function saveState() {
   });
 
   currentState = captureCurrentState();
+  log(
+    `saveState windows=${currentState.windows.length} currentWindow=${currentState.currentWindowId} currentLayout=${currentState.currentLayoutId} ids=${currentState.windows.map((window) => window.id).join(",")}`,
+  );
   db.collection("sessionSnapshots").update(snapshotDoc.id, {
     updatedAt: currentState.updatedAt,
     currentLayoutId: currentState.currentLayoutId,
@@ -3982,6 +3973,34 @@ async function saveState() {
 
   flushDb();
   await writePersistedDashState();
+}
+
+async function handleHostWindowClosed(closedWindowId: string) {
+  const closedRuntimeWindow = runtimeWindows.find((window) => window.id === closedWindowId);
+  browserWindows.delete(closedWindowId);
+  await closeTsServerEditorsForWindow(closedWindowId, closedRuntimeWindow?.workspaceId);
+  await killTerminalsForWindow(closedWindowId);
+  removeBunnyWindowFromAllWorkspaces(closedWindowId);
+  runtimeWindows = runtimeWindows.filter((window) => window.id !== closedWindowId);
+  const pendingPersist = framePersistTimers.get(closedWindowId);
+  if (pendingPersist) {
+    clearTimeout(pendingPersist);
+    framePersistTimers.delete(closedWindowId);
+  }
+  if (state.currentWindowId === closedWindowId) {
+    state.currentWindowId = runtimeWindows[0]?.id || "";
+  }
+  if (runtimeWindows.length > 0) {
+    const currentWindow = getCurrentWindowUnsafe();
+    if (currentWindow) {
+      state.currentLayoutId = getLensIdForWindow(currentWindow);
+    }
+  }
+  syncActiveTreeNode();
+  await saveState();
+  syncTray();
+  emitSetProjects();
+  emitSnapshot();
 }
 
 async function loadState() {
@@ -4282,6 +4301,61 @@ async function openLensInNewWindow(lensId: string) {
   return snapshot();
 }
 
+function getPreferredWorkspaceIdForDashOpen() {
+  const currentWorkspace = getCurrentWorkspaceUnsafe();
+  if (currentWorkspace) {
+    return currentWorkspace.key;
+  }
+
+  const firstVisibleLocalWorkspace = listVisibleLocalWorkspaces()[0];
+  if (firstVisibleLocalWorkspace) {
+    return firstVisibleLocalWorkspace.key;
+  }
+
+  return listWorkspaces()[0]?.key || "";
+}
+
+async function openDashWindow() {
+  log(
+    `openDashWindow runtimeWindows=${runtimeWindows.length} browserWindows=${browserWindows.size} currentWindow=${state.currentWindowId}`,
+  );
+
+  if (runtimeWindows.length > 0 && browserWindows.size === 0) {
+    log(`openDashWindow restoring ${runtimeWindows.length} snapshot window(s)`);
+    await restoreCurrentState();
+    return snapshot();
+  }
+
+  if (runtimeWindows.length > 0) {
+    log(`openDashWindow focusing existing runtime window ${state.currentWindowId}`);
+    focusWindow(state.currentWindowId, getCurrentWindow().title);
+    emitSnapshot();
+    return snapshot();
+  }
+
+  const snapshotDoc = getCurrentStateDoc();
+  if (snapshotDoc.windows.length > 0) {
+    log(`openDashWindow restoring ${snapshotDoc.windows.length} persisted snapshot window(s)`);
+    await restoreCurrentState();
+    return snapshot();
+  }
+
+  const preferredLens = findLensByKey(state.currentLayoutId);
+  if (preferredLens) {
+    log(`openDashWindow opening preferred lens ${preferredLens.key}`);
+    return openLensInNewWindow(preferredLens.key);
+  }
+
+  const preferredWorkspaceId = getPreferredWorkspaceIdForDashOpen();
+  if (preferredWorkspaceId) {
+    log(`openDashWindow opening preferred workspace ${preferredWorkspaceId}`);
+    return openWorkspaceInNewWindow(preferredWorkspaceId);
+  }
+
+  emitSnapshot();
+  return snapshot();
+}
+
 async function focusExistingLensWindow(windowId: string) {
   const runtimeWindow = runtimeWindows.find((window) => window.id === windowId);
   if (!runtimeWindow) {
@@ -4312,10 +4386,16 @@ async function openLens(lensId: string) {
 }
 
 async function restoreCurrentState() {
+  log(
+    `restoreCurrentState begin runtimeWindows=${runtimeWindows.length} browserWindows=${browserWindows.size}`,
+  );
   for (const runtimeWindow of runtimeWindows) {
     await closeTsServerEditorsForWindow(runtimeWindow.id, runtimeWindow.workspaceId);
   }
   const snapshotDoc = getCurrentStateDoc();
+  log(
+    `restoreCurrentState snapshot windows=${snapshotDoc.windows.length} ids=${snapshotDoc.windows.map((window) => window.id).join(",")}`,
+  );
   runtimeWindows = cloneWindows(snapshotDoc.windows);
   state.currentLayoutId = snapshotDoc.currentLayoutId;
   state.currentWindowId = snapshotDoc.currentWindowId;
@@ -4333,6 +4413,10 @@ async function restoreCurrentState() {
   emitSetProjects();
   emitSnapshot();
   if (runtimeWindows.length > 0) {
+    for (const runtimeWindow of runtimeWindows) {
+      log(`restoreCurrentState creating browser window ${runtimeWindow.id}`);
+      getOrCreateBrowserWindow(runtimeWindow.id, runtimeWindow.title);
+    }
     focusWindow(state.currentWindowId, getCurrentWindow().title);
   }
   log("current state restored");
@@ -4829,28 +4913,6 @@ async function openQuickAccess(tabId: "browser" | "terminal" | "agent") {
   return snapshot();
 }
 
-async function handleTrayAction(action: string) {
-  if (action === "open-window") {
-    if (runtimeWindows.length === 0) {
-      await openWorkspaceInNewWindow(getCurrentWorkspace().key);
-      return;
-    }
-    focusWindow(state.currentWindowId, getCurrentWindow().title);
-  } else if (action === "resume-last-state" || action === "restore-current-state") {
-    await restoreCurrentState();
-  } else if (action === "update-current-layout" || action === "overwrite-current-lens") {
-    await overwriteCurrentLens();
-  } else if (action.startsWith("layout:")) {
-    await openLensInNewWindow(action.replace("layout:", ""));
-  } else if (action.startsWith("lens:")) {
-    await openLensInNewWindow(action.replace("lens:", ""));
-  } else if (action.startsWith("workspace:")) {
-    await openWorkspaceInNewWindow(action.replace("workspace:", ""));
-  } else if (action === "stop") {
-    stopCarrot();
-  }
-}
-
 async function selectWindow(windowId: string) {
   if (!runtimeWindows.some((window) => window.id === windowId)) {
     return;
@@ -4913,46 +4975,7 @@ async function selectNode(nodeId: string) {
 }
 
 function syncTray() {
-  if (!permissions.has("host:tray")) return;
-  const currentLens = getCurrentLens();
-  const workspaces = listWorkspaces();
-  const currentWorkspace = getCurrentWorkspaceUnsafe();
-
-  if (!tray) {
-    tray = new Tray({ title: `Dash: ${currentLens.name}` });
-    tray.on("click", (payload) => {
-      void handleTrayAction(String((payload as { action?: string } | undefined)?.action || ""));
-    });
-  } else {
-    tray.setTitle(`Dash: ${currentLens.name}`);
-  }
-
-  tray.setMenu([
-    { type: "normal", label: "Open Bunny Dash", action: "open-window" },
-    { type: "normal", label: "Restore Current State", action: "restore-current-state" },
-    { type: "normal", label: "Overwrite Current Lens", action: "overwrite-current-lens" },
-    { type: "divider" },
-    {
-      type: "normal",
-        label: "Open Lens",
-        action: "noop-lens",
-        submenu: workspaces.map((workspace) => ({
-          type: "normal",
-          label: workspace.name,
-          action: `noop-workspace:${workspace.key}`,
-          submenu: getLensesForWorkspace(workspace.key).map((lens) => ({
-            type: "normal",
-            label:
-            lens.key === state.currentLayoutId && workspace.key === currentWorkspace?.key
-              ? `• ${lens.name}`
-              : lens.name,
-          action: `lens:${lens.key}`,
-        })),
-      })),
-    },
-    { type: "divider" },
-    { type: "normal", label: "Stop Bunny Dash", action: "stop" },
-  ]);
+  // Dash no longer owns or extends the system tray.
 }
 
 function buildWorkspaceLensSidebarData() {
@@ -5608,6 +5631,11 @@ self.onmessage = async (event) => {
       return;
     }
 
+    if (message.name === "open-window") {
+      await openDashWindow();
+      return;
+    }
+
     if (message.name === "window-focus") {
       setActiveWindow(String(message.payload?.windowId || ""));
       syncTray();
@@ -5616,32 +5644,7 @@ self.onmessage = async (event) => {
     }
 
     if (message.name === "window-closed") {
-      const closedWindowId = String(message.payload?.windowId || "");
-      const closedRuntimeWindow = runtimeWindows.find((window) => window.id === closedWindowId);
-      browserWindows.delete(closedWindowId);
-      await closeTsServerEditorsForWindow(closedWindowId, closedRuntimeWindow?.workspaceId);
-      await killTerminalsForWindow(closedWindowId);
-      removeBunnyWindowFromAllWorkspaces(closedWindowId);
-      runtimeWindows = runtimeWindows.filter((window) => window.id !== closedWindowId);
-      const pendingPersist = framePersistTimers.get(closedWindowId);
-      if (pendingPersist) {
-        clearTimeout(pendingPersist);
-        framePersistTimers.delete(closedWindowId);
-      }
-      if (state.currentWindowId === closedWindowId) {
-        state.currentWindowId = runtimeWindows[0]?.id || "";
-      }
-      if (runtimeWindows.length > 0) {
-        const currentWindow = getCurrentWindowUnsafe();
-        if (currentWindow) {
-          state.currentLayoutId = getLensIdForWindow(currentWindow);
-        }
-      }
-      syncActiveTreeNode();
-      await saveState();
-      syncTray();
-      emitSetProjects();
-      emitSnapshot();
+      await handleHostWindowClosed(String(message.payload?.windowId || ""));
       return;
     }
     return;
@@ -5664,6 +5667,10 @@ self.onmessage = async (event) => {
     switch (message.method) {
       case "getSnapshot":
         post({ type: "response", requestId: message.requestId, success: true, payload: snapshot() });
+        break;
+      case "hostWindowClosed":
+        await handleHostWindowClosed(String(message.params?.windowId || ""));
+        post({ type: "response", requestId: message.requestId, success: true, payload: null });
         break;
       case "toggleSidebar":
         state.sidebarCollapsed = !state.sidebarCollapsed;
