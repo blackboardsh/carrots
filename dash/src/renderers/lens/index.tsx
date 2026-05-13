@@ -90,11 +90,9 @@ import type {
 } from "../../shared/types/types";
 
 import {
-	CloudWorkspacesTree,
 	FindAllResultsTree,
 	OpenFilesTree,
 	ProjectsTree,
-	WorkspaceLensesTree,
 	TemplateNodes,
 	createContextMenuAction,
 	getIconForNode,
@@ -4583,8 +4581,6 @@ const Sidebar = () => {
 						<>
 							<TemplateNodes />
 							<OpenFilesTree />
-							<WorkspaceLensesTree />
-							<CloudWorkspacesTree />
 							<ProjectsTree />
 						</>
 					)}

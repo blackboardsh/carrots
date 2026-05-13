@@ -4,6 +4,8 @@ import { dirname, basename } from "../../utils/pathUtils";
 import { getProjectForNodePath } from "../files";
 import { electrobun } from "../init";
 import {
+  type BunnyDashCloudWorkspaceTreeType,
+  type BunnyDashWorkspaceTreeType,
   state,
   setState,
   openNewTabForNode,
@@ -138,6 +140,8 @@ export const TopBar = () => {
         />
       </div>
 
+      <WorkspaceLensSwitcher />
+
       <div
         class="electrobun-webkit-app-region-drag"
         style="flex-grow:1; height: 100%; cursor: move; "
@@ -253,6 +257,443 @@ export const TopBar = () => {
 
       <CommandPalette setOpen={setCommandPaletteOpen} />
     </div>
+  );
+};
+
+type WorkspaceSwitcherLens = {
+  id: string;
+  name: string;
+  isCurrent: boolean;
+};
+
+type WorkspaceSwitcherGroup = {
+  id: string;
+  name: string;
+  subtitle: string;
+  isCloud: boolean;
+  isCurrent: boolean;
+  lenses: WorkspaceSwitcherLens[];
+};
+
+const WorkspaceLensSwitcher = () => {
+  const openMenu = () => {
+    if (state.ui.showWorkspaceMenu) {
+      return;
+    }
+    setState("isResizingPane", true);
+    setState("ui", "showWorkspaceMenu", true);
+  };
+
+  const closeMenu = () => {
+    setState("ui", "showWorkspaceMenu", false);
+    setState("isResizingPane", false);
+  };
+
+  const workspaceGroups = createMemo<WorkspaceSwitcherGroup[]>(() => {
+    const localGroups = state.bunnyDash.workspaces.map(
+      (workspace: BunnyDashWorkspaceTreeType) => ({
+        id: workspace.id,
+        name: workspace.name,
+        subtitle: workspace.subtitle || "Local Session",
+        isCloud: false,
+        isCurrent: workspace.isCurrent,
+        lenses: workspace.lenses.map((lens) => ({
+          id: lens.id,
+          name: lens.name,
+          isCurrent: lens.isCurrent,
+        })),
+      })
+    );
+
+    const cloudGroups = state.bunnyDash.cloudWorkspaces.map(
+      (workspace: BunnyDashCloudWorkspaceTreeType) => ({
+        id: workspace.runtimeWorkspaceId,
+        name: workspace.name,
+        subtitle: workspace.subtitle || "Remote Workspace",
+        isCloud: true,
+        isCurrent: workspace.isCurrent,
+        lenses: workspace.lenses.map((lens) => ({
+          id: lens.runtimeLensId,
+          name: lens.name,
+          isCurrent: lens.isCurrent,
+        })),
+      })
+    );
+
+    return [...localGroups, ...cloudGroups];
+  });
+
+  const currentWorkspace = createMemo(() =>
+    workspaceGroups().find(
+      (workspace) => workspace.id === state.bunnyDash.currentWorkspaceId
+    )
+  );
+
+  const currentLens = createMemo(() =>
+    workspaceGroups()
+      .flatMap((workspace) => workspace.lenses)
+      .find((lens) => lens.id === state.bunnyDash.currentLensId)
+  );
+
+  const currentWorkspaceName = () =>
+    currentWorkspace()?.name || state.workspace?.name || "Select Context";
+
+  const currentLensName = () => {
+    const lensName = currentLens()?.name?.trim();
+    if (lensName && lensName !== "Current") {
+      return lensName;
+    }
+
+    return "Current Lens";
+  };
+
+  const currentWorkspacePill = () =>
+    currentWorkspace()?.isCloud ? "Remote" : "Local";
+
+  const currentContextLabel = () =>
+    `${currentWorkspaceName()} · ${currentLensName()}`;
+
+  const openWorkspace = async (workspaceId: string, inNewWindow: boolean) => {
+    closeMenu();
+    if (inNewWindow) {
+      await electrobun.rpc?.request.openWorkspaceInNewWindow({ workspaceId });
+    } else {
+      await electrobun.rpc?.request.openWorkspace({ workspaceId });
+    }
+  };
+
+  const openLens = async (lensId: string, inNewWindow: boolean) => {
+    closeMenu();
+    if (inNewWindow) {
+      await electrobun.rpc?.request.openLensInNewWindow({ lensId });
+    } else {
+      await electrobun.rpc?.request.openLens({ lensId });
+    }
+  };
+
+  const createLensForWorkspace = async (workspaceId: string) => {
+    closeMenu();
+    const name = String(
+      (await electrobun.rpc?.request.getUniqueLensName({
+        workspaceId,
+        baseName: "Lens",
+      })) || "Lens"
+    );
+
+    setState("settingsPane", {
+      type: "lens-settings",
+      data: {
+        mode: "create",
+        workspaceId,
+        name,
+        description: "",
+      },
+    });
+  };
+
+  const onWorkspaceRowMouseDown = (
+    e: MouseEvent,
+    workspaceId: string
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    void openWorkspace(workspaceId, e.metaKey || e.ctrlKey);
+  };
+
+  const onLensRowMouseDown = (e: MouseEvent, lensId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    void openLens(lensId, e.metaKey || e.ctrlKey);
+  };
+
+  const onNewLensRowMouseDown = (e: MouseEvent, workspaceId: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    void createLensForWorkspace(workspaceId);
+  };
+
+  return (
+    <Show when={workspaceGroups().length > 0}>
+      <div
+        style={{
+          position: "relative",
+          display: "flex",
+          "align-items": "center",
+          "align-self": "center",
+          "margin-left": "10px",
+          height: "26px",
+        }}
+      >
+        <button
+          class="webview-overlay"
+          title="Switch workspace or lens"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (state.ui.showWorkspaceMenu) {
+              closeMenu();
+              return;
+            }
+            openMenu();
+          }}
+          style={`
+            width: 340px;
+            height: 26px;
+            border-radius: 6px;
+            border: 1px solid ${state.ui.showWorkspaceMenu ? "#3f5f95" : "#343434"};
+            background: ${state.ui.showWorkspaceMenu ? "#1e2b42" : "#2a2a2a"};
+            color: #e8e8e8;
+            padding: 0 10px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            cursor: pointer;
+            gap: 10px;
+            box-sizing: border-box;
+          `}
+        >
+          <div
+            style={{
+              display: "flex",
+              "align-items": "center",
+              gap: "10px",
+              "min-width": "0",
+              flex: "1",
+            }}
+          >
+            <div
+              style={{
+                "font-size": "10px",
+                "font-weight": "700",
+                color: currentWorkspace()?.isCloud ? "#8fe7ff" : "#cfcfcf",
+                "letter-spacing": "0.08em",
+                "text-transform": "uppercase",
+                "flex-shrink": "0",
+              }}
+            >
+              {currentWorkspacePill()}
+            </div>
+            <div
+              style={{
+                "min-width": "0",
+                flex: "1",
+                "text-align": "left",
+                "font-size": "13px",
+                "font-weight": "600",
+                color: "#f4f4f4",
+                overflow: "hidden",
+                "text-overflow": "ellipsis",
+                "white-space": "nowrap",
+              }}
+            >
+              {currentContextLabel()}
+            </div>
+          </div>
+          <div style={{ color: "#9d9d9d", "font-size": "12px", "flex-shrink": "0" }}>
+            {state.ui.showWorkspaceMenu ? "▲" : "▼"}
+          </div>
+        </button>
+
+        <Show when={state.ui.showWorkspaceMenu}>
+          <div
+            class="webview-overlay"
+            style="position: fixed; inset: 0; z-index: 999998;"
+            onMouseDown={() => closeMenu()}
+          />
+
+          <div
+            class="webview-overlay"
+            style={`
+              position: absolute;
+              top: 32px;
+              left: 0;
+              z-index: 999999;
+              width: 360px;
+              max-height: calc(100vh - 70px);
+              overflow-y: auto;
+              background: #1a1a1a;
+              border: 1px solid #3a3a3a;
+              border-radius: 10px;
+              box-shadow: 0 16px 40px rgba(0,0,0,0.45);
+              padding: 8px;
+              box-sizing: border-box;
+            `}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div
+              style={{
+                display: "flex",
+                "justify-content": "space-between",
+                "align-items": "center",
+                padding: "6px 8px 10px 8px",
+                color: "#8a8a8a",
+                "font-size": "11px",
+                "text-transform": "uppercase",
+                "letter-spacing": "0.08em",
+              }}
+            >
+              <span>Contexts</span>
+              <span style={{ "text-transform": "none", "letter-spacing": "0" }}>
+                Cmd/Ctrl-click opens a new window
+              </span>
+            </div>
+
+            <For each={workspaceGroups()}>
+              {(workspace) => (
+                <>
+                  <div
+                    style={{
+                      margin: "0 0 8px 0",
+                      border: workspace.isCurrent
+                        ? "1px solid #355789"
+                        : "1px solid #2b2b2b",
+                      "border-radius": "8px",
+                      background: workspace.isCurrent ? "#202a39" : "#171717",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      onMouseDown={(e) => onWorkspaceRowMouseDown(e, workspace.id)}
+                      style={`
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        gap: 10px;
+                        padding: 10px 12px;
+                        cursor: pointer;
+                        background: ${workspace.isCurrent ? "#22324c" : "transparent"};
+                        border-bottom: 1px solid #242424;
+                      `}
+                    >
+                      <div style={{ "min-width": "0", flex: "1" }}>
+                        <div
+                          style={{
+                            display: "flex",
+                            "align-items": "center",
+                            gap: "8px",
+                            "min-width": "0",
+                          }}
+                        >
+                          <span style={{ color: workspace.isCloud ? "#8fe7ff" : "#cfcfcf" }}>
+                            {workspace.isCloud ? "☁" : "◉"}
+                          </span>
+                          <span
+                            style={{
+                              color: "#f0f0f0",
+                              "font-size": "13px",
+                              "font-weight": "600",
+                              overflow: "hidden",
+                              "text-overflow": "ellipsis",
+                              "white-space": "nowrap",
+                            }}
+                          >
+                            {workspace.name}
+                          </span>
+                          <Show when={workspace.isCurrent}>
+                            <span
+                              style={{
+                                "font-size": "10px",
+                                color: "#9fd0ff",
+                                border: "1px solid #4b6a93",
+                                "border-radius": "999px",
+                                padding: "1px 6px",
+                                "flex-shrink": "0",
+                              }}
+                            >
+                              Current
+                            </span>
+                          </Show>
+                        </div>
+                        <div
+                          style={{
+                            color: "#8f8f8f",
+                            "font-size": "11px",
+                            "margin-left": "20px",
+                            overflow: "hidden",
+                            "text-overflow": "ellipsis",
+                            "white-space": "nowrap",
+                          }}
+                        >
+                          {workspace.subtitle}
+                        </div>
+                      </div>
+                      <div style={{ color: "#7f7f7f", "font-size": "11px", "flex-shrink": "0" }}>
+                        {workspace.isCloud ? "Remote" : "Local"}
+                      </div>
+                    </div>
+
+                    <div style={{ padding: "6px 6px 8px 6px" }}>
+                      <For each={workspace.lenses}>
+                        {(lens) => (
+                          <div
+                            onMouseDown={(e) => onLensRowMouseDown(e, lens.id)}
+                            style={`
+                              display: flex;
+                              align-items: center;
+                              justify-content: space-between;
+                              gap: 10px;
+                              padding: 8px 10px 8px 28px;
+                              border-radius: 6px;
+                              cursor: pointer;
+                              color: ${lens.isCurrent ? "#f3f7ff" : "#d0d0d0"};
+                              background: ${lens.isCurrent ? "#2a3d5d" : "transparent"};
+                              margin-bottom: 2px;
+                            `}
+                          >
+                            <span
+                              style={{
+                                overflow: "hidden",
+                                "text-overflow": "ellipsis",
+                                "white-space": "nowrap",
+                                "font-size": "12px",
+                                flex: "1",
+                              }}
+                            >
+                              {lens.name === "Current" ? "Current Lens" : lens.name}
+                            </span>
+                            <Show when={lens.isCurrent}>
+                              <span
+                                style={{
+                                  "font-size": "10px",
+                                  color: "#9fd0ff",
+                                  "flex-shrink": "0",
+                                }}
+                              >
+                                Open
+                              </span>
+                            </Show>
+                          </div>
+                        )}
+                      </For>
+
+                      <div
+                        onMouseDown={(e) => onNewLensRowMouseDown(e, workspace.id)}
+                        style={`
+                          display: flex;
+                          align-items: center;
+                          gap: 10px;
+                          padding: 8px 10px 8px 28px;
+                          border-radius: 6px;
+                          cursor: pointer;
+                          color: #7ed3ff;
+                          background: rgba(66, 139, 202, 0.08);
+                          margin-top: 4px;
+                          font-size: 12px;
+                          font-weight: 600;
+                        `}
+                      >
+                        <span>+</span>
+                        <span>New Lens…</span>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+            </For>
+          </div>
+        </Show>
+      </div>
+    </Show>
   );
 };
 
