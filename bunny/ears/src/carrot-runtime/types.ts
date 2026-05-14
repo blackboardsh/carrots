@@ -56,6 +56,21 @@ export type CarrotRemoteUI = {
   path: string;
 };
 
+export type CarrotFileActivator = {
+  baseName?: string;
+  nodeType?: "file" | "dir" | "any";
+  slate: {
+    type: string;
+    name?: string;
+    icon?: string;
+    config?: Record<string, unknown>;
+  };
+};
+
+export type CarrotContributions = {
+  fileActivators?: CarrotFileActivator[];
+};
+
 export type CarrotManifest = {
   id: string;
   name: string;
@@ -79,6 +94,7 @@ export type CarrotManifest = {
   // Remote UIs declared by the carrot — exposed for browser loading via Hop.
   // Map of remote UI ID → { name (label), path (within currentDir) }.
   remoteUIs?: Record<string, CarrotRemoteUI>;
+  contributions?: CarrotContributions;
 };
 
 export type CarrotInstallSource =

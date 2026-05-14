@@ -1,7 +1,7 @@
 // XXX
 // import { spawn } from "child_process";
 import { createEffect, untrack } from "solid-js";
-import { type AppState, setState, state } from "./store";
+import { type AppState, type BunnyDashCarrotType, setState, state } from "./store";
 import { join, relative } from "../utils/pathUtils";
 import {
   type PreviewFileTreeType,
@@ -191,14 +191,11 @@ export const getFileTreesChildPathToNode = (nodePath: string): string[] => {
 // given something nodeShaped, return the copy from state
 // todo (yoav): rename this function
 
+type CarrotFileActivator = NonNullable<
+  NonNullable<BunnyDashCarrotType["contributions"]>["fileActivators"]
+>[number];
+
 const fileSlates = {
-  ".git": {
-    name: "Open GIT Tab",
-    type: "git",
-    icon: "", //"https://git-scm.com/images/logos/downloads/Git-Icon-1788C.png",
-    // TODO: default git config here
-    config: {},
-  },
   "package.json": {
     name: "Npm (package.json)",
     type: "npm",
@@ -238,6 +235,68 @@ const templateSlates = {
     icon: "views://assets/file-icons/agent.svg",
     config: {},
   },
+};
+
+const getCarrotsForNode = (
+  node: CachedFileType | PreviewFileTreeType
+): BunnyDashCarrotType[] => {
+  const instances = state.bunnyDash?.instances || [];
+  const currentInstanceCarrots =
+    instances.find((instance) => instance.isCurrent)?.carrots || [];
+  const project = node.path ? getProjectForNodePath(node.path) : undefined;
+
+  if (!project?.instanceId) {
+    return currentInstanceCarrots;
+  }
+
+  const matchingInstance = instances.find((instance) => instance.id === project.instanceId);
+  return matchingInstance?.carrots?.length
+    ? matchingInstance.carrots
+    : currentInstanceCarrots;
+};
+
+const matchesCarrotFileActivator = (
+  node: CachedFileType | PreviewFileTreeType,
+  activator: CarrotFileActivator
+) => {
+  const baseName = node.path?.split("/").pop() || "";
+  const requiredNodeType = activator.nodeType || "any";
+
+  if (activator.baseName && activator.baseName !== baseName) {
+    return false;
+  }
+
+  if (requiredNodeType !== "any" && node.type !== requiredNodeType) {
+    return false;
+  }
+
+  return true;
+};
+
+const getCarrotSlateForNode = (
+  node: CachedFileType | PreviewFileTreeType
+) => {
+  const carrots = getCarrotsForNode(node);
+
+  for (const carrot of carrots) {
+    const activators = carrot.contributions?.fileActivators || [];
+
+    for (const activator of activators) {
+      if (!matchesCarrotFileActivator(node, activator)) {
+        continue;
+      }
+
+      return {
+        v: 1,
+        name: activator.slate.name || node.name || node.path.split("/").pop() || "Untitled",
+        type: activator.slate.type,
+        icon: activator.slate.icon || "",
+        config: activator.slate.config || {},
+      };
+    }
+  }
+
+  return undefined;
 };
 
 // todo: - how much of this should be async via the backend vs. completely stored, and cached
@@ -303,21 +362,15 @@ export const getSlateForNode = (
 
   const fileOrFolderName = node.path.split("/").pop();
 
+  const carrotSlate = getCarrotSlateForNode(node);
+  if (carrotSlate) {
+    return carrotSlate;
+  }
+
   if (fileOrFolderName && fileOrFolderName in fileSlates) {
     const fileNameSlate =
       fileSlates[fileOrFolderName as keyof typeof fileSlates];
-
-    if (fileNameSlate) {
-      // For .git, create a custom slate with the parent folder name
-      if (fileOrFolderName === ".git") {
-        const parentFolderName = node.path.split("/").slice(-2, -1)[0] || "Git";
-        return {
-          ...fileNameSlate,
-          name: `Git: ${parentFolderName}`,
-        };
-      }
-      return fileNameSlate;
-    }
+    return fileNameSlate;
   }
 
   if (node.type === "dir") {

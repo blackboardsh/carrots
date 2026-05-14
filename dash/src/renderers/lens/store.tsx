@@ -66,6 +66,18 @@ export type BunnyDashCarrotType = {
   mode: string;
   permissions: string[];
   status: string;
+  contributions?: {
+    fileActivators?: Array<{
+      baseName?: string;
+      nodeType?: "file" | "dir" | "any";
+      slate: {
+        type: string;
+        name?: string;
+        icon?: string;
+        config?: Record<string, unknown>;
+      };
+    }>;
+  };
 };
 
 export type BunnyDashInstanceType = {

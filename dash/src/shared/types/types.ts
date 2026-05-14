@@ -100,6 +100,13 @@ export type SlateType =
       };
     }
   | {
+      v?: 1;
+      name: string;
+      type: "git";
+      icon?: string;
+      config?: Record<string, unknown>;
+    }
+  | {
       // not stored in .bunny.json, based on subfolder
       type: "devlink";
     }

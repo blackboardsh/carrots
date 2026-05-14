@@ -131,6 +131,18 @@ type CachedCarrotSummary = {
   mode: string;
   permissions: string[];
   status: string;
+  contributions?: {
+    fileActivators?: Array<{
+      baseName?: string;
+      nodeType?: "file" | "dir" | "any";
+      slate: {
+        type: string;
+        name?: string;
+        icon?: string;
+        config?: Record<string, unknown>;
+      };
+    }>;
+  };
 };
 
 type TreeNode = {
@@ -562,6 +574,7 @@ async function refreshCarrotList() {
       mode: c.mode,
       permissions: c.permissions || [],
       status: c.status,
+      contributions: c.contributions,
     }));
   } catch {}
 }

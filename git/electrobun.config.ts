@@ -21,6 +21,20 @@ export default {
 				bun: { read: true, write: true, run: true },
 				isolation: "shared-worker",
 			},
+			contributions: {
+				fileActivators: [
+					{
+						baseName: ".git",
+						nodeType: "dir",
+						slate: {
+							type: "git",
+							name: "Git",
+							icon: "",
+							config: {},
+						},
+					},
+				],
+			},
 		},
 	},
 	scripts: {

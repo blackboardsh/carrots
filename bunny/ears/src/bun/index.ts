@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type {
   CarrotPermissionConsentRequest,
+  CarrotContributions,
   CarrotPermissionGrant,
   CarrotPermissionTag,
   CarrotViewRPC,
@@ -80,6 +81,7 @@ type CarrotInfo = {
   // "Open in browser" links pointing through Hop. Empty array for background
   // carrots or carrots that don't expose remote UIs.
   remoteUIs: CarrotRemoteUIInfo[];
+  contributions?: CarrotContributions;
 };
 
 type DashboardState = {
@@ -208,6 +210,7 @@ class CarrotInstance {
       lastBuildError: this.carrot.install.lastBuildError ?? null,
       logTail: this.logs.slice(-4),
       remoteUIs,
+      contributions: this.carrot.manifest.contributions,
     };
   }
 
