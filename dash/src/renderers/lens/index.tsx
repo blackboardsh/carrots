@@ -17,7 +17,12 @@ import { render, untrack } from "solid-js/web";
 import "./FileWatcher";
 // import { Electroview } from "electrobun/view";
 // import { type WorkspaceRPC } from "./rpc";
-import { electrobun, invokeGitCarrot } from "./init";
+import {
+	electrobun,
+	invokeGitCarrot,
+	findAllInCurrentWorkspace,
+	cancelCurrentWorkspaceFindAll,
+} from "./init";
 
 import {
 	//   createDevlinkFiles,
@@ -4455,7 +4460,9 @@ const Sidebar = () => {
 			);
 
 			// Cancel any ongoing find all searches
-			electrobun.rpc?.request.cancelFindAll();
+			void cancelCurrentWorkspaceFindAll().catch((error) => {
+				console.error("Cancel find all error:", error);
+			});
 		}
 
 		// Clear any pending debounced search
@@ -4471,8 +4478,7 @@ const Sidebar = () => {
 		// Debounce the actual search - wait for user to stop typing
 		if (value) {
 			searchDebounceTimer = setTimeout(() => {
-				electrobun.rpc?.request
-					.findAllInWorkspace({ query: value })
+				findAllInCurrentWorkspace(value)
 					.catch((error) => {
 						console.error("Find all search error:", error);
 					});

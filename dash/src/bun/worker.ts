@@ -2477,13 +2477,6 @@ async function closeTsServerEditorsForWindow(windowId: string, workspaceId?: str
   }
 }
 
-function buildSearchTargetsForWorkspace(workspaceId = getCurrentWorkspace().key) {
-  return getProjectMountsForWorkspace(workspaceId).map((project) => ({
-    projectId: project.key,
-    path: project.path,
-  }));
-}
-
 async function heartbeatPtyTerminals() {
   const terminalIds = Array.from(terminalWindowOwners.keys());
   if (terminalIds.length === 0) {
@@ -2544,63 +2537,6 @@ function handleFsFileWatchEvent(payload: unknown) {
   }
 
   scheduleRefresh();
-}
-
-function handleFsFindAllResults(payload: unknown) {
-  const eventPayload =
-    payload && typeof payload === "object"
-      ? (payload as {
-          query?: string;
-          projectId?: string;
-          results?: Array<{ path?: string; line?: number; column?: number; match?: string }>;
-          windowId?: string | null;
-        })
-      : {};
-
-  const targetWindowId =
-    typeof eventPayload.windowId === "string" ? eventPayload.windowId : state.currentWindowId;
-
-  sendRuntimeEventToDashWindow(
-    targetWindowId,
-    "findAllInFolderResult",
-    {
-      query: String(eventPayload.query || ""),
-      projectId: String(eventPayload.projectId || ""),
-      results: Array.isArray(eventPayload.results)
-        ? eventPayload.results.map((result) => ({
-            path: String(result?.path || ""),
-            line: Number(result?.line || 0),
-            column: Number(result?.column || 0),
-            match: String(result?.match || ""),
-          }))
-        : [],
-    },
-  );
-}
-
-function handleFsFindFilesResults(payload: unknown) {
-  const eventPayload =
-    payload && typeof payload === "object"
-      ? (payload as {
-          query?: string;
-          projectId?: string;
-          results?: string[];
-          windowId?: string | null;
-        })
-      : {};
-
-  const targetWindowId =
-    typeof eventPayload.windowId === "string" ? eventPayload.windowId : state.currentWindowId;
-
-  sendRuntimeEventToDashWindow(
-    targetWindowId,
-    "findFilesInWorkspaceResult",
-    {
-      query: String(eventPayload.query || ""),
-      projectId: String(eventPayload.projectId || ""),
-      results: Array.isArray(eventPayload.results) ? eventPayload.results.map(String) : [],
-    },
-  );
 }
 
 function handleTsServerMessage(payload: unknown) {
@@ -4742,52 +4678,6 @@ async function handleBunnyDashRequest(method: string, params: any) {
       bunnyDashState.appSettings = params.appSettings;
       await writePersistedDashState();
       return;
-    case "openFileDialog":
-      return Utils.openFileDialog({
-        startingFolder: params?.startingFolder,
-        allowedFileTypes: params?.allowedFileTypes,
-        canChooseFiles: params?.canChooseFiles,
-        canChooseDirectory: params?.canChooseDirectory,
-        allowsMultipleSelection: params?.allowsMultipleSelection,
-      });
-    case "getNode":
-      return invokeFsCarrot("getNode", { path: String(params?.path || "") });
-    case "readSlateConfigFile":
-      return invokeFsCarrot("readSlateConfigFile", { path: String(params?.path || "") });
-    case "readFile":
-      return invokeFsCarrot("readFile", { path: String(params?.path || "") });
-    case "writeFile":
-      return invokeFsCarrot("writeFile", {
-        path: String(params?.path || ""),
-        value: String(params?.value || ""),
-      });
-    case "touchFile":
-      return invokeFsCarrot("touchFile", {
-        path: String(params?.path || ""),
-        contents: String(params?.contents || ""),
-      });
-    case "rename":
-      return invokeFsCarrot("rename", {
-        oldPath: String(params?.oldPath || ""),
-        newPath: String(params?.newPath || ""),
-      });
-    case "exists":
-      return invokeFsCarrot("exists", { path: String(params?.path || "") });
-    case "isFolder":
-      return invokeFsCarrot("isFolder", { path: String(params?.path || "") });
-    case "mkdir":
-      return invokeFsCarrot("mkdir", { path: String(params?.path || "") });
-    case "showInFinder":
-      await Utils.showItemInFolder(String(params?.path || ""));
-      return;
-    case "copy":
-      return invokeFsCarrot("copy", {
-        src: String(params?.src || ""),
-        dest: String(params?.dest || ""),
-      });
-    case "safeDeleteFileOrFolder":
-    case "safeTrashFileOrFolder":
-      return invokeFsCarrot(method, { path: String(params?.path || "") });
     case "execSpawnSync": {
       const cmd = String(params?.cmd || "");
       const args = Array.isArray(params?.args) ? params.args.map(String) : [];
@@ -4843,65 +4733,11 @@ async function handleBunnyDashRequest(method: string, params: any) {
       return buildWorkspaceLensSidebarData();
     case "activateLens":
       return activateLens(String(params?.lensId || state.currentLayoutId));
-    case "findFilesInWorkspace":
-      return invokeFsCarrot<string[]>(
-        "findFilesInWorkspace",
-        {
-          query: String(params?.query || ""),
-          targets: buildSearchTargetsForWorkspace(),
-        },
-        { windowId: getCurrentWindow().id },
-      );
-    case "findAllInWorkspace":
-      return invokeFsCarrot<
-        Array<{ path: string; line: number; column: number; match: string }>
-      >(
-        "findAllInWorkspace",
-        {
-          query: String(params?.query || ""),
-          targets: buildSearchTargetsForWorkspace(),
-        },
-        { windowId: getCurrentWindow().id },
-      );
-    case "cancelFileSearch":
-      return invokeFsCarrot<boolean>("cancelFileSearch", {}, {
-        windowId: getCurrentWindow().id,
-      });
-    case "cancelFindAll":
-      return invokeFsCarrot<boolean>("cancelFindAll", {}, {
-        windowId: getCurrentWindow().id,
-      });
-    case "invokeCarrot":
-      return Carrots.invoke(
-        String(params?.carrotId || ""),
-        String(params?.method || ""),
-        params?.params,
-        {
-          windowId:
-            typeof params?.windowId === "string"
-              ? params.windowId
-              : getCurrentWindow().id,
-        },
-      );
-    case "findFirstNestedGitRepo":
-      return invokeFsCarrot<string | null>("findFirstNestedGitRepo", {
-        searchPath: String(params?.searchPath || ""),
-        timeoutMs: Number(params?.timeoutMs || 5_000),
-      });
-    case "getUniqueNewName":
-      return invokeFsCarrot("getUniqueNewName", {
-        parentPath: String(params?.parentPath || ""),
-        baseName: String(params?.baseName || "untitled"),
-      });
     case "getUniqueLensName":
       return getUniqueLensNameForWorkspace(
         String(params?.workspaceId || getCurrentWorkspace().key),
         String(params?.baseName || "Lens"),
       );
-    case "makeFileNameSafe":
-      return invokeFsCarrot("makeFileNameSafe", {
-        value: String(params?.value || ""),
-      });
     case "getFaviconForUrl":
       return "views://assets/file-icons/bookmark.svg";
     case "showContextMenu":
@@ -5132,16 +4968,6 @@ self.onmessage = async (event) => {
 
     if (message.name === "fs-file-watch-event") {
       handleFsFileWatchEvent(message.payload);
-      return;
-    }
-
-    if (message.name === "fs-find-all-results" || message.name === "search-find-all-results") {
-      handleFsFindAllResults(message.payload);
-      return;
-    }
-
-    if (message.name === "fs-find-files-results" || message.name === "search-find-files-results") {
-      handleFsFindFilesResults(message.payload);
       return;
     }
 

@@ -739,6 +739,58 @@ export function invokeGitCarrot<T = unknown>(method: string, params?: unknown) {
 	return invokeCarrot<T>("bunny.git", method, params);
 }
 
+function buildCurrentWorkspaceSearchTargets() {
+	return Object.values(state.projects || {})
+		.filter((project) => Boolean(project?.id && project?.path))
+		.map((project) => ({
+			projectId: String(project.id),
+			instanceId: String(project.instanceId || "host-machine"),
+			path: String(project.path),
+		}));
+}
+
+export function findFilesInCurrentWorkspace(query: string) {
+	return invokeCarrot<string[]>(
+		"bunny.fs",
+		"findFilesInWorkspace",
+		{
+			query,
+			targets: buildCurrentWorkspaceSearchTargets(),
+		},
+		{ windowId: state.windowId },
+	);
+}
+
+export function findAllInCurrentWorkspace(query: string) {
+	return invokeCarrot<Array<{ path: string; line: number; column: number; match: string }>>(
+		"bunny.fs",
+		"findAllInWorkspace",
+		{
+			query,
+			targets: buildCurrentWorkspaceSearchTargets(),
+		},
+		{ windowId: state.windowId },
+	);
+}
+
+export function cancelCurrentWorkspaceFileSearch() {
+	return invokeCarrot<boolean>(
+		"bunny.fs",
+		"cancelFileSearch",
+		{},
+		{ windowId: state.windowId },
+	);
+}
+
+export function cancelCurrentWorkspaceFindAll() {
+	return invokeCarrot<boolean>(
+		"bunny.fs",
+		"cancelFindAll",
+		{},
+		{ windowId: state.windowId },
+	);
+}
+
 export function invokePtyCarrot<T = unknown>(method: string, params?: unknown) {
 	const requestProxy = (electrobun as any)?.rpc?.request;
 	if (requestProxy && typeof requestProxy.invokeCarrot === "function") {

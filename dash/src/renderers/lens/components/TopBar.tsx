@@ -2,7 +2,11 @@
 import { produce } from "solid-js/store";
 import { dirname, basename } from "../../utils/pathUtils";
 import { getProjectForNodePath } from "../files";
-import { electrobun } from "../init";
+import {
+  cancelCurrentWorkspaceFileSearch,
+  electrobun,
+  findFilesInCurrentWorkspace,
+} from "../init";
 import {
   type BunnyDashCloudWorkspaceTreeType,
   type BunnyDashWorkspaceTreeType,
@@ -36,7 +40,9 @@ export const TopBar = () => {
   const setCommandPaletteOpen = (value: boolean) => {
     setState("ui", "showCommandPalette", value);
     if (!value) {
-      electrobun.rpc?.request.cancelFileSearch();
+      void cancelCurrentWorkspaceFileSearch().catch((error) => {
+        console.error("Cancel file search error:", error);
+      });
     }
   };
 
@@ -804,7 +810,9 @@ const CommandPalette = ({ setOpen }: { setOpen: (value: boolean) => void }) => {
     }
 
     // Trigger file search - results will stream in via findFilesInWorkspaceResult handler
-    electrobun.rpc?.request.findFilesInWorkspace({ query: value });
+    void findFilesInCurrentWorkspace(value).catch((error) => {
+      console.error("File search error:", error);
+    });
   };
 
   createEffect((lastValue) => {

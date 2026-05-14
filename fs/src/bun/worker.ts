@@ -23,6 +23,7 @@ type InvocationSource = {
 
 type SearchTarget = {
   projectId: string;
+  instanceId?: string;
   path: string;
 };
 
@@ -241,11 +242,20 @@ function emitFindAllResults(owner: SearchOwner, query: string, projectId: string
     return;
   }
 
-  Carrots.emit(owner.carrotId, "fs-find-all-results", {
-    windowId: owner.windowId ?? null,
-    query,
-    projectId,
-    results,
+  post({
+    type: "action",
+    action: "emit-carrot-view-event",
+    payload: {
+      carrotId: owner.carrotId,
+      name: "findAllInFolderResult",
+      payload: {
+        query,
+        projectId,
+        results,
+      },
+      raw: true,
+      windowId: owner.windowId ?? null,
+    },
   });
 }
 
@@ -254,11 +264,20 @@ function emitFindFileResults(owner: SearchOwner, query: string, projectId: strin
     return;
   }
 
-  Carrots.emit(owner.carrotId, "fs-find-files-results", {
-    windowId: owner.windowId ?? null,
-    query,
-    projectId,
-    results,
+  post({
+    type: "action",
+    action: "emit-carrot-view-event",
+    payload: {
+      carrotId: owner.carrotId,
+      name: "findFilesInWorkspaceResult",
+      payload: {
+        query,
+        projectId,
+        results,
+      },
+      raw: true,
+      windowId: owner.windowId ?? null,
+    },
   });
 }
 

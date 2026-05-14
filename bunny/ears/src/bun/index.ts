@@ -544,7 +544,19 @@ class CarrotInstance {
               payload?.params,
               typeof payload?.windowId === "string" ? payload.windowId : windowId,
             ),
-          _: async (method, params) => this.invoke(String(method), params, windowId),
+          _: async (method, params) => {
+            if (this.carrot.manifest.id === "bunny-dash") {
+              const direct = await (runtime as any).handleDirectDashRequest(
+                String(method),
+                params,
+                windowId,
+              );
+              if (direct?.handled) {
+                return direct.result;
+              }
+            }
+            return this.invoke(String(method), params, windowId);
+          },
         },
         messages: {
           "*": (messageName, payload) => {
@@ -1629,7 +1641,35 @@ class BunnyEarsRuntime {
           return;
         }
 
-        carrot.invoke(method, params)
+        const directPromise =
+          carrotId === "bunny-dash"
+            ? this.handleDirectDashRequest(
+                String(method || ""),
+                params,
+                typeof (params as { windowId?: unknown } | undefined)?.windowId === "string"
+                  ? ((params as { windowId?: string }).windowId)
+                  : undefined,
+              )
+            : Promise.resolve({ handled: false as const });
+
+        directPromise
+          .then((direct) => {
+            if (direct.handled) {
+              return direct.result;
+            }
+            if (method === "invokeCarrot") {
+              return this.invokeCarrotFrom(
+                carrotId,
+                String((params as any)?.carrotId || ""),
+                String((params as any)?.method || ""),
+                (params as any)?.params,
+                typeof (params as any)?.windowId === "string"
+                  ? (params as any).windowId
+                  : undefined,
+              );
+            }
+            return carrot.invoke(method, params);
+          })
           .then((result: unknown) => {
             this.hopWs?.send(JSON.stringify({
               browserId,
@@ -2216,18 +2256,27 @@ class BunnyEarsRuntime {
 
               if (msg.type === "request") {
                 try {
+                  const direct = await self.handleDirectDashRequest(
+                    String(msg.method || ""),
+                    msg.params,
+                    typeof msg?.params?.windowId === "string"
+                      ? msg.params.windowId
+                      : undefined,
+                  );
                   const result =
-                    msg.method === "invokeCarrot"
-                      ? await self.invokeCarrotFrom(
-                          "bunny-dash",
-                          String(msg?.params?.carrotId || ""),
-                          String(msg?.params?.method || ""),
-                          msg?.params?.params,
-                          typeof msg?.params?.windowId === "string"
-                            ? msg.params.windowId
-                            : undefined,
-                        )
-                      : await dashCarrot.invoke(msg.method, msg.params);
+                    direct.handled
+                      ? direct.result
+                      : msg.method === "invokeCarrot"
+                        ? await self.invokeCarrotFrom(
+                            "bunny-dash",
+                            String(msg?.params?.carrotId || ""),
+                            String(msg?.params?.method || ""),
+                            msg?.params?.params,
+                            typeof msg?.params?.windowId === "string"
+                              ? msg.params.windowId
+                              : undefined,
+                          )
+                        : await dashCarrot.invoke(msg.method, msg.params);
                   ws.send(JSON.stringify({
                     type: "response",
                     id: msg.id,
@@ -2292,6 +2341,64 @@ class BunnyEarsRuntime {
 
   private installApplicationMenu(menu: any[]) {
     ApplicationMenu.setApplicationMenu(menu);
+  }
+
+  private async handleDirectDashRequest(
+    method: string,
+    params: unknown,
+    sourceWindowId?: string,
+  ): Promise<{ handled: boolean; result?: unknown }> {
+    const invokeFs = (fsMethod: string) =>
+      this.invokeCarrotFrom("bunny-dash", "bunny.fs", fsMethod, params, sourceWindowId);
+
+    switch (method) {
+      case "openFileDialog": {
+        const options = (params || {}) as {
+          startingFolder?: string;
+          allowedFileTypes?: string;
+          canChooseFiles?: boolean;
+          canChooseDirectory?: boolean;
+          allowsMultipleSelection?: boolean;
+        };
+        return {
+          handled: true,
+          result: Utils.openFileDialog({
+            startingFolder: options.startingFolder,
+            allowedFileTypes: options.allowedFileTypes,
+            canChooseFiles: options.canChooseFiles,
+            canChooseDirectory: options.canChooseDirectory,
+            allowsMultipleSelection: options.allowsMultipleSelection,
+          }),
+        };
+      }
+      case "showInFinder": {
+        await Utils.showItemInFolder(
+          String((params as { path?: string } | undefined)?.path || ""),
+        );
+        return { handled: true, result: undefined };
+      }
+      case "getNode":
+      case "readSlateConfigFile":
+      case "readFile":
+      case "writeFile":
+      case "touchFile":
+      case "rename":
+      case "exists":
+      case "isFolder":
+      case "mkdir":
+      case "copy":
+      case "safeDeleteFileOrFolder":
+      case "safeTrashFileOrFolder":
+      case "makeFileNameSafe":
+      case "getUniqueNewName":
+      case "findFirstNestedGitRepo":
+        return {
+          handled: true,
+          result: await invokeFs(method),
+        };
+      default:
+        return { handled: false };
+    }
   }
 
   private restoreDefaultApplicationMenu() {
