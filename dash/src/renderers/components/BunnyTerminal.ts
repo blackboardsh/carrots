@@ -48,47 +48,16 @@ declare global {
           options?: { windowId?: string },
         ) => Promise<T>;
       };
-      rpc?: {
-        request: {
-          createTerminal: (params: { cwd: string; shell?: string }) => Promise<string>;
-          writeToTerminal: (params: { terminalId: string; data: string }) => Promise<boolean>;
-          resizeTerminal: (params: { terminalId: string; cols: number; rows: number }) => Promise<boolean>;
-          killTerminal: (params: { terminalId: string }) => Promise<boolean>;
-        };
-      };
     };
   }
 }
 
 async function invokePtyCarrot<T = unknown>(method: string, params?: unknown): Promise<T> {
   const directInvoke = window.electrobun?.carrots?.invoke;
-  if (typeof directInvoke === "function") {
-    try {
-      return await directInvoke<T>(PTY_CARROT_ID, method, params);
-    } catch (error) {
-      if (!window.electrobun?.rpc?.request) {
-        throw error;
-      }
-    }
+  if (typeof directInvoke !== "function") {
+    throw new Error("Renderer carrot invocation is not available in this Electrobun host.");
   }
-
-  const requestProxy = window.electrobun?.rpc?.request;
-  switch (method) {
-    case "createTerminal":
-      return requestProxy?.createTerminal(params as { cwd: string; shell?: string }) as Promise<T>;
-    case "writeToTerminal":
-      return requestProxy?.writeToTerminal(
-        params as { terminalId: string; data: string },
-      ) as Promise<T>;
-    case "resizeTerminal":
-      return requestProxy?.resizeTerminal(
-        params as { terminalId: string; cols: number; rows: number },
-      ) as Promise<T>;
-    case "killTerminal":
-      return requestProxy?.killTerminal(params as { terminalId: string }) as Promise<T>;
-    default:
-      throw new Error(`Unsupported PTY carrot method fallback: ${method}`);
-  }
+  return directInvoke<T>(PTY_CARROT_ID, method, params);
 }
 
 export class BunnyTerminal extends HTMLElement {

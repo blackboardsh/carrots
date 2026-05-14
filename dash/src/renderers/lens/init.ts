@@ -791,31 +791,34 @@ export function cancelCurrentWorkspaceFindAll() {
 	);
 }
 
-export function invokePtyCarrot<T = unknown>(method: string, params?: unknown) {
-	const requestProxy = (electrobun as any)?.rpc?.request;
-	if (requestProxy && typeof requestProxy.invokeCarrot === "function") {
-		return invokeCarrot<T>("bunny.pty", method, params);
+export function getFaviconForUrl(_url: string) {
+	return "views://assets/file-icons/bookmark.svg";
+}
+
+export function getUniqueLensNameFromState(workspaceId: string, baseName = "Lens") {
+	const localWorkspace = state.bunnyDash.workspaces.find(
+		(workspace) => workspace.id === workspaceId,
+	);
+	const cloudWorkspace = state.bunnyDash.cloudWorkspaces.find(
+		(workspace) => workspace.runtimeWorkspaceId === workspaceId,
+	);
+
+	const existingNames = new Set(
+		[...(localWorkspace?.lenses || []), ...(cloudWorkspace?.lenses || [])].map((lens) =>
+			String(lens.name || "").trim().toLowerCase(),
+		),
+	);
+
+	let index = 1;
+	while (existingNames.has(`${baseName} ${index}`.toLowerCase())) {
+		index += 1;
 	}
 
-	switch (method) {
-		case "createTerminal":
-			return requestProxy?.createTerminal?.(params) as Promise<T>;
-		case "writeToTerminal":
-			return requestProxy?.writeToTerminal?.(params) as Promise<T>;
-		case "resizeTerminal":
-			return requestProxy?.resizeTerminal?.(params) as Promise<T>;
-		case "killTerminal":
-			return requestProxy?.killTerminal?.(params) as Promise<T>;
-		case "getTerminalCwd":
-			return requestProxy?.getTerminalCwd?.(params) as Promise<T>;
-		case "heartbeatTerminals":
-			if (typeof requestProxy?.heartbeatTerminals === "function") {
-				return requestProxy.heartbeatTerminals(params) as Promise<T>;
-			}
-			return Promise.resolve({ refreshedCount: 0 } as T);
-		default:
-			throw new Error(`Unsupported PTY carrot method fallback: ${method}`);
-	}
+	return `${baseName} ${index}`;
+}
+
+export function invokePtyCarrot<T = unknown>(method: string, params?: unknown) {
+	return invokeCarrot<T>("bunny.pty", method, params);
 }
 
 // Expose electrobun on window for web components (like bunny-terminal) to access

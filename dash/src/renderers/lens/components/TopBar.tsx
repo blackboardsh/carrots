@@ -6,6 +6,7 @@ import {
   cancelCurrentWorkspaceFileSearch,
   electrobun,
   findFilesInCurrentWorkspace,
+  getUniqueLensNameFromState,
 } from "../init";
 import {
   type BunnyDashCloudWorkspaceTreeType,
@@ -379,12 +380,7 @@ const WorkspaceLensSwitcher = () => {
 
   const createLensForWorkspace = async (workspaceId: string) => {
     closeMenu();
-    const name = String(
-      (await electrobun.rpc?.request.getUniqueLensName({
-        workspaceId,
-        baseName: "Lens",
-      })) || "Lens"
-    );
+    const name = getUniqueLensNameFromState(workspaceId, "Lens");
 
     setState("settingsPane", {
       type: "lens-settings",

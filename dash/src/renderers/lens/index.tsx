@@ -22,6 +22,7 @@ import {
 	invokeGitCarrot,
 	findAllInCurrentWorkspace,
 	cancelCurrentWorkspaceFindAll,
+	getFaviconForUrl,
 } from "./init";
 
 import {
@@ -2454,8 +2455,7 @@ const PaneTab = ({
 		setIcon(defaultIcon);
 
 		// Then try to fetch the actual favicon
-		electrobun.rpc?.request
-			.getFaviconForUrl({ url: _tab.url })
+		Promise.resolve(getFaviconForUrl(_tab.url))
 			.then((favicon: string) => {
 				console.log("getFaviconForUrl returned:", favicon);
 				// Only use the favicon if it's a valid URL that's different from our default
@@ -3709,8 +3709,7 @@ const NodeSettings = () => {
 		if (hostname) {
 			if (hostnameForFavicon !== hostname) {
 				hostnameForFavicon = hostname;
-				electrobun.rpc?.request
-					.getFaviconForUrl({ url: urlForFavicon })
+				Promise.resolve(getFaviconForUrl(urlForFavicon))
 					.then((icon) => {
 						if (icon) {
 							setPreviewNodeSlateIcon(icon);

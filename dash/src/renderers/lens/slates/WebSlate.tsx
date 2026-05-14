@@ -18,7 +18,7 @@ import type {
 } from "../../../shared/types/types";
 import { state, setState } from "../store";
 import { produce } from "solid-js/store";
-import { electrobun as electrobunImport } from "../init";
+import { electrobun as electrobunImport, getFaviconForUrl } from "../init";
 import { getWindow } from "../store";
 
 import { getSlateForNode, getProjectForNodePath } from "../files";
@@ -718,8 +718,7 @@ console.log('Preload script loaded for:', window.location.href);
 			});
 
 			// Fetch and update the favicon asynchronously
-			electrobun.rpc?.request
-				.getFaviconForUrl({ url: currentUrl })
+			Promise.resolve(getFaviconForUrl(currentUrl))
 				.then(async (favicon) => {
 					if (favicon && favicon !== slateConfig.icon) {
 						// Update the slate config with the favicon
@@ -857,8 +856,7 @@ console.log('Preload script loaded for:', window.location.href);
 			});
 
 			// Fetch and update the favicon asynchronously
-			electrobun.rpc?.request
-				.getFaviconForUrl({ url: currentUrl })
+			Promise.resolve(getFaviconForUrl(currentUrl))
 				.then(async (favicon) => {
 					if (favicon && favicon !== slateConfig.icon) {
 						const updatedSlateConfig = { ...slateConfig, icon: favicon };
@@ -1605,8 +1603,7 @@ console.log('Preload script loaded for:', window.location.href);
 							);
 
 							// Fetch favicon for the new URL
-							electrobun.rpc?.request
-								.getFaviconForUrl({ url: e.detail })
+							Promise.resolve(getFaviconForUrl(e.detail))
 								.then((favicon) => {
 									if (favicon) {
 										// Update the tab's icon in the slate config if this is a real browser profile node

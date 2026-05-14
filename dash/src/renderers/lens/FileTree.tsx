@@ -51,7 +51,7 @@ import {
 	removeOpenFile,
 } from "./store";
 
-import { electrobun } from "./init";
+import { electrobun, getUniqueLensNameFromState } from "./init";
 import { parentNodePath } from "../utils/fileUtils";
 
 import { join, basename, dirname } from "../utils/pathUtils";
@@ -1313,11 +1313,7 @@ export const WorkspaceLensesTree = () => {
 	};
 
 	const openCreateLensSettings = async (workspaceId: string) => {
-		const name =
-			String((await electrobun.rpc?.request.getUniqueLensName({
-				workspaceId,
-				baseName: "Lens",
-			})) || "Lens 1");
+		const name = getUniqueLensNameFromState(workspaceId, "Lens");
 
 		setState("settingsPane", {
 			type: "lens-settings",
@@ -1609,11 +1605,7 @@ export const CloudWorkspacesTree = () => {
 	};
 
 	const openCreateLensSettings = async (workspaceId: string) => {
-		const name =
-			String((await electrobun.rpc?.request.getUniqueLensName({
-				workspaceId,
-				baseName: "Lens",
-			})) || "Lens 1");
+		const name = getUniqueLensNameFromState(workspaceId, "Lens");
 
 		setState("settingsPane", {
 			type: "lens-settings",

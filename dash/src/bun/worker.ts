@@ -4474,27 +4474,6 @@ function syncTray() {
   // Dash no longer owns or extends the system tray.
 }
 
-function buildWorkspaceLensSidebarData() {
-  const currentWindow = getCurrentWindow();
-  const currentLensId = getLensIdForWindow(currentWindow);
-
-  return {
-    currentWindowId: currentWindow.id,
-    currentWorkspaceId: currentWindow.workspaceId,
-    currentLensId,
-    workspaces: listVisibleLocalWorkspaces().map((workspace) => ({
-      id: workspace.key,
-      name: workspace.name,
-      lenses: getLensesForWorkspace(workspace.key).map((lens) => ({
-        id: lens.key,
-        name: lens.name,
-        isCurrent:
-          lens.key === currentLensId && workspace.key === currentWindow.workspaceId,
-      })),
-    })),
-  };
-}
-
 async function createAdditionalWindow(offset?: { x?: number; y?: number }) {
   const currentWindow = getCurrentWindow();
   const currentLens = getCurrentLens();
@@ -4689,57 +4668,8 @@ async function handleBunnyDashRequest(method: string, params: any) {
       }
       return new TextDecoder().decode(result.stdout || new Uint8Array());
     }
-    case "createTerminal":
-      return (async () => {
-        const currentWindowId = getCurrentWindow().id;
-        const terminalId = await invokePtyCarrot<string>(
-          "createTerminal",
-          {
-            cwd: String(params?.cwd || process.cwd()),
-            shell: typeof params?.shell === "string" ? params.shell : undefined,
-            cols: Number(params?.cols || 80),
-            rows: Number(params?.rows || 24),
-          },
-          { windowId: currentWindowId },
-        );
-        log(`PTY carrot created terminal ${terminalId} for window ${currentWindowId}`);
-        terminalWindowOwners.set(terminalId, currentWindowId);
-        return terminalId;
-      })();
-    case "writeToTerminal":
-      return invokePtyCarrot<boolean>("writeToTerminal", {
-        terminalId: String(params?.terminalId || ""),
-        data: String(params?.data || ""),
-      });
-    case "resizeTerminal":
-      return invokePtyCarrot<boolean>("resizeTerminal", {
-        terminalId: String(params?.terminalId || ""),
-        cols: Number(params?.cols || 80),
-        rows: Number(params?.rows || 24),
-      });
-    case "killTerminal":
-      return (async () => {
-        const result = await invokePtyCarrot<boolean>("killTerminal", {
-          terminalId: String(params?.terminalId || ""),
-        });
-        terminalWindowOwners.delete(String(params?.terminalId || ""));
-        return result;
-      })();
-    case "getTerminalCwd":
-      return invokePtyCarrot<string | null>("getTerminalCwd", {
-        terminalId: String(params?.terminalId || ""),
-      });
-    case "getWorkspaceLensSidebar":
-      return buildWorkspaceLensSidebarData();
     case "activateLens":
       return activateLens(String(params?.lensId || state.currentLayoutId));
-    case "getUniqueLensName":
-      return getUniqueLensNameForWorkspace(
-        String(params?.workspaceId || getCurrentWorkspace().key),
-        String(params?.baseName || "Lens"),
-      );
-    case "getFaviconForUrl":
-      return "views://assets/file-icons/bookmark.svg";
     case "showContextMenu":
       ContextMenu.showContextMenu(Array.isArray(params?.menuItems) ? params.menuItems : []);
       return;
