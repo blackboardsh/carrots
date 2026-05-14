@@ -33,8 +33,10 @@ import {
   mergeAppSettingsForBoot,
   mergeWorkspaceForBoot,
   loadPersistedAppSettings,
+  loadPersistedLocalDashGraph,
   loadPersistedWorkspaceState,
   persistAppSettings,
+  persistLocalDashGraph,
   persistWorkspaceState,
 } from "./localStateDb";
 // import { readSlateConfigFile } from "./files";
@@ -74,6 +76,52 @@ function openGitSettingsPane(query?: Record<string, string>) {
       query,
     },
   });
+}
+
+export async function syncPersistedLocalGraphToWorker() {
+  let persistedGraph = null;
+
+  try {
+    persistedGraph = await loadPersistedLocalDashGraph();
+  } catch (error) {
+    console.warn("Failed to load local Dash graph from IndexedDB:", error);
+  }
+
+  if (!persistedGraph) {
+    return false;
+  }
+
+  await electrobun.rpc?.request.syncLocalDashGraph({
+    graph: persistedGraph,
+  });
+
+  return true;
+}
+
+export async function persistLocalDashGraphFromWorker() {
+  try {
+    const graph = await electrobun.rpc?.request.getLocalDashGraph();
+    if (graph) {
+      await persistLocalDashGraph(graph);
+    }
+  } catch (error) {
+    console.warn("Failed to persist local Dash graph from worker:", error);
+  }
+}
+
+export async function getHydratedInitialState() {
+  let response = await electrobun.rpc?.request.getInitialState();
+  if (!response) {
+    return response;
+  }
+
+  const hadPersistedGraph = await syncPersistedLocalGraphToWorker();
+  if (hadPersistedGraph) {
+    response = (await electrobun.rpc?.request.getInitialState()) || response;
+  }
+
+  await persistLocalDashGraphFromWorker();
+  return response;
 }
 
 const rpc = Electroview.defineRPC<WorkspaceRPC>({
@@ -156,6 +204,7 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
           persistWorkspaceState(workspace).catch((error) => {
             console.warn("Failed to persist workspace locally:", error);
           });
+          void persistLocalDashGraphFromWorker();
 
         console.log("projects", state.projects);
       },
@@ -360,7 +409,7 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
         });
       },
       refreshBunnyDashState: async () => {
-        const response = await electrobun.rpc?.request.getInitialState();
+        const response = await getHydratedInitialState();
         if (!response) {
           return;
         }

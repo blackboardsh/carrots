@@ -28,6 +28,11 @@ import type {
 } from "../../shared/types/types";
 
 import { getNode } from "./FileWatcher";
+import {
+	mergeAppSettingsForBoot,
+	persistAppSettings,
+	persistWorkspaceState,
+} from "./localStateDb";
 
 import {
 	type AppState,
@@ -54,6 +59,7 @@ import {
 import {
 	electrobun,
 	getUniqueLensNameFromState,
+	getHydratedInitialState,
 	fsGetUniqueNewName,
 	fsMkdir,
 	fsWriteFile,
@@ -136,7 +142,7 @@ const makeSafeSerializer = () => {
 };
 
 async function refreshDashStateFromWorker() {
-	const nextState = await electrobun.rpc?.request.getInitialState();
+	const nextState = await getHydratedInitialState();
 	if (!nextState) {
 		return;
 	}
@@ -164,6 +170,9 @@ async function refreshDashStateFromWorker() {
 	}
 	if (payload.workspace) {
 		setState("workspace", payload.workspace as any);
+		persistWorkspaceState(payload.workspace as any).catch((error) => {
+			console.warn("Failed to persist workspace locally:", error);
+		});
 	}
 	if (payload.bunnyDash) {
 		setState("bunnyDash", payload.bunnyDash as any);
@@ -171,7 +180,15 @@ async function refreshDashStateFromWorker() {
 	setState("projects", projectsById);
 	setState("tokens", Array.isArray(payload.tokens) ? payload.tokens : []);
 	if (payload.appSettings) {
-		setState("appSettings", { ...state.appSettings, ...payload.appSettings });
+		const nextAppSettings = mergeAppSettingsForBoot(
+			state.appSettings,
+			payload.appSettings as any,
+			null,
+		);
+		setState("appSettings", nextAppSettings);
+		persistAppSettings(nextAppSettings).catch((error) => {
+			console.warn("Failed to persist app settings locally:", error);
+		});
 	}
 }
 

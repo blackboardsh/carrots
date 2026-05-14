@@ -212,6 +212,16 @@ export type WorkspaceRPC = {
         };
         response: void;
       };
+      getLocalDashGraph: {
+        params: void;
+        response: any;
+      };
+      syncLocalDashGraph: {
+        params: {
+          graph: any;
+        };
+        response: void;
+      };
       openFileDialog: {
         params: {
           startingFolder: string;

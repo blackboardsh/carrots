@@ -53,6 +53,7 @@ import {
 	persistAppSettings,
 	persistWorkspaceState,
 } from "./localStateDb";
+import { getHydratedInitialState } from "./init";
 import {
 	type AppState,
 	type FileTabType,
@@ -487,8 +488,7 @@ const getInitialState = () => {
 		return;
 	}
 
-	electrobun.rpc.request
-		.getInitialState()
+	getHydratedInitialState()
 		.then(
 			async ({
 				windowId,
@@ -1220,7 +1220,7 @@ const LensSettings = () => {
 	let inputDescriptionRef: HTMLTextAreaElement | undefined;
 
 	const applyInitialState = async () => {
-		const response = await electrobun.rpc?.request.getInitialState();
+		const response = await getHydratedInitialState();
 		if (!response) {
 			return;
 		}

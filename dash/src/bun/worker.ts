@@ -1753,6 +1753,130 @@ function listLenses() {
   );
 }
 
+function buildLocalDashGraph() {
+  const localWorkspaceKeys = new Set(listVisibleLocalWorkspaces().map((workspace) => workspace.key));
+
+  return {
+    workspaces: listVisibleLocalWorkspaces().map((workspace) => ({
+      key: workspace.key,
+      name: workspace.name,
+      subtitle: workspace.subtitle,
+      sortOrder: workspace.sortOrder,
+    })),
+    projectMounts: listProjectMounts()
+      .filter((project) => localWorkspaceKeys.has(project.workspaceId))
+      .map((project) => ({
+        key: project.key,
+        workspaceId: project.workspaceId,
+        name: project.name,
+        instanceId: project.instanceId,
+        instanceLabel: project.instanceLabel,
+        path: project.path,
+        kind: project.kind,
+        status: project.status,
+        sortOrder: project.sortOrder,
+      })),
+    layouts: listLenses()
+      .filter((lens) => !isCloudShadowLensKey(lens.key))
+      .filter((lens) => localWorkspaceKeys.has(getLensWorkspaceId(lens)))
+      .map((lens) => ({
+        key: lens.key,
+        name: lens.name,
+        description: lens.description,
+        workspaceId: lens.workspaceId,
+        windowStateJson: lens.windowStateJson,
+        sortOrder: lens.sortOrder,
+        windows: cloneWindows(lens.windows),
+      })),
+  };
+}
+
+function syncLocalDashGraph(graph: any) {
+  if (!graph || typeof graph !== "object") {
+    return;
+  }
+
+  const db = ensureDb();
+
+  for (const lens of listLenses()) {
+    if (isCloudShadowLensKey(lens.key)) {
+      continue;
+    }
+    if (isCloudShadowWorkspaceKey(getLensWorkspaceId(lens))) {
+      continue;
+    }
+    db.collection("layouts").remove(lens.id);
+  }
+
+  for (const project of listProjectMounts()) {
+    if (isCloudShadowWorkspaceKey(project.workspaceId)) {
+      continue;
+    }
+    db.collection("projectMounts").remove(project.id);
+  }
+
+  for (const workspace of listVisibleLocalWorkspaces()) {
+    db.collection("workspaces").remove(workspace.id);
+  }
+
+  const nextWorkspaces = Array.isArray(graph.workspaces) ? graph.workspaces : [];
+  const nextProjectMounts = Array.isArray(graph.projectMounts) ? graph.projectMounts : [];
+  const nextLayouts = Array.isArray(graph.layouts) ? graph.layouts : [];
+  const nextWorkspaceKeys = new Set(nextWorkspaces.map((workspace) => String(workspace.key || "")));
+
+  bunnyDashState.workspaces = Object.fromEntries(
+    Object.entries(bunnyDashState.workspaces || {}).filter(([workspaceId]) =>
+      isCloudShadowWorkspaceKey(workspaceId) || nextWorkspaceKeys.has(workspaceId),
+    ),
+  );
+
+  for (const workspace of nextWorkspaces) {
+    db.collection("workspaces").insert({
+      key: String(workspace.key || ""),
+      name: String(workspace.name || ""),
+      subtitle: String(workspace.subtitle || ""),
+      sortOrder: Number.isFinite(workspace.sortOrder) ? workspace.sortOrder : 0,
+    });
+  }
+
+  for (const project of nextProjectMounts) {
+    db.collection("projectMounts").insert({
+      key: String(project.key || ""),
+      workspaceId: String(project.workspaceId || ""),
+      name: String(project.name || ""),
+      instanceId: String(project.instanceId || "host-machine"),
+      instanceLabel: String(project.instanceLabel || hostname() || "This Machine"),
+      path: String(project.path || ""),
+      kind: String(project.kind || "code"),
+      status: String(project.status || "ready"),
+      sortOrder: Number.isFinite(project.sortOrder) ? project.sortOrder : 0,
+    });
+  }
+
+  for (const lens of nextLayouts) {
+    db.collection("layouts").insert({
+      key: String(lens.key || ""),
+      name: String(lens.name || ""),
+      description: String(lens.description || ""),
+      workspaceId:
+        typeof lens.workspaceId === "string" ? lens.workspaceId : undefined,
+      windowStateJson:
+        typeof lens.windowStateJson === "string" ? lens.windowStateJson : undefined,
+      sortOrder: Number.isFinite(lens.sortOrder) ? lens.sortOrder : 0,
+      windows: cloneWindows(Array.isArray(lens.windows) ? lens.windows : []),
+    });
+  }
+
+  for (const workspace of listVisibleLocalWorkspaces()) {
+    ensureWorkspaceCurrentLens(workspace.key);
+  }
+
+  hydrateLensMetadata();
+  ensureRuntimeState();
+  flushDb();
+  syncProjectWatchers();
+}
+
 function findWorkspaceByKey(key: string) {
   return listWorkspaces().find((workspace) => workspace.key === key) || null;
 }
@@ -4505,6 +4629,14 @@ async function handleBunnyDashRequest(method: string, params: any) {
     case "syncAppSettings":
       bunnyDashState.appSettings = params.appSettings;
       await writePersistedDashState();
+      return;
+    case "getLocalDashGraph":
+      return buildLocalDashGraph();
+    case "syncLocalDashGraph":
+      syncLocalDashGraph(params?.graph);
+      await saveState();
+      emitSetProjects();
+      emitSnapshot();
       return;
     case "showContextMenu":
       ContextMenu.showContextMenu(Array.isArray(params?.menuItems) ? params.menuItems : []);

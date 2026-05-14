@@ -8,7 +8,7 @@ const {
   string,
 } = DB.v1.schemaType;
 
-const localDashStateSchema = schema({
+const localDashStateSchema1 = schema({
   v: 1,
   stores: {
     workspaces: collection({
@@ -26,11 +26,72 @@ const localDashStateSchema = schema({
   },
 });
 
-type LocalDashStateDocumentTypes = SchemaToDocumentTypes<typeof localDashStateSchema>;
-type LocalDashStateDb = DB<typeof localDashStateSchema>;
+const localDashStateSchema2 = schema({
+  v: 2,
+  stores: {
+    workspaces: collection({
+      key: string({ required: true, internal: false }),
+      name: string({ required: true, internal: false }),
+      color: string({ required: true, internal: false }),
+      workspaceJson: string({ required: true, internal: false }),
+      updatedAt: number({ required: true, internal: false }),
+    }),
+    appSettings: collection({
+      key: string({ required: true, internal: false }),
+      settingsJson: string({ required: true, internal: false }),
+      updatedAt: number({ required: true, internal: false }),
+    }),
+    localGraph: collection({
+      key: string({ required: true, internal: false }),
+      graphJson: string({ required: true, internal: false }),
+      updatedAt: number({ required: true, internal: false }),
+    }),
+  },
+});
+
+type LocalDashStateDocumentTypes = SchemaToDocumentTypes<typeof localDashStateSchema2>;
+type LocalDashStateDb = DB<typeof localDashStateSchema2>;
 
 const LOCAL_DASH_DB_NAME = "bunny-dash-local-state";
 const APP_SETTINGS_KEY = "primary";
+const LOCAL_GRAPH_KEY = "primary";
+
+export type PersistedLocalDashGraph = {
+  workspaces: Array<{
+    key: string;
+    name: string;
+    subtitle: string;
+    sortOrder: number;
+  }>;
+  projectMounts: Array<{
+    key: string;
+    workspaceId: string;
+    name: string;
+    instanceId: string;
+    instanceLabel: string;
+    path: string;
+    kind: string;
+    status: string;
+    sortOrder: number;
+  }>;
+  layouts: Array<{
+    key: string;
+    name: string;
+    description: string;
+    workspaceId?: string;
+    windowStateJson?: string;
+    sortOrder: number;
+    windows: Array<{
+      id: string;
+      title: string;
+      workspaceId: string;
+      mainTabIds: string[];
+      sideTabIds: string[];
+      currentMainTabId: string;
+      currentSideTabId: string;
+    }>;
+  }>;
+};
 
 let localDashDbPromise: Promise<LocalDashStateDb> | null = null;
 
@@ -44,8 +105,11 @@ function safeParseJson<T>(value: string, fallback: T): T {
 
 async function getLocalDashDb(): Promise<LocalDashStateDb> {
   if (!localDashDbPromise) {
-    localDashDbPromise = new DB<typeof localDashStateSchema>().initAsync({
-      schemaHistory: [{ v: 1, schema: localDashStateSchema, migrationSteps: false }],
+    localDashDbPromise = new DB<typeof localDashStateSchema2>().initAsync({
+      schemaHistory: [
+        { v: 1, schema: localDashStateSchema1, migrationSteps: false },
+        { v: 2, schema: localDashStateSchema2, migrationSteps: false },
+      ],
       engine: "indexeddb",
       db_name: LOCAL_DASH_DB_NAME,
     });
@@ -72,6 +136,17 @@ function getAppSettingsDoc(
   return (
     db.collection("appSettings").query({
       where: (item) => item.key === APP_SETTINGS_KEY,
+      limit: 1,
+    }).data?.[0] || null
+  );
+}
+
+function getLocalGraphDoc(
+  db: LocalDashStateDb,
+): LocalDashStateDocumentTypes["localGraph"] | null {
+  return (
+    db.collection("localGraph").query({
+      where: (item) => item.key === LOCAL_GRAPH_KEY,
       limit: 1,
     }).data?.[0] || null
   );
@@ -144,6 +219,38 @@ export async function persistAppSettings(
     db.collection("appSettings").update(existing.id, payload);
   } else {
     db.collection("appSettings").insert(payload);
+  }
+}
+
+export async function loadPersistedLocalDashGraph(): Promise<PersistedLocalDashGraph | null> {
+  const db = await getLocalDashDb();
+  const doc = getLocalGraphDoc(db);
+  if (!doc?.graphJson) {
+    return null;
+  }
+
+  return safeParseJson<PersistedLocalDashGraph | null>(doc.graphJson, null);
+}
+
+export async function persistLocalDashGraph(
+  graph: PersistedLocalDashGraph | null | undefined,
+) {
+  if (!graph) {
+    return;
+  }
+
+  const db = await getLocalDashDb();
+  const existing = getLocalGraphDoc(db);
+  const payload = {
+    key: LOCAL_GRAPH_KEY,
+    graphJson: JSON.stringify(graph),
+    updatedAt: Date.now(),
+  };
+
+  if (existing) {
+    db.collection("localGraph").update(existing.id, payload);
+  } else {
+    db.collection("localGraph").insert(payload);
   }
 }
 
