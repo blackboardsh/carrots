@@ -3,7 +3,7 @@ import type { CachedFileType } from "../../../shared/types/types";
 import { getSlateForNode } from "../files";
 import { createSignal, createEffect, For, Show } from "solid-js";
 import { produce } from "solid-js/store";
-import { electrobun, fsExists, fsReadFile, fsWriteFile } from "../init";
+import { invokeLlamaCarrot, fsExists, fsReadFile, fsWriteFile } from "../init";
 import { join } from "../../utils/pathUtils";
 
 interface Message {
@@ -122,7 +122,7 @@ export const AgentSlate = ({
   // Load available models on component mount
   createEffect(async () => {
     try {
-      const result = await electrobun.rpc?.request.llamaListModels();
+      const result = await invokeLlamaCarrot<any>("llamaListModels");
       if (result?.ok && result.models) {
         setAvailableModels(result.models);
       }
@@ -392,7 +392,7 @@ export const AgentSlate = ({
       conversationPrompt += `User: ${currentMsg.content}\n\nAssistant:`;
 
       // Send to llama.cpp runner
-      const response = await electrobun.rpc?.request.llamaCompletion({
+      const response = await invokeLlamaCarrot<any>("llamaCompletion", {
         model: selectedModel(),
         prompt: conversationPrompt,
         options: {

@@ -1,20 +1,8 @@
 import { getWindow } from "../store";
 import { state, setState } from "../store";
-import { createSignal, onMount, For } from "solid-js";
+import { createSignal, onMount } from "solid-js";
 import { aiCompletionService } from "../services/aiCompletionService";
-import { electrobun } from "../init";
-
-// Type for status bar items from plugins
-interface PluginStatusBarItem {
-  id: string;
-  text: string;
-  tooltip?: string;
-  color?: string;
-  priority?: number;
-  alignment?: 'left' | 'right';
-  pluginName: string;
-  hasSettings: boolean;
-}
+import { electrobun, invokeLlamaCarrot } from "../init";
 
 type GitIntegrationState = {
   github?: {
@@ -27,7 +15,6 @@ type GitIntegrationState = {
 };
 
 export const StatusBar = () => {
-  const [pluginItems, setPluginItems] = createSignal<PluginStatusBarItem[]>([]);
   const [gitIntegration, setGitIntegration] = createSignal<GitIntegrationState | null>(null);
 
   const openGitSettings = () => {
@@ -54,38 +41,15 @@ export const StatusBar = () => {
     }
   };
 
-  // Fetch plugin status bar items periodically
   onMount(() => {
-    const fetchPluginItems = async () => {
-      try {
-        const items = await electrobun.rpc?.request.pluginGetStatusBarItems();
-        if (items) {
-          setPluginItems(items);
-        }
-      } catch (err) {
-        console.warn('Failed to fetch plugin status bar items:', err);
-      }
-    };
-
-    fetchPluginItems();
     void fetchGitIntegration();
-    const interval = setInterval(fetchPluginItems, 2000); // Refresh every 2 seconds
     const gitInterval = setInterval(() => {
       void fetchGitIntegration();
     }, 5000);
     return () => {
-      clearInterval(interval);
       clearInterval(gitInterval);
     };
   });
-
-  const leftPluginItems = () => pluginItems()
-    .filter(item => item.alignment === 'left')
-    .sort((a, b) => (b.priority || 0) - (a.priority || 0));
-
-  const rightPluginItems = () => pluginItems()
-    .filter(item => item.alignment !== 'left')
-    .sort((a, b) => (b.priority || 0) - (a.priority || 0));
 
   return (
     <div
@@ -104,65 +68,9 @@ export const StatusBar = () => {
     >
       <div style={{ display: "flex", height: "18px", "align-items": "center" }}>
         <Workspace />
-        <For each={leftPluginItems()}>
-          {(item) => (
-            <>
-              <span>|</span>
-              <div
-                style={{
-                  margin: "0 5px",
-                  color: item.color || "#999",
-                  cursor: item.hasSettings ? "pointer" : "default",
-                }}
-                title={item.hasSettings ? `${item.tooltip || item.text} (click to configure)` : item.tooltip}
-                onClick={() => {
-                  if (item.hasSettings) {
-                    // Toggle: close if already open for this plugin, otherwise open
-                    const currentData = state.settingsPane.data as { pluginName?: string } | undefined;
-                    if (state.settingsPane.type === "plugin-settings" && currentData?.pluginName === item.pluginName) {
-                      setState("settingsPane", { type: "", data: {} });
-                    } else {
-                      setState("settingsPane", { type: "plugin-settings", data: { pluginName: item.pluginName } });
-                    }
-                  }
-                }}
-              >
-                {item.text}
-              </div>
-            </>
-          )}
-        </For>
       </div>
       <div style={{ "flex-grow": 1 }} />
       <div style={{ display: "flex", height: "18px", "align-items": "center" }}>
-        <For each={rightPluginItems()}>
-          {(item) => (
-            <>
-              <div
-                style={{
-                  margin: "0 5px",
-                  color: item.color || "#999",
-                  cursor: item.hasSettings ? "pointer" : "default",
-                }}
-                title={item.hasSettings ? `${item.tooltip || item.text} (click to configure)` : item.tooltip}
-                onClick={() => {
-                  if (item.hasSettings) {
-                    // Toggle: close if already open for this plugin, otherwise open
-                    const currentData = state.settingsPane.data as { pluginName?: string } | undefined;
-                    if (state.settingsPane.type === "plugin-settings" && currentData?.pluginName === item.pluginName) {
-                      setState("settingsPane", { type: "", data: {} });
-                    } else {
-                      setState("settingsPane", { type: "plugin-settings", data: { pluginName: item.pluginName } });
-                    }
-                  }
-                }}
-              >
-                {item.text}
-              </div>
-              <span>|</span>
-            </>
-          )}
-        </For>
         <Git onOpenSettings={openGitSettings} />
         <span>|</span>
         <Bun />
@@ -177,7 +85,6 @@ export const StatusBar = () => {
         <span>|</span>
         <BunnyCloud />
         <span>|</span>
-        <Plugins />
         <AnalyticsConsent />
         <span>|</span>
         <BunnyDash />
@@ -272,7 +179,7 @@ const Llama = () => {
   const checkLlamaStatus = async () => {
     try {
       // Check available models via our new RPC
-      const result = await (electrobun.rpc as any)?.request.llamaListModels();
+      const result = await invokeLlamaCarrot<any>("llamaListModels");
       if (result?.ok) {
         const modelCount = result.models.length;
         const modelAvailable = modelCount > 0;
@@ -516,31 +423,5 @@ const AnalyticsConsent = () => {
         Enable Analytics
       </div>
     </>
-  );
-};
-
-const Plugins = () => {
-  const handlePluginsClick = () => {
-    if (state.settingsPane.type === "plugin-marketplace") {
-      setState("settingsPane", { type: "", data: {} });
-    } else {
-      setState("settingsPane", { type: "plugin-marketplace", data: {} });
-    }
-  };
-
-  return (
-    <div
-      style={{
-        margin: "0 5px",
-        color: "#999",
-        cursor: "pointer",
-        "white-space": "nowrap",
-        "font-size": "11px"
-      }}
-      onClick={handlePluginsClick}
-      title="Open Plugins"
-    >
-      Plugins
-    </div>
   );
 };

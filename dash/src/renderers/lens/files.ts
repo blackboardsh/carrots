@@ -199,8 +199,6 @@ const fileSlates = {
     icon: "",
     config: {},
   },
-  // Note: .webflowrc.json and webflow.json are now handled by the webflow-plugin
-  // via the plugin slate system (see pluginSlateRegistry.tsx)
 };
 
 // Template slates - cached to maintain object reference for reactivity
@@ -393,30 +391,7 @@ export const getSlateForNode = (
     // you could add more here
   }
 
-  // Check for plugin slates (e.g., webflow.json, .webflowrc.json)
-  // Use inline check since findPluginSlateForFile is defined later in the file
-  if (node.type === "file" && node.path) {
-    const pluginSlates = state.pluginSlates;
-    if (pluginSlates && pluginSlates.length > 0) {
-      const filename = node.path.split("/").pop() || "";
-      for (const slate of pluginSlates) {
-        if (slate.folderHandler) continue;
-        for (const pattern of slate.patterns) {
-          if (pattern === filename || (pattern.startsWith("*.") && filename.endsWith(pattern.slice(1)))) {
-            // Return a slate-like object so the context menu knows this file has a slate
-            return {
-              v: 1,
-              name: slate.name,
-              type: "plugin" as const,
-              icon: slate.icon || "",
-              pluginSlateId: slate.id,
-              pluginName: slate.pluginName,
-            };
-          }
-        }
-      }
-    }
-  }
+ 
 
   // return node.type;
 };
@@ -437,122 +412,4 @@ export const readSlateConfigFile = (path: string, cacheResult = true) => {
 export const isDescendantPath = (parentPath: string, childPath: string) => {
   const relativePath = relative(parentPath, childPath);
   return relativePath && !relativePath.startsWith("..");
-};
-
-// ============================================================================
-// Plugin Slate Support
-// ============================================================================
-
-export interface PluginSlateInfo {
-  id: string;
-  pluginName: string;
-  name: string;
-  description?: string;
-  icon?: string;
-  patterns: string[];
-  folderHandler?: boolean;
-}
-
-/**
- * Fetch plugin slates from backend and store them in reactive state.
- * Also initializes plugin renderer components for the loaded plugins.
- * Call this early during app initialization.
- */
-export const loadPluginSlates = async (): Promise<void> => {
-  try {
-    const slates = await electrobun.rpc?.request.pluginGetAllSlates();
-    setState("pluginSlates", slates || []);
-
-    // Initialize renderer components for all plugins that have slates
-    const { initializeAllPluginRenderers } = await import("./slates/pluginSlateRegistry");
-    if (slates && slates.length > 0) {
-      const pluginNames = [...new Set(slates.map((s: PluginSlateInfo) => s.pluginName))];
-      await initializeAllPluginRenderers(pluginNames);
-    } else {
-      // Even with no slates, mark renderers as ready
-      await initializeAllPluginRenderers([]);
-    }
-  } catch (e) {
-    console.error("[files] Failed to load plugin slates:", e);
-    setState("pluginSlates", []);
-    // Mark renderers ready even on error so slates don't hang
-    const { initializeAllPluginRenderers } = await import("./slates/pluginSlateRegistry");
-    await initializeAllPluginRenderers([]);
-  }
-};
-
-/**
- * Get all cached plugin slates (from reactive store)
- */
-export const getPluginSlates = (): PluginSlateInfo[] => {
-  return state.pluginSlates;
-};
-
-/**
- * Find a plugin slate that matches a file path.
- * Uses the reactive store so UI will update when plugin slates are loaded.
- * Returns null if no plugin slate matches (use built-in slates instead)
- */
-export const findPluginSlateForFile = (filePath: string): PluginSlateInfo | null => {
-  const pluginSlates = state.pluginSlates;
-
-  // If plugin slates haven't been loaded yet, return null
-  // The UI will re-evaluate when pluginSlates is populated
-  if (!pluginSlates || pluginSlates.length === 0) {
-    return null;
-  }
-
-  const filename = filePath.split("/").pop() || "";
-
-  for (const slate of pluginSlates) {
-    // Skip folder handlers when looking for files
-    if (slate.folderHandler) continue;
-
-    for (const pattern of slate.patterns) {
-      // Exact match
-      if (pattern === filename) {
-        return slate;
-      }
-
-      // Handle simple wildcard patterns (*.webflowrc.json)
-      if (pattern.startsWith("*.")) {
-        const suffix = pattern.slice(1);
-        if (filename.endsWith(suffix)) {
-          return slate;
-        }
-      }
-
-      // Handle **/ prefix (matches any directory depth)
-      if (pattern.startsWith("**/")) {
-        const restPattern = pattern.slice(3);
-        if (filename === restPattern || filePath.endsWith("/" + restPattern)) {
-          return slate;
-        }
-      }
-    }
-  }
-
-  return null;
-};
-
-/**
- * Find a plugin slate that matches a folder path
- * This is for folder handler slates (like devlink which handles folders with .webflowrc.json)
- */
-export const findPluginSlateForFolder = async (folderPath: string): Promise<PluginSlateInfo | null> => {
-  try {
-    const result = await electrobun.rpc?.request.pluginFindSlateForFolder({ folderPath });
-    return result || null;
-  } catch (e) {
-    console.error("[files] Failed to find plugin slate for folder:", e);
-    return null;
-  }
-};
-
-/**
- * Refresh the plugin slates cache
- * Call this after plugin installation/uninstallation
- */
-export const refreshPluginSlates = async (): Promise<void> => {
-  await loadPluginSlates();
 };

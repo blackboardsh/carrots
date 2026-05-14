@@ -1,5 +1,5 @@
 import * as monaco from "monaco-editor";
-import { electrobun } from "../init";
+import { invokeLlamaCarrot } from "../init";
 import { createSignal } from "solid-js";
 import { state } from "../store";
 
@@ -109,7 +109,7 @@ class AICompletionService {
     }
     
     try {
-      const result = await electrobun.rpc?.request.llamaListModels();
+      const result = await invokeLlamaCarrot<any>("llamaListModels");
       return result?.ok && result.models?.length > 0;
     } catch {
       return false;
@@ -122,7 +122,7 @@ class AICompletionService {
     }
     
     try {
-      const result = await electrobun.rpc?.request.llamaListModels();
+      const result = await invokeLlamaCarrot<any>("llamaListModels");
       if (!result?.ok) return false;
       
       const modelName = this.modelName;
@@ -216,7 +216,7 @@ class AICompletionService {
       }
       
       // First try llama-cli for better performance
-      let result = await electrobun.rpc?.request.llamaCompletion({
+      let result = await invokeLlamaCarrot<any>("llamaCompletion", {
         model: this.modelName,
         prompt,
         options: {

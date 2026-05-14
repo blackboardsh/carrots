@@ -23,7 +23,7 @@ import { produce } from "solid-js/store";
 import { relative, basename } from "../utils/pathUtils";
 import { aiCompletionService } from "./services/aiCompletionService";
 import { getProjectForNodePath } from "./files";
-import { electrobun, fsWriteFile } from "./init";
+import { electrobun, fsWriteFile, invokeTsServerCarrot } from "./init";
 import type { ParsedResponseType } from "../../shared/types/types";
 
 let currentRequestId = 0;
@@ -89,56 +89,7 @@ pluginCompletionLanguages.forEach(lang => {
   monaco.languages.registerCompletionItemProvider(lang, {
     triggerCharacters: ['.', '(', '"', "'", '`', '<', '/', '@', '#'],
     provideCompletionItems: async (model, position, context, token) => {
-      try {
-        const lineText = model.getLineContent(position.lineNumber);
-        const linePrefix = lineText.substring(0, position.column - 1);
-
-        const completions = await electrobun.rpc?.request.pluginGetCompletions({
-          language: lang,
-          linePrefix,
-          lineText,
-          lineNumber: position.lineNumber,
-          column: position.column,
-          filePath: model.uri.path,
-          triggerCharacter: context.triggerCharacter,
-        });
-
-        if (!completions || completions.length === 0) {
-          return { suggestions: [] };
-        }
-
-        const kindMap: Record<string, monaco.languages.CompletionItemKind> = {
-          'function': monaco.languages.CompletionItemKind.Function,
-          'snippet': monaco.languages.CompletionItemKind.Snippet,
-          'text': monaco.languages.CompletionItemKind.Text,
-          'keyword': monaco.languages.CompletionItemKind.Keyword,
-          'variable': monaco.languages.CompletionItemKind.Variable,
-          'class': monaco.languages.CompletionItemKind.Class,
-          'method': monaco.languages.CompletionItemKind.Method,
-          'property': monaco.languages.CompletionItemKind.Property,
-        };
-
-        const suggestions: monaco.languages.CompletionItem[] = completions.map((item, index) => ({
-          label: item.label,
-          kind: kindMap[item.kind || 'snippet'] || monaco.languages.CompletionItemKind.Snippet,
-          insertText: item.insertText,
-          insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
-          detail: item.detail,
-          documentation: item.documentation,
-          sortText: `0${index}`, // Ensure plugin completions appear at top
-          range: {
-            startLineNumber: position.lineNumber,
-            startColumn: position.column,
-            endLineNumber: position.lineNumber,
-            endColumn: position.column,
-          },
-        }));
-
-        return { suggestions };
-      } catch (error) {
-        console.error('Failed to get plugin completions:', error);
-        return { suggestions: [] };
-      }
+      return { suggestions: [] };
     },
   });
 });
@@ -200,14 +151,20 @@ export const Editor = ({ currentTabId }: { currentTabId: string }) => {
   }) => {
     const model = editor.getModel();
     if (model) {
-      electrobun.rpc?.send("tsServerRequest", {
-        command,
-        args,
-        metadata: {
-          workspaceId,
-          windowId,
-          editorId: uniqueId,
+      void invokeTsServerCarrot<boolean>(
+        "tsServerRequest",
+        {
+          command,
+          args,
+          metadata: {
+            workspaceId,
+            windowId,
+            editorId: uniqueId,
+          },
         },
+        { windowId },
+      ).catch((error) => {
+        console.error("Failed to send tsserver request:", error);
       });
     }
   };
@@ -794,13 +751,13 @@ export const Editor = ({ currentTabId }: { currentTabId: string }) => {
   });
 
   onCleanup(() => {
-    electrobun.rpc?.send("tsServerEditorClosed", {
+    void invokeTsServerCarrot("closeEditor", {
       metadata: {
         workspaceId,
         windowId,
         editorId: uniqueId,
       },
-    });
+    }, { windowId }).catch(() => {});
     // todo (yoav): move to a single event listener model
     window.removeEventListener("resize", onResize);
     if (editorRef) {

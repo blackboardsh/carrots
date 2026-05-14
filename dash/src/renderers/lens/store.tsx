@@ -356,8 +356,7 @@ export interface AppState {
           | "global-settings"
           | "workspace-settings"
           | "llama-settings"
-          | "bunny-cloud-settings"
-          | "plugin-marketplace";
+          | "bunny-cloud-settings";
         data: {};
       }
     | {
@@ -387,18 +386,6 @@ export interface AppState {
   // when needed for a particular folder it's read from disk and cached here, we then listen
   // to filchange events (eg: from a git pull) and update the cache if it exists
   slateCache: { [absolutePath: string]: SlateType };
-
-  // Plugin slates loaded from the plugin system - these provide custom file handlers
-  // registered by plugins (e.g., webflow-plugin for .webflowrc.json files)
-  pluginSlates: Array<{
-    id: string;
-    pluginName: string;
-    name: string;
-    description?: string;
-    icon?: string;
-    patterns: string[];
-    folderHandler?: boolean;
-  }>;
 
   // directoryWatchers: { [projectId: string]: any };
   dragState:
@@ -557,7 +544,6 @@ const initialState: AppState = {
   // fileTrees: {},
   fileCache: {},
   slateCache: {},
-  pluginSlates: [],
   dragState: null,
   isResizingPane: false,
   workspace: {

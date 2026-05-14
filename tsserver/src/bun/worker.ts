@@ -1,8 +1,6 @@
 import { spawn } from "bun";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { Carrots } from "electrobun/bun";
-
 type InvocationSource = {
   carrotId?: string;
   windowId?: string | null;
@@ -70,6 +68,25 @@ function log(message: string) {
     type: "action",
     action: "log",
     payload: { message },
+  });
+}
+
+function emitToCarrotView(
+  carrotId: string,
+  name: string,
+  payload?: unknown,
+  options?: { windowId?: string | null },
+) {
+  post({
+    type: "action",
+    action: "emit-carrot-view-event",
+    payload: {
+      carrotId,
+      name,
+      payload,
+      raw: true,
+      windowId: options?.windowId ?? null,
+    },
   });
 }
 
@@ -159,10 +176,11 @@ function emitTsServerMessage(
     return;
   }
 
-  Carrots.emit(session.owner.carrotId, "tsserver-message", {
-    windowId: metadata.windowId || session.owner.windowId || null,
+  emitToCarrotView(session.owner.carrotId, "tsServerMessage", {
     message,
     metadata,
+  }, {
+    windowId: metadata.windowId || session.owner.windowId || null,
   });
 }
 

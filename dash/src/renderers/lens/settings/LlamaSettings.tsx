@@ -16,7 +16,7 @@ import {
   SettingsReadonlyField,
 } from "./forms";
 import { aiCompletionService } from "../services/aiCompletionService";
-import { electrobun } from "../init";
+import { invokeLlamaCarrot } from "../init";
 
 export const LlamaSettings = (): JSXElement => {
   const [availableModels, setAvailableModels] = createSignal<Array<{
@@ -83,7 +83,7 @@ export const LlamaSettings = (): JSXElement => {
     setStatusMessage("Loading models...");
     
     try {
-      const result = await electrobun.rpc?.request.llamaListModels();
+      const result = await invokeLlamaCarrot<any>("llamaListModels");
       
       if (result?.ok) {
         batch(() => {
@@ -157,7 +157,7 @@ export const LlamaSettings = (): JSXElement => {
   const pollDownloadStatus = async (downloadId: string) => {
     const poll = async () => {
       try {
-        const result = await electrobun.rpc?.request.llamaDownloadStatus({ downloadId });
+        const result = await invokeLlamaCarrot<any>("llamaDownloadStatus", { downloadId });
         
         if (result?.ok && result.status) {
           const { status, progress, fileName, error, downloadedBytes, totalBytes } = result.status;
@@ -217,7 +217,7 @@ export const LlamaSettings = (): JSXElement => {
     setInstallProgress("Starting download...");
     
     try {
-      const result = await electrobun.rpc?.request.llamaInstallModel({
+      const result = await invokeLlamaCarrot<any>("llamaInstallModel", {
         modelRef: modelRef
       });
 
@@ -257,7 +257,7 @@ export const LlamaSettings = (): JSXElement => {
     setUninstallingModel(modelName);
     
     try {
-      const result = await electrobun.rpc?.request.llamaRemoveModel({
+      const result = await invokeLlamaCarrot<any>("llamaRemoveModel", {
         modelPath: modelPath
       });
 

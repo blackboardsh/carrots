@@ -345,7 +345,6 @@ const FS_CARROT_ID = "bunny.fs";
 const GIT_CARROT_ID = "bunny.git";
 const TSSERVER_CARROT_ID = "bunny.tsserver";
 const BIOME_CARROT_ID = "bunny.biome";
-const LLAMA_CARROT_ID = "bunny.llama";
 const DEFAULT_PTY_HEARTBEAT_INTERVAL_MS = 60 * 1000;
 let ptyHeartbeatIntervalMs = DEFAULT_PTY_HEARTBEAT_INTERVAL_MS;
 let typeScriptPeerDependencyStatus: TypeScriptPeerDependencyStatus = {
@@ -1343,10 +1342,6 @@ async function handleApplicationMenuAction(action: string) {
     sendToFocusedDashWindow("closeCurrentWindow", {});
     return;
   }
-  if (action === "plugin-marketplace") {
-    sendToFocusedDashWindow("openSettings", { settingsType: "plugin-marketplace" });
-    return;
-  }
   if (action === "llama-settings") {
     sendToFocusedDashWindow("openSettings", { settingsType: "llama-settings" });
     return;
@@ -1474,11 +1469,6 @@ function syncApplicationMenu() {
     {
       label: "Settings",
       submenu: [
-        {
-          type: "normal",
-          label: "Plugins",
-          action: "plugin-marketplace",
-        },
         {
           type: "normal",
           label: "Llama Settings",
@@ -2394,14 +2384,6 @@ async function invokeBiomeCarrot<T = unknown>(
   return Carrots.invoke<T>(BIOME_CARROT_ID, method, params, options);
 }
 
-async function invokeLlamaCarrot<T = unknown>(
-  method: string,
-  params?: unknown,
-  options?: { windowId?: string },
-) {
-  return Carrots.invoke<T>(LLAMA_CARROT_ID, method, params, options);
-}
-
 async function refreshTypeScriptPeerDependencyStatus() {
   try {
     const status = await invokeTsServerCarrot<TypeScriptPeerDependencyStatus>("getTypeScriptStatus");
@@ -2444,32 +2426,6 @@ async function refreshGitPeerDependencyStatus() {
       installed: false,
       version: "",
     };
-  }
-}
-
-async function closeTsServerEditor(metadata: {
-  workspaceId?: string;
-  windowId?: string;
-  editorId?: string;
-}) {
-  if (!metadata.workspaceId || !metadata.windowId || !metadata.editorId) {
-    return;
-  }
-
-  try {
-    await invokeTsServerCarrot(
-      "closeEditor",
-      {
-        metadata: {
-          workspaceId: metadata.workspaceId,
-          windowId: metadata.windowId,
-          editorId: metadata.editorId,
-        },
-      },
-      { windowId: metadata.windowId },
-    );
-  } catch {
-    // Ignore editor-level tsserver cleanup failures. Window-level cleanup is the backstop.
   }
 }
 
@@ -2552,40 +2508,6 @@ function handleFsFileWatchEvent(payload: unknown) {
   }
 
   scheduleRefresh();
-}
-
-function handleTsServerMessage(payload: unknown) {
-  const eventPayload =
-    payload && typeof payload === "object"
-      ? (payload as {
-          message?: Record<string, unknown>;
-          metadata?: {
-            workspaceId?: string;
-            windowId?: string;
-            editorId?: string;
-          };
-          windowId?: string | null;
-        })
-      : {};
-
-  const targetWindowId =
-    typeof eventPayload.metadata?.windowId === "string"
-      ? eventPayload.metadata.windowId
-      : typeof eventPayload.windowId === "string"
-        ? eventPayload.windowId
-        : state.currentWindowId;
-
-  sendRuntimeEventToDashWindow(targetWindowId, "tsServerMessage", {
-    message:
-      eventPayload.message && typeof eventPayload.message === "object"
-        ? eventPayload.message
-        : {},
-    metadata: {
-      workspaceId: String(eventPayload.metadata?.workspaceId || ""),
-      windowId: String(targetWindowId || ""),
-      editorId: String(eventPayload.metadata?.editorId || ""),
-    },
-  });
 }
 
 function emitSetProjectsForWindow(windowId: string) {
@@ -4672,44 +4594,6 @@ async function handleBunnyDashRequest(method: string, params: any) {
     case "showContextMenu":
       ContextMenu.showContextMenu(Array.isArray(params?.menuItems) ? params.menuItems : []);
       return;
-    case "pluginGetFileDecoration":
-    case "pluginFindSlateForFolder":
-    case "pluginGetStateValue":
-      return null;
-    case "pluginGetPreloadScripts":
-    case "pluginGetAllSlates":
-    case "pluginGetStatusBarItems":
-    case "pluginGetInstalled":
-    case "pluginSearch":
-    case "pluginGetSettingsValues":
-    case "pluginGetSettingsSchema":
-    case "pluginGetEntitlements":
-    case "pluginGetSettingValidationStatuses":
-    case "pluginGetCompletions":
-    case "pluginGetContextMenuItems":
-    case "pluginGetKeybindings":
-      return [];
-    case "pluginGetPendingSettingsMessages":
-      return [];
-    case "pluginSetSettingValue":
-    case "pluginInstall":
-    case "pluginUninstall":
-    case "pluginSetEnabled":
-    case "pluginSlateEvent":
-    case "pluginMountSlate":
-    case "pluginUnmountSlate":
-    case "pluginSendSettingsMessage":
-      return { success: true };
-    case "pluginExecuteCommand":
-      return;
-    case "llamaListModels":
-    case "llamaCompletion":
-    case "llamaInstallModel":
-    case "llamaRemoveModel":
-    case "llamaDownloadStatus":
-      return invokeLlamaCarrot(method, params, {
-        windowId: getCurrentWindow().id,
-      });
     case "getTokens":
       return bunnyDashState.tokens || [];
     case "setToken":
@@ -4838,32 +4722,6 @@ async function handleBunnyDashSend(name: string, payload: any) {
         { windowId: getCurrentWindow().id },
       );
       return;
-    case "tsServerRequest":
-      await invokeTsServerCarrot<boolean>(
-        "tsServerRequest",
-        {
-          command: String(payload?.command || ""),
-          args: payload?.args ?? {},
-          metadata:
-            payload && typeof payload === "object" && payload.metadata && typeof payload.metadata === "object"
-              ? payload.metadata
-              : {},
-        },
-        {
-          windowId:
-            payload && typeof payload === "object" && typeof payload?.metadata?.windowId === "string"
-              ? payload.metadata.windowId
-              : getCurrentWindow().id,
-        },
-      );
-      return;
-    case "tsServerEditorClosed":
-      await closeTsServerEditor(
-        payload && typeof payload === "object" && payload.metadata && typeof payload.metadata === "object"
-          ? payload.metadata
-          : {},
-      );
-      return;
     case "createWindow":
       await createAdditionalWindow(
         payload && typeof payload === "object"
@@ -4897,11 +4755,6 @@ self.onmessage = async (event) => {
 
     if (message.name === "fs-file-watch-event") {
       handleFsFileWatchEvent(message.payload);
-      return;
-    }
-
-    if (message.name === "tsserver-message") {
-      handleTsServerMessage(message.payload);
       return;
     }
 

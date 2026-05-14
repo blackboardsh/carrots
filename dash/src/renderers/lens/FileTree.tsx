@@ -89,19 +89,11 @@ async function getFileDecoration(
 		return cached.decoration;
 	}
 
-	try {
-		const decoration = await electrobun.rpc?.request.pluginGetFileDecoration({
-			filePath,
-		});
-		fileDecorationCache.set(filePath, {
-			decoration: decoration || null,
-			timestamp: Date.now(),
-		});
-		return decoration || null;
-	} catch (err) {
-		console.warn("Failed to fetch file decoration:", err);
-		return null;
-	}
+	fileDecorationCache.set(filePath, {
+		decoration: null,
+		timestamp: Date.now(),
+	});
+	return null;
 }
 
 const makeSafeSerializer = () => {
@@ -2794,29 +2786,6 @@ const NodeName = ({
 					type: "separator",
 				},
 			];
-
-			// Fetch and add plugin context menu items
-			try {
-				const pluginMenuItems =
-					await electrobun.rpc?.request.pluginGetContextMenuItems({
-						context: "fileTree",
-					});
-				if (pluginMenuItems && pluginMenuItems.length > 0) {
-					menuItems.push(
-						...pluginMenuItems.map((item) => ({
-							label: item.label,
-							accelerator: item.shortcutHint,
-							...createContextMenuAction("plugin_context_menu_item", {
-								itemId: item.id,
-								filePath: _nodeToRender.path,
-							}),
-						})),
-						{ type: "separator" },
-					);
-				}
-			} catch (err) {
-				console.warn("Failed to fetch plugin context menu items:", err);
-			}
 
 			// Check if this node is a project root (its path exactly matches a project's path)
 			const nodeIsProjectRoot = isProjectRoot(_nodeToRender);

@@ -886,14 +886,6 @@ const CommandPalette = ({ setOpen }: { setOpen: (value: boolean) => void }) => {
     });
   };
 
-  const pluginsClick = () => {
-    setState("settingsPane", {
-      type:
-        state.settingsPane.type === "plugin-marketplace" ? "" : "plugin-marketplace",
-      data: {},
-    });
-  };
-
   const llamaSettingsClick = () => {
     setState("settingsPane", {
       type:
@@ -910,7 +902,6 @@ const CommandPalette = ({ setOpen }: { setOpen: (value: boolean) => void }) => {
     const allWorkspaceCommands = [
       { name: "New Window", description: "Open a new window", action: () => electrobun.rpc?.send.createWindow() },
       { name: "Hide Workspace", description: "Hide the current workspace", action: () => electrobun.rpc?.send.hideWorkspace() },
-      { name: "Plugins", description: "Browse and manage plugins", action: pluginsClick },
       { name: "Llama Settings", description: "Configure local AI model", action: llamaSettingsClick },
       { name: "Bunny Dash Settings", description: "Configure global Bunny Dash settings", action: globalSettingsClick },
       { name: "Workspace Settings", description: "Configure workspace settings", action: workspaceSettingsClick },

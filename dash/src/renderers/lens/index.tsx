@@ -41,9 +41,6 @@ import {
 	isProjectRoot,
 	getProjectByRootPath,
 	writeSlateConfigFile,
-	findPluginSlateForFile,
-	loadPluginSlates,
-	type PluginSlateInfo,
 } from "./files";
 
 import { makeFileNameSafe } from "../../shared/utils/files";
@@ -118,8 +115,6 @@ import { Dialog } from "./components/Dialog";
 import { TopBar } from "./components/TopBar";
 import { BunnyCloudSettings } from "./settings/BunnyCloudSettings";
 import { LlamaSettings } from "./settings/LlamaSettings";
-import { PluginMarketplace } from "./settings/PluginMarketplace";
-import { PluginSettings } from "./settings/PluginSettings";
 import {
 	SettingsInputField,
 	SettingsPaneField,
@@ -136,7 +131,6 @@ import { Editor } from "./CodeEditor";
 import { AgentSlate } from "./slates/AgentSlate";
 import { CarrotRemoteUIHost, handleCloneSuccessInDash } from "./slates/CarrotRemoteUIHost";
 import { CarrotSlateUIHost } from "./slates/CarrotSlateUIHost";
-import { PluginSlate } from "./slates/PluginSlate";
 // XXX - terminal slate
 import { TerminalSlate } from "./slates/TerminalSlate";
 import { WebSlate } from "./slates/WebSlate";
@@ -341,24 +335,8 @@ document.addEventListener(
 );
 
 // Plugin keybinding cache (refreshed periodically)
-let pluginKeybindingsCache: Array<{
-	key: string;
-	command: string;
-	when?: 'editor' | 'terminal' | 'global';
-}> = [];
-let keybindingsCacheTime = 0;
-const KEYBINDINGS_CACHE_TTL = 5000; // 5 seconds
-
 async function refreshPluginKeybindings() {
-	try {
-		const keybindings = await electrobun.rpc?.request.pluginGetKeybindings();
-		if (keybindings) {
-			pluginKeybindingsCache = keybindings;
-			keybindingsCacheTime = Date.now();
-		}
-	} catch (err) {
-		console.warn('Failed to fetch plugin keybindings:', err);
-	}
+	return;
 }
 
 // Helper to parse a key string like "ctrl+shift+m" into modifiers
@@ -388,33 +366,7 @@ function matchesKeybinding(e: KeyboardEvent, keyStr: string): boolean {
 
 // Check and execute plugin keybindings
 async function checkPluginKeybindings(e: KeyboardEvent, context: 'editor' | 'terminal' | 'global') {
-	// Refresh cache if stale
-	if (Date.now() - keybindingsCacheTime > KEYBINDINGS_CACHE_TTL) {
-		await refreshPluginKeybindings();
-	}
-
-	for (const keybinding of pluginKeybindingsCache) {
-		// Check if the keybinding matches the current context
-		if (keybinding.when && keybinding.when !== context && keybinding.when !== 'global') {
-			continue;
-		}
-
-		if (matchesKeybinding(e, keybinding.key)) {
-			e.preventDefault();
-			e.stopImmediatePropagation();
-
-			// Execute the command via RPC
-			try {
-				await electrobun.rpc?.request.pluginExecuteCommand({
-					commandId: keybinding.command,
-					args: [],
-				});
-			} catch (err) {
-				console.error('Failed to execute plugin command:', err);
-			}
-			break;
-		}
-	}
+	return;
 }
 
 const canOpenNodeInNewTab = (nodePath: string) => {
@@ -569,10 +521,6 @@ const getInitialState = () => {
 						: state.appSettings,
 				});
 
-				// Load plugin slates after initial state is set
-				loadPluginSlates().catch((e) => {
-					console.error("[index] Failed to load plugin slates:", e);
-				});
 			},
 		)
 		.catch((err) => {
@@ -1027,12 +975,6 @@ const App = () => {
 											</Match>
 											<Match when={state.settingsPane.type === "bunny-cloud-settings"}>
 												<BunnyCloudSettings />
-											</Match>
-											<Match when={state.settingsPane.type === "plugin-marketplace"}>
-												<PluginMarketplace />
-											</Match>
-											<Match when={state.settingsPane.type === "plugin-settings"}>
-												<PluginSettings />
 											</Match>
 											<Match when={state.settingsPane.type === "carrot-slate-ui"}>
 												<CarrotSlateUIHost
@@ -2311,20 +2253,6 @@ const TabContent = ({ tabId }: { tabId: string }) => {
 				{/* Force editor - bypass slate rendering when forceEditor is true */}
 				<Match when={(tab() as FileTabType)?.forceEditor && getNode(tab()?.path)?.type === "file"}>
 					<Editor currentTabId={(tab() as FileTabType)?.id} />
-				</Match>
-
-				{/* Plugin slates - check plugin-registered slates before built-in slates */}
-				<Match when={(() => {
-					const node = getNode(tab()?.path);
-					if (!node?.path) return null;
-					return findPluginSlateForFile(node.path);
-				})()}>
-					{(pluginSlate) => (
-						<PluginSlate
-							node={getNode(tab()?.path)}
-							slateInfo={pluginSlate() as PluginSlateInfo}
-						/>
-					)}
 				</Match>
 
 				{/* Slate-specific matches must come before generic file match */}

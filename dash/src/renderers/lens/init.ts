@@ -27,14 +27,9 @@ import { join, basename, dirname } from "../utils/pathUtils";
 import { _getNode, getNode } from "./FileWatcher";
 import { trackFrontend } from "./analytics";
 import {untrack} from "solid-js";
-import { loadPluginSlates } from "./files";
-import { initializeSlateRegistry } from "./slates/pluginSlateRegistry";
 import { registerBunnyTerminal } from "../components/BunnyTerminal";
 import { registerDashDiffEditor } from "../components/DashDiffEditor";
 // import { readSlateConfigFile } from "./files";
-
-// Initialize the slate component registry early
-initializeSlateRegistry();
 
 // Register web components for plugins to use
 registerBunnyTerminal();
@@ -779,6 +774,22 @@ export function invokeFsCarrot<T = unknown>(method: string, params?: unknown) {
 
 export function invokeGitCarrot<T = unknown>(method: string, params?: unknown) {
 	return invokeCarrot<T>("bunny.git", method, params);
+}
+
+export function invokeTsServerCarrot<T = unknown>(
+	method: string,
+	params?: unknown,
+	options?: { windowId?: string },
+) {
+	return invokeCarrot<T>("bunny.tsserver", method, params, options);
+}
+
+export function invokeLlamaCarrot<T = unknown>(
+	method: string,
+	params?: unknown,
+	options?: { windowId?: string },
+) {
+	return invokeCarrot<T>("bunny.llama", method, params, options);
 }
 
 export function fsGetNode(path: string) {

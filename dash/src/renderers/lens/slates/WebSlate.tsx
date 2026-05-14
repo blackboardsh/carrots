@@ -122,25 +122,8 @@ let cachedPluginPreloads: string | null = null;
 let pluginPreloadsPromise: Promise<string> | null = null;
 
 async function getPluginPreloads(): Promise<string> {
-	if (cachedPluginPreloads !== null) {
-		return cachedPluginPreloads;
-	}
-	if (pluginPreloadsPromise) {
-		return pluginPreloadsPromise;
-	}
-	pluginPreloadsPromise = (async () => {
-		try {
-			const { electrobun } = await import("../init");
-			const scripts = await electrobun.rpc?.request.pluginGetPreloadScripts();
-			cachedPluginPreloads = scripts || "";
-			return cachedPluginPreloads;
-		} catch (err) {
-			console.warn("Failed to load plugin preload scripts:", err);
-			cachedPluginPreloads = "";
-			return "";
-		}
-	})();
-	return pluginPreloadsPromise;
+	cachedPluginPreloads = "";
+	return "";
 }
 
 // WebSlates typically have a 'home' path, saved to the node's web slate
