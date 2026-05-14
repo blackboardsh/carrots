@@ -20,7 +20,6 @@ import {
   BrowserWindow,
   Carrots,
   ContextMenu,
-  defineElectrobunRPC,
   Utils,
   app,
 } from "electrobun/bun";
@@ -313,7 +312,8 @@ let manifestVersion = "0.0.1";
 let runtimeChannel = "dev";
 let runtimeAuthToken: string | null = null;
 let runtimeWindows: LensWindow[] = [];
-const browserWindows = new Map<string, BrowserWindow>();
+const hostWindowIds = new Set<string>();
+const auxiliaryWindows = new Map<string, BrowserWindow>();
 const terminalWindowOwners = new Map<string, string>();
 const expandedFsDirs = new Set<string>();
 const framePersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -946,432 +946,67 @@ function parseDurationMs(value: unknown, fallback: number, minimum: number) {
   return Math.max(minimum, parsed);
 }
 
-function getOrCreateBrowserWindow(windowId = state.currentWindowId, title?: string) {
+function ensureHostDashWindow(windowId = state.currentWindowId, title?: string) {
   const runtimeWindow = runtimeWindows.find((candidate) => candidate.id === windowId);
   if (!runtimeWindow) {
     throw new Error(`Unknown runtime window: ${windowId}`);
   }
 
-  const existing = browserWindows.get(windowId);
-  if (existing) {
-    if (title && title !== existing.title) {
-      existing.setTitle(title);
-    }
-    return existing;
+  const nextTitle = title || runtimeWindow.title;
+  if (hostWindowIds.has(windowId)) {
+    post({
+      type: "action",
+      action: "window-set-title",
+      payload: { windowId, title: nextTitle },
+    });
+    return;
   }
 
   const bunnyWindow = getBunnyWindowForRuntimeWindow(windowId);
-
-  // Wrap each request handler with boot + window context
-  const r = <T>(fn: (params: any) => T | Promise<T>) => async (params: any) => {
-    await ensureBootPromise();
-    setActiveWindow(windowId);
-    return fn(params);
-  };
-  // Wrap each message handler (fire-and-forget)
-  const m = (fn: (payload: any) => void | Promise<void>) => (payload: any) => {
-    ensureBootPromise().then(() => {
-      setActiveWindow(windowId);
-      fn(payload);
-    }).catch(() => {});
-  };
-
-  const rpc = defineElectrobunRPC("bun", {
-    maxRequestTime: 10000,
-    handlers: {
-      requests: {
-        openFarm: r(() => { app.openManager(); return { ok: true }; }),
-        logoutBunnyCloud: r(async () => {
-          await app.setAuthToken("");
-          return { ok: true };
-        }),
-        getBunnyCloudOverview: r(async () => getBunnyCloudOverview()),
-        loginBunnyCloud: r(async (params) => {
-          try {
-            const overview = await loginToBunnyCloud({
-              mode: params?.mode === "register" ? "register" : "login",
-              email: String(params?.email || "").trim(),
-              password: String(params?.password || ""),
-              name: typeof params?.name === "string" ? params.name : undefined,
-            });
-            emitSetProjects();
-            return { ok: true, overview };
-          } catch (error) {
-            return {
-              ok: false,
-              error: error instanceof Error ? error.message : String(error),
-            };
-          }
-        }),
-        registerCurrentBunnyCloudInstance: r(async () => {
-          try {
-            const overview = await registerCurrentCloudInstance();
-            emitSetProjects();
-            return { ok: true, overview };
-          } catch (error) {
-            return {
-              ok: false,
-              error: error instanceof Error ? error.message : String(error),
-            };
-          }
-        }),
-        updateCurrentBunnyCloudCarrots: r(async () => {
-          await app.updateCarrots();
-          await refreshCarrotList();
-          emitSetProjects();
-          return { ok: true, overview: await getBunnyCloudOverview() };
-        }),
-        createBunnyCloudWorkspace: r(async (params) => {
-          if (!cloudApi) {
-            throw new Error("Not signed in to Bunny Cloud");
-          }
-          await cloudApi.createWorkspace(String(params?.name || "").trim(), typeof params?.description === "string" ? params.description : undefined);
-          await refreshCloudData();
-          emitSetProjects();
-          return { ok: true, overview: await getBunnyCloudOverview() };
-        }),
-        removeBunnyCloudInstance: r(async (params) => {
-          if (!cloudApi) {
-            throw new Error("Not signed in to Bunny Cloud");
-          }
-          await cloudApi.deleteInstance(String(params?.instanceId || ""));
-          await refreshCloudData();
-          emitSetProjects();
-          return { ok: true, overview: await getBunnyCloudOverview() };
-        }),
-        revokeBunnyCloudDevice: r(async (params) => {
-          if (!cloudApi) {
-            throw new Error("Not signed in to Bunny Cloud");
-          }
-          await cloudApi.deleteDeviceToken(String(params?.deviceTokenId || ""));
-          emitSetProjects();
-          return { ok: true, overview: await getBunnyCloudOverview() };
-        }),
-        getInitialState: r(() => {
-          const workspace = currentBunnyWorkspace();
-          ensureBunnyWorkspaceWindow(getCurrentWindow());
-          return {
-            windowId: getCurrentWindow().id,
-            buildVars: bunnyBuildVars(),
-            paths: bunnyPaths(),
-            peerDependencies: bunnyPeerDependencies(),
-            workspace,
-            bunnyDash: buildWorkspaceLensPayload(getCurrentWindow().id),
-            projects: bunnyProjectsForWorkspace(workspace.id),
-            tokens: bunnyDashState.tokens || [],
-            appSettings: bunnyDashState.appSettings || defaultBunnyAppSettings,
-          };
-        }),
-        newPreviewNode: r((params) => {
-          const parentPath = getBunnyProjectsFolder();
-          const nodeName = getUniqueNewName(parentPath, params?.candidateName || "new-project");
-          return { type: "dir", name: nodeName, path: join(parentPath, nodeName), previewChildren: [], isExpanded: false, slate: { v: 1, name: "", url: "", icon: "", type: "project", config: {} } };
-        }),
-        addProject: r((params) => addProjectMount({ workspaceId: getCurrentWorkspace().key, name: params?.projectName, path: String(params?.path || "") }).then((result) => { emitSetProjects(); return result; })),
-        syncWorkspace: r(async (params) => {
-          const workspaceId = String(params?.workspace?.id || getCurrentWorkspace().key);
-          log(`syncWorkspace request: workspace=${workspaceId}`);
-          bunnyDashState.workspaces ||= {};
-          bunnyDashState.workspaces[workspaceId] = params.workspace;
-          await saveState();
-          emitSetProjectsForWindow(getCurrentWindow().id);
-        }),
-        syncAppSettings: r(async (params) => { bunnyDashState.appSettings = params.appSettings; await writePersistedDashState(); }),
-        openFileDialog: r((params) => Utils.openFileDialog({ startingFolder: params?.startingFolder, allowedFileTypes: params?.allowedFileTypes, canChooseFiles: params?.canChooseFiles, canChooseDirectory: params?.canChooseDirectory, allowsMultipleSelection: params?.allowsMultipleSelection })),
-        getNode: r((params) => invokeFsCarrot("getNode", { path: String(params?.path || "") })),
-        readSlateConfigFile: r((params) => invokeFsCarrot("readSlateConfigFile", { path: String(params?.path || "") })),
-        readFile: r((params) => invokeFsCarrot("readFile", { path: String(params?.path || "") })),
-        writeFile: r((params) => invokeFsCarrot("writeFile", { path: String(params?.path || ""), value: String(params?.value || "") })),
-        touchFile: r((params) => invokeFsCarrot("touchFile", { path: String(params?.path || ""), contents: String(params?.contents || "") })),
-        rename: r((params) => invokeFsCarrot("rename", { oldPath: String(params?.oldPath || ""), newPath: String(params?.newPath || "") })),
-        exists: r((params) => invokeFsCarrot("exists", { path: String(params?.path || "") })),
-        isFolder: r((params) => invokeFsCarrot("isFolder", { path: String(params?.path || "") })),
-        mkdir: r((params) => invokeFsCarrot("mkdir", { path: String(params?.path || "") })),
-        showInFinder: r(async (params) => { await Utils.showItemInFolder(String(params?.path || "")); }),
-        copy: r((params) => invokeFsCarrot("copy", { src: String(params?.src || ""), dest: String(params?.dest || "") })),
-        safeDeleteFileOrFolder: r((params) => invokeFsCarrot("safeDeleteFileOrFolder", { path: String(params?.path || "") })),
-        safeTrashFileOrFolder: r((params) => invokeFsCarrot("safeTrashFileOrFolder", { path: String(params?.path || "") })),
-        execSpawnSync: r((params) => {
-          const cmd = String(params?.cmd || "");
-          const args = Array.isArray(params?.args) ? params.args.map(String) : [];
-          const result = Bun.spawnSync([cmd, ...args], { ...(typeof params?.opts === "object" && params?.opts ? params.opts : {}) });
-          if (result.exitCode !== 0) throw new Error(new TextDecoder().decode(result.stderr || new Uint8Array()) || `${cmd} exited with code ${result.exitCode}`);
-          return new TextDecoder().decode(result.stdout || new Uint8Array());
-        }),
-        createTerminal: r(async (params) => {
-          const currentWindowId = getCurrentWindow().id;
-          const terminalId = await invokePtyCarrot<string>("createTerminal", { cwd: String(params?.cwd || process.cwd()), shell: typeof params?.shell === "string" ? params.shell : undefined, cols: Number(params?.cols || 80), rows: Number(params?.rows || 24) }, { windowId: currentWindowId });
-          log(`PTY carrot created terminal ${terminalId} for window ${currentWindowId}`);
-          terminalWindowOwners.set(terminalId, currentWindowId);
-          return terminalId;
-        }),
-        writeToTerminal: r((params) => invokePtyCarrot<boolean>("writeToTerminal", { terminalId: String(params?.terminalId || ""), data: String(params?.data || "") })),
-        resizeTerminal: r((params) => invokePtyCarrot<boolean>("resizeTerminal", { terminalId: String(params?.terminalId || ""), cols: Number(params?.cols || 80), rows: Number(params?.rows || 24) })),
-        killTerminal: r(async (params) => { const result = await invokePtyCarrot<boolean>("killTerminal", { terminalId: String(params?.terminalId || "") }); terminalWindowOwners.delete(String(params?.terminalId || "")); return result; }),
-        getTerminalCwd: r((params) => invokePtyCarrot<string | null>("getTerminalCwd", { terminalId: String(params?.terminalId || "") })),
-        getWorkspaceLensSidebar: r(() => buildWorkspaceLensSidebarData()),
-        activateLens: r((params) => activateLens(String(params?.lensId || state.currentLayoutId))),
-        findFilesInWorkspace: r((params) => invokeFsCarrot<string[]>("findFilesInWorkspace", { query: String(params?.query || ""), targets: buildSearchTargetsForWorkspace() }, { windowId: getCurrentWindow().id })),
-        findAllInWorkspace: r((params) => invokeFsCarrot<Array<{ path: string; line: number; column: number; match: string }>>("findAllInWorkspace", { query: String(params?.query || ""), targets: buildSearchTargetsForWorkspace() }, { windowId: getCurrentWindow().id })),
-        cancelFileSearch: r(() => invokeFsCarrot<boolean>("cancelFileSearch", {}, { windowId: getCurrentWindow().id })),
-        cancelFindAll: r(() => invokeFsCarrot<boolean>("cancelFindAll", {}, { windowId: getCurrentWindow().id })),
-        // Git operations — all forwarded to git carrot
-        gitShow: r((params) => invokeGitCarrot("gitShow", params, { windowId: getCurrentWindow().id })),
-        gitCommit: r((params) => invokeGitCarrot("gitCommit", params, { windowId: getCurrentWindow().id })),
-        gitCommitAmend: r((params) => invokeGitCarrot("gitCommitAmend", params, { windowId: getCurrentWindow().id })),
-        gitAdd: r((params) => invokeGitCarrot("gitAdd", params, { windowId: getCurrentWindow().id })),
-        gitLog: r((params) => invokeGitCarrot("gitLog", params, { windowId: getCurrentWindow().id })),
-        gitStatus: r((params) => invokeGitCarrot("gitStatus", params, { windowId: getCurrentWindow().id })),
-        gitDiff: r((params) => invokeGitCarrot("gitDiff", params, { windowId: getCurrentWindow().id })),
-        gitCheckout: r((params) => invokeGitCarrot("gitCheckout", params, { windowId: getCurrentWindow().id })),
-        gitCheckIsRepoRoot: r((params) => invokeGitCarrot("gitCheckIsRepoRoot", params, { windowId: getCurrentWindow().id })),
-        gitCheckIsRepoInTree: r((params) => invokeGitCarrot("gitCheckIsRepoInTree", params, { windowId: getCurrentWindow().id })),
-        gitRevParse: r((params) => invokeGitCarrot("gitRevParse", params, { windowId: getCurrentWindow().id })),
-        gitReset: r((params) => invokeGitCarrot("gitReset", params, { windowId: getCurrentWindow().id })),
-        gitRevert: r((params) => invokeGitCarrot("gitRevert", params, { windowId: getCurrentWindow().id })),
-        gitApply: r((params) => invokeGitCarrot("gitApply", params, { windowId: getCurrentWindow().id })),
-        gitStageHunkFromPatch: r((params) => invokeGitCarrot("gitStageHunkFromPatch", params, { windowId: getCurrentWindow().id })),
-        gitStageSpecificLines: r((params) => invokeGitCarrot("gitStageSpecificLines", params, { windowId: getCurrentWindow().id })),
-        gitStageMonacoChange: r((params) => invokeGitCarrot("gitStageMonacoChange", params, { windowId: getCurrentWindow().id })),
-        gitUnstageMonacoChange: r((params) => invokeGitCarrot("gitUnstageMonacoChange", params, { windowId: getCurrentWindow().id })),
-        gitCreatePatchFromLines: r((params) => invokeGitCarrot("gitCreatePatchFromLines", params, { windowId: getCurrentWindow().id })),
-        gitStashList: r((params) => invokeGitCarrot("gitStashList", params, { windowId: getCurrentWindow().id })),
-        gitStashCreate: r((params) => invokeGitCarrot("gitStashCreate", params, { windowId: getCurrentWindow().id })),
-        gitStashApply: r((params) => invokeGitCarrot("gitStashApply", params, { windowId: getCurrentWindow().id })),
-        gitStashPop: r((params) => invokeGitCarrot("gitStashPop", params, { windowId: getCurrentWindow().id })),
-        gitStashShow: r((params) => invokeGitCarrot("gitStashShow", params, { windowId: getCurrentWindow().id })),
-        gitRemote: r((params) => invokeGitCarrot("gitRemote", params, { windowId: getCurrentWindow().id })),
-        gitAddRemote: r((params) => invokeGitCarrot("gitAddRemote", params, { windowId: getCurrentWindow().id })),
-        gitFetch: r((params) => invokeGitCarrot("gitFetch", params, { windowId: getCurrentWindow().id })),
-        gitPull: r((params) => invokeGitCarrot("gitPull", params, { windowId: getCurrentWindow().id })),
-        gitPush: r((params) => invokeGitCarrot("gitPush", params, { windowId: getCurrentWindow().id })),
-        gitBranch: r((params) => invokeGitCarrot("gitBranch", params, { windowId: getCurrentWindow().id })),
-        gitCheckoutBranch: r((params) => invokeGitCarrot("gitCheckoutBranch", params, { windowId: getCurrentWindow().id })),
-        gitLogRemoteOnly: r((params) => invokeGitCarrot("gitLogRemoteOnly", params, { windowId: getCurrentWindow().id })),
-        gitClone: r((params) => invokeGitCarrot("gitClone", params, { windowId: getCurrentWindow().id })),
-        gitValidateUrl: r((params) => invokeGitCarrot("gitValidateUrl", params, { windowId: getCurrentWindow().id })),
-        getGitConfig: r((params) => invokeGitCarrot("getGitConfig", params, { windowId: getCurrentWindow().id })),
-        setGitConfig: r((params) => invokeGitCarrot("setGitConfig", params, { windowId: getCurrentWindow().id })),
-        checkGitHubCredentials: r((params) => invokeGitCarrot("checkGitHubCredentials", params, { windowId: getCurrentWindow().id })),
-        storeGitHubCredentials: r((params) => invokeGitCarrot("storeGitHubCredentials", params, { windowId: getCurrentWindow().id })),
-        removeGitHubCredentials: r((params) => invokeGitCarrot("removeGitHubCredentials", params, { windowId: getCurrentWindow().id })),
-        gitCreateBranch: r((params) => invokeGitCarrot("gitCreateBranch", params, { windowId: getCurrentWindow().id })),
-        gitDeleteBranch: r((params) => invokeGitCarrot("gitDeleteBranch", params, { windowId: getCurrentWindow().id })),
-        gitTrackRemoteBranch: r((params) => invokeGitCarrot("gitTrackRemoteBranch", params, { windowId: getCurrentWindow().id })),
-        initGit: r((params) => invokeGitCarrot("initGit", params, { windowId: getCurrentWindow().id })),
-        findFirstNestedGitRepo: r((params) => invokeFsCarrot<string | null>("findFirstNestedGitRepo", { searchPath: String(params?.searchPath || ""), timeoutMs: Number(params?.timeoutMs || 5_000) })),
-        getUniqueNewName: r((params) => invokeFsCarrot("getUniqueNewName", { parentPath: String(params?.parentPath || ""), baseName: String(params?.baseName || "untitled") })),
-        getUniqueLensName: r((params) => getUniqueLensNameForWorkspace(String(params?.workspaceId || getCurrentWorkspace().key), String(params?.baseName || "Lens"))),
-        makeFileNameSafe: r((params) => invokeFsCarrot("makeFileNameSafe", { value: String(params?.value || "") })),
-        getFaviconForUrl: r(() => "views://assets/file-icons/bookmark.svg"),
-        showContextMenu: r((params) => { ContextMenu.showContextMenu(Array.isArray(params?.menuItems) ? params.menuItems : []); }),
-        // Plugin stubs
-        pluginGetFileDecoration: r(() => null),
-        pluginFindSlateForFolder: r(() => null),
-        pluginGetStateValue: r(() => null),
-        pluginGetPreloadScripts: r(() => []),
-        pluginGetAllSlates: r(() => []),
-        pluginGetStatusBarItems: r(() => []),
-        pluginGetInstalled: r(() => []),
-        pluginSearch: r(() => []),
-        pluginGetSettingsValues: r(() => []),
-        pluginGetSettingsSchema: r(() => []),
-        pluginGetEntitlements: r(() => []),
-        pluginGetSettingValidationStatuses: r(() => []),
-        pluginGetCompletions: r(() => []),
-        pluginGetContextMenuItems: r(() => []),
-        pluginGetKeybindings: r(() => []),
-        pluginGetPendingSettingsMessages: r(() => []),
-        pluginSetSettingValue: r(() => ({ success: true })),
-        pluginInstall: r(() => ({ success: true })),
-        pluginUninstall: r(() => ({ success: true })),
-        pluginSetEnabled: r(() => ({ success: true })),
-        pluginSlateEvent: r(() => ({ success: true })),
-        pluginMountSlate: r(() => ({ success: true })),
-        pluginUnmountSlate: r(() => ({ success: true })),
-        pluginSendSettingsMessage: r(() => ({ success: true })),
-        pluginExecuteCommand: r(() => {}),
-        // Llama — forwarded to llama carrot
-        llamaListModels: r((params) => invokeLlamaCarrot("llamaListModels", params, { windowId: getCurrentWindow().id })),
-        llamaCompletion: r((params) => invokeLlamaCarrot("llamaCompletion", params, { windowId: getCurrentWindow().id })),
-        llamaInstallModel: r((params) => invokeLlamaCarrot("llamaInstallModel", params, { windowId: getCurrentWindow().id })),
-        llamaRemoveModel: r((params) => invokeLlamaCarrot("llamaRemoveModel", params, { windowId: getCurrentWindow().id })),
-        llamaDownloadStatus: r((params) => invokeLlamaCarrot("llamaDownloadStatus", params, { windowId: getCurrentWindow().id })),
-        // Tokens
-        getTokens: r(() => bunnyDashState.tokens || []),
-        setToken: r(() => {}),
-        // Snapshot & UI state
-        getSnapshot: r(() => snapshot()),
-        toggleSidebar: r(async () => { state.sidebarOpen = !state.sidebarOpen; await saveState(); emitSnapshot(); return snapshot(); }),
-        togglePalette: r(async () => { state.commandPaletteOpen = !state.commandPaletteOpen; state.commandQuery = ""; await saveState(); emitSnapshot(); return snapshot(); }),
-        setCommandQuery: r(async (params) => { state.commandQuery = String(params?.query || ""); await saveState(); emitSnapshot(); return snapshot(); }),
-        selectNode: r(async (params) => { await selectNode(String(params?.nodeId || "")); return snapshot(); }),
-        focusMainTab: r(async (params) => { setMainTab(String(params?.tabId || getCurrentWindow().currentMainTabId) as any); await saveState(); emitSnapshot(); return snapshot(); }),
-        focusSideTab: r(async (params) => { setSideTab(String(params?.tabId || getCurrentWindow().currentSideTabId) as any); await saveState(); emitSnapshot(); return snapshot(); }),
-        toggleBunnyPopover: r(async () => { state.bunnyPopoverOpen = !state.bunnyPopoverOpen; await saveState(); emitSnapshot(); return snapshot(); }),
-        openCloudPanel: r(async () => { ensureMainTab("cloud"); ensureSideTab("cloud"); state.activeTreeNodeId = `lens-overview:${state.currentLayoutId}`; await saveState(); emitSnapshot(); return snapshot(); }),
-        openQuickAccess: r(async (params) => { const tabId = String(params?.tabId || ""); return openQuickAccess(tabId as any); }),
-        // Lens operations
-        openLens: r(async (params) => { await openLens(String(params?.lensId || params?.layoutId || state.currentLayoutId)); return snapshot(); }),
-        applyLayout: r(async (params) => { await openLens(String(params?.lensId || params?.layoutId || state.currentLayoutId)); return snapshot(); }),
-        openLensInNewWindow: r(async (params) => { await openLensInNewWindow(String(params?.lensId || state.currentLayoutId)); return snapshot(); }),
-        // Workspace operations
-        switchWorkspace: r(async (params) => { await openWorkspace(String(params?.workspaceId || getCurrentWorkspace().key)); return snapshot(); }),
-        openWorkspace: r(async (params) => { await openWorkspace(String(params?.workspaceId || getCurrentWorkspace().key)); return snapshot(); }),
-        openWorkspaceInNewWindow: r(async (params) => { await openWorkspaceInNewWindow(String(params?.workspaceId || getCurrentWorkspace().key)); return snapshot(); }),
-        selectLayoutWindow: r(async (params) => { await selectWindow(String(params?.windowId || state.currentWindowId)); return snapshot(); }),
-        selectWindow: r(async (params) => { await selectWindow(String(params?.windowId || state.currentWindowId)); return snapshot(); }),
-        restoreCurrentState: r(async () => { await restoreCurrentState(); return snapshot(); }),
-        resumeLastState: r(async () => { await restoreCurrentState(); return snapshot(); }),
-        overwriteCurrentLens: r(async () => { await overwriteCurrentLens(); return snapshot(); }),
-        updateCurrentLayout: r(async () => { await overwriteCurrentLens(); return snapshot(); }),
-        addProjectMount: r(async (params) => addProjectMount({ workspaceId: params?.workspaceId, name: params?.name, path: String(params?.path || ""), instanceId: params?.instanceId, instanceLabel: params?.instanceLabel, kind: params?.kind })),
-        removeProjectMount: r(async (params) =>
-          removeProjectMountFromWorkspace({
-            workspaceId: params?.workspaceId,
-            projectId: typeof params?.projectId === "string" ? params.projectId : undefined,
-            mountId: typeof params?.mountId === "string" ? params.mountId : undefined,
-          })
-        ),
-        saveLens: r(async (params) => saveLens(String(params?.name || ""), String(params?.description || ""))),
-        saveLayout: r(async (params) => saveLens(String(params?.name || ""), String(params?.description || ""))),
-        createLens: r(async (params) => createLens(String(params?.workspaceId || getCurrentWorkspace().key), String(params?.name || ""), String(params?.description || ""), typeof params?.sourceLensId === "string" ? params.sourceLensId : undefined)),
-        renameLens: r(async (params) => renameLens(String(params?.lensId || state.currentLayoutId), String(params?.name || ""), String(params?.description || ""))),
-        // TS server status
-        getTypeScriptStatus: r(() => invokeTsServerCarrot("getTypeScriptStatus", {}, { windowId: getCurrentWindow().id })),
-        getBiomeStatus: r(() => invokeBiomeCarrot("getBiomeStatus", {}, { windowId: getCurrentWindow().id })),
-      },
-      messages: {
-        openBunnyWindow: m((payload) => { app.openBunnyWindow({ screenX: typeof payload?.screenX === "number" ? payload.screenX : undefined, screenY: typeof payload?.screenY === "number" ? payload.screenY : undefined }); }),
-        closeWindow: m(() => { closeWindow(getCurrentWindow().id); }),
-        createWorkspace: m(async () => { const nextName = `Workspace ${listWorkspaces().length + 1}`; await createWorkspace(nextName, "Workspace inside Bunny Dash."); getOrCreateBunnyWorkspace(getCurrentWorkspace().key); emitSetProjects(); }),
-        updateWorkspace: m(async (payload) => {
-          const workspace = getCurrentWorkspace();
-          const db = ensureDb();
-          const nextName = typeof payload?.name === "string" && payload.name.trim() ? payload.name.trim() : workspace.name;
-          db.collection("workspaces").update(workspace.id, { name: nextName, subtitle: workspace.subtitle });
-          const bunnyWorkspace = getOrCreateBunnyWorkspace(workspace.key);
-          bunnyWorkspace.name = nextName;
-          if (typeof payload?.color === "string" && payload.color) bunnyWorkspace.color = payload.color;
-          flushDb(); emitSetProjects(); await writePersistedDashState();
-        }),
-        removeProjectFromBunnyDashOnly: m(async (payload) => {
-          const projectId = String(payload?.projectId || "");
-          const project = findProjectMountByKey(projectId);
-          if (project) { const db = ensureDb(); db.collection("projectMounts").remove(project.id); flushDb(); syncProjectWatchers(); emitSetProjects(); await writePersistedDashState(); }
-        }),
-        fullyDeleteProjectFromDiskAndBunnyDash: m(async (payload) => {
-          const projectId = String(payload?.projectId || "");
-          const project = findProjectMountByKey(projectId);
-          if (project) {
-            await invokeFsCarrot("safeDeleteFileOrFolder", { path: project.path });
-            const db = ensureDb();
-            db.collection("projectMounts").remove(project.id);
-            flushDb();
-            syncProjectWatchers();
-            emitSetProjects();
-            await writePersistedDashState();
-          }
-        }),
-        fullyDeleteNodeFromDisk: m(async (payload) => {
-          await invokeFsCarrot("safeDeleteFileOrFolder", { path: String(payload?.nodePath || "") });
-        }),
-        editProject: m(async (payload) => {
-          const project = findProjectMountByKey(String(payload?.projectId || ""));
-          if (!project) return;
-          ensureDb().collection("projectMounts").update(project.id, { name: String(payload?.projectName || project.name), path: String(payload?.path || project.path) });
-          flushDb(); syncProjectWatchers(); emitSetProjects(); await writePersistedDashState();
-        }),
-        deleteWorkspace: m(async () => {
-          const workspaces = listWorkspaces(); if (workspaces.length <= 1) return;
-          const current = getCurrentWorkspace(); const db = ensureDb();
-          for (const project of getProjectMountsForWorkspace(current.key)) { db.collection("projectMounts").remove(project.id); }
-          db.collection("workspaces").remove(current.id); delete (bunnyDashState.workspaces || {})[current.key]; flushDb();
-          await openWorkspace(listWorkspaces()[0]!.key); emitSetProjects(); await writePersistedDashState();
-        }),
-        deleteWorkspaceCompletely: m(async () => {
-          const workspaces = listWorkspaces(); if (workspaces.length <= 1) return;
-          const current = getCurrentWorkspace(); const db = ensureDb();
-          for (const project of getProjectMountsForWorkspace(current.key)) {
-            await invokeFsCarrot("safeDeleteFileOrFolder", { path: project.path });
-            db.collection("projectMounts").remove(project.id);
-          }
-          db.collection("workspaces").remove(current.id); delete (bunnyDashState.workspaces || {})[current.key]; flushDb();
-          await openWorkspace(listWorkspaces()[0]!.key); emitSetProjects(); await writePersistedDashState();
-        }),
-        formatFile: m(async (payload) => { await invokeBiomeCarrot("formatFile", { path: String(payload?.path || "") }, { windowId: getCurrentWindow().id }); }),
-        tsServerRequest: m(async (payload) => {
-          await invokeTsServerCarrot<boolean>("tsServerRequest", { command: String(payload?.command || ""), args: payload?.args ?? {}, metadata: payload?.metadata && typeof payload.metadata === "object" ? payload.metadata : {} },
-            { windowId: typeof payload?.metadata?.windowId === "string" ? payload.metadata.windowId : getCurrentWindow().id });
-        }),
-        tsServerEditorClosed: m(async (payload) => { await closeTsServerEditor(payload?.metadata && typeof payload.metadata === "object" ? payload.metadata : {}); }),
-        createWindow: m(async (payload) => { await createAdditionalWindow(payload ? { x: Number(payload.offset?.x || 0), y: Number(payload.offset?.y || 0) } : undefined); }),
-        hideWorkspace: m(async () => { await hideCurrentWorkspaceWindows(); }),
-        // No-ops
-        track: m(() => {}),
-        installUpdateNow: m(() => {}),
-        addToken: m(() => {}),
-        deleteToken: m(() => {}),
-        syncDevlink: m(() => {}),
+  hostWindowIds.add(windowId);
+  post({
+    type: "action",
+    action: "window-create",
+    payload: {
+      windowId,
+      options: {
+        hidden: false,
+        title: nextTitle,
+        url: "views://lens/index.html",
+        titleBarStyle: "hiddenInset",
+        frame: {
+          x: bunnyWindow?.position.x ?? 120,
+          y: bunnyWindow?.position.y ?? 120,
+          width: bunnyWindow?.position.width ?? 1400,
+          height: bunnyWindow?.position.height ?? 920,
+        },
       },
     },
   });
-
-  const carrotDir = app.currentDir || (globalThis as any).__bunnyCarrotBootstrap?.context?.currentDir || "";
-
-  const win = new BrowserWindow({
-    title: title || runtimeWindow.title,
-    url: "views://lens/index.html",
-    viewsRoot: carrotDir || undefined,
-    titleBarStyle: "hiddenInset",
-    rpc,
-    frame: {
-      x: bunnyWindow?.position.x ?? 120,
-      y: bunnyWindow?.position.y ?? 120,
-      width: bunnyWindow?.position.width ?? 1400,
-      height: bunnyWindow?.position.height ?? 920,
-    },
-  });
-  browserWindows.set(windowId, win);
-
-  win.on("move", (event: any) => {
-    updateBunnyWindowFrame(windowId, {
-      x: typeof event?.data?.x === "number" ? event.data.x : undefined,
-      y: typeof event?.data?.y === "number" ? event.data.y : undefined,
-    });
-    schedulePersistWindowFrame(windowId);
-  });
-
-  win.on("resize", (event: any) => {
-    updateBunnyWindowFrame(windowId, {
-      x: typeof event?.data?.x === "number" ? event.data.x : undefined,
-      y: typeof event?.data?.y === "number" ? event.data.y : undefined,
-      width: typeof event?.data?.width === "number" ? event.data.width : undefined,
-      height: typeof event?.data?.height === "number" ? event.data.height : undefined,
-    });
-    schedulePersistWindowFrame(windowId);
-  });
-
-  win.on("close", () => {
-    log(`browser window close event: ${windowId}`);
-    void handleHostWindowClosed(windowId);
-  });
-
-  return win;
 }
 
 function focusWindow(windowId?: string, title?: string) {
-  getOrCreateBrowserWindow(windowId, title).focus();
+  const targetWindowId = windowId || state.currentWindowId;
+  ensureHostDashWindow(targetWindowId, title);
+  hostWindowIds.add(targetWindowId);
+  post({
+    type: "action",
+    action: "focus-window",
+    payload: { windowId: targetWindowId, title },
+  });
 }
 
 function closeWindow(windowId?: string) {
   const targetWindowId = windowId || state.currentWindowId;
-  const existing = browserWindows.get(targetWindowId);
-  if (!existing) {
+  if (!hostWindowIds.has(targetWindowId)) {
     return;
   }
-  browserWindows.delete(targetWindowId);
-  existing.close();
+  hostWindowIds.delete(targetWindowId);
+  post({
+    type: "action",
+    action: "close-window",
+    payload: { windowId: targetWindowId },
+  });
 }
 
 function stopCarrot() {
@@ -1395,7 +1030,10 @@ function openAboutWindow(url: string) {
       y: 120,
     },
   });
-  browserWindows.set(id, win);
+  auxiliaryWindows.set(id, win);
+  win.on("close", () => {
+    auxiliaryWindows.delete(id);
+  });
 }
 
 function sendToFocusedDashWindow(name: string, payload?: unknown) {
@@ -1408,15 +1046,6 @@ function sendToDashWindow(windowId: string | undefined, name: string, payload?: 
 
 function sendRuntimeEventToDashWindow(windowId: string | undefined, name: string, payload?: unknown) {
   const targetWindowId = windowId || state.currentWindowId;
-  const existing = browserWindows.get(targetWindowId);
-  if (existing) {
-    try {
-      (existing.webview?.rpc as any)?.send?.[name]?.(payload);
-    } catch (err) {
-      // View may not be ready yet
-    }
-  }
-  // Also send via postMessage for Hop remote browsers
   post({ type: "action", action: "emit-view", payload: { name, payload, raw: true, windowId: targetWindowId } });
 }
 
@@ -1424,7 +1053,7 @@ function broadcastRuntimeEventToDashWindows(name: string, payload?: unknown) {
   post({
     type: "action",
     action: "emit-view",
-    payload: { raw: false, name, payload },
+    payload: { raw: true, name, payload },
   });
 }
 
@@ -1586,6 +1215,14 @@ async function handleContextMenuAction(action: string, data: any) {
         return;
       }
       await invokeGitCarrot("initGit", { repoRoot: nodePath }, { windowId });
+      handleFsFileWatchEvent({
+        absolutePath: join(nodePath, ".git"),
+        exists: true,
+        isDelete: false,
+        isAdding: true,
+        isFile: false,
+        isDir: true,
+      });
       return;
     }
     case "copy_path_to_clipboard":
@@ -1981,11 +1618,7 @@ app.on("auth-token-cleared", () => {
 
 function broadcastAppSettings() {
   const settings = bunnyDashState.appSettings || defaultBunnyAppSettings;
-  for (const [_id, win] of browserWindows) {
-    try {
-      (win.webview?.rpc as any)?.send?.appSettingsChanged?.({ appSettings: settings });
-    } catch {}
-  }
+  broadcastRuntimeEventToDashWindows("appSettingsChanged", { appSettings: settings });
 }
 
 async function syncAuthFromEars() {
@@ -2670,80 +2303,7 @@ function bunnyPeerDependencies() {
 
 function emitViewMessage(name: string, payload?: unknown, windowId?: string) {
   const targetWindowId = windowId || state.currentWindowId;
-  const existing = browserWindows.get(targetWindowId);
-  if (existing) {
-    try {
-      (existing.webview?.rpc as any)?.send?.[name]?.(payload);
-    } catch (err) {
-      // View may not be ready yet
-    }
-  }
-  // Also send via postMessage for Hop remote browsers
   post({ type: "action", action: "emit-view", payload: { name, payload, raw: true, windowId: targetWindowId } });
-}
-
-function handlePtyTerminalOutput(payload: unknown) {
-  const eventPayload =
-    payload && typeof payload === "object"
-      ? (payload as {
-          terminalId?: string;
-          data?: string;
-          windowId?: string | null;
-        })
-      : {};
-  const terminalId = String(eventPayload.terminalId || "");
-  if (!terminalId) {
-    return;
-  }
-
-  const targetWindowId =
-    typeof eventPayload.windowId === "string" && eventPayload.windowId.length > 0
-      ? eventPayload.windowId
-      : terminalWindowOwners.get(terminalId);
-  if (targetWindowId) {
-    terminalWindowOwners.set(terminalId, targetWindowId);
-  }
-
-  emitViewMessage(
-    "terminalOutput",
-    {
-      terminalId,
-      data: String(eventPayload.data || ""),
-    },
-    targetWindowId,
-  );
-}
-
-function handlePtyTerminalExit(payload: unknown) {
-  const eventPayload =
-    payload && typeof payload === "object"
-      ? (payload as {
-          terminalId?: string;
-          exitCode?: number;
-          signal?: number;
-          windowId?: string | null;
-        })
-      : {};
-  const terminalId = String(eventPayload.terminalId || "");
-  if (!terminalId) {
-    return;
-  }
-
-  const targetWindowId =
-    typeof eventPayload.windowId === "string" && eventPayload.windowId.length > 0
-      ? eventPayload.windowId
-      : terminalWindowOwners.get(terminalId);
-  emitViewMessage(
-    "terminalExit",
-    {
-      terminalId,
-      exitCode: Number(eventPayload.exitCode || 0),
-      signal: Number(eventPayload.signal || 0),
-    },
-    targetWindowId,
-  );
-  log(`PTY carrot terminal exited ${terminalId}`);
-  terminalWindowOwners.delete(terminalId);
 }
 
 async function killTerminalSession(terminalId: string) {
@@ -3076,9 +2636,6 @@ function handleTsServerMessage(payload: unknown) {
     },
   });
 }
-
-app.on("pty-terminal-output", handlePtyTerminalOutput);
-app.on("pty-terminal-exit", handlePtyTerminalExit);
 
 function emitSetProjectsForWindow(windowId: string) {
   const runtimeWindow = runtimeWindows.find((window) => window.id === windowId);
@@ -3870,12 +3427,6 @@ function snapshot(): Snapshot {
 
 function emitSnapshot() {
   const data = snapshot();
-  for (const [_id, win] of browserWindows) {
-    try {
-      (win.webview?.rpc as any)?.send?.snapshot?.(data);
-    } catch {}
-  }
-  // Also send via postMessage for Hop remote browsers
   post({ type: "action", action: "emit-view", payload: { name: "snapshot", payload: data, raw: true } });
 }
 
@@ -3977,7 +3528,7 @@ async function saveState() {
 
 async function handleHostWindowClosed(closedWindowId: string) {
   const closedRuntimeWindow = runtimeWindows.find((window) => window.id === closedWindowId);
-  browserWindows.delete(closedWindowId);
+  hostWindowIds.delete(closedWindowId);
   await closeTsServerEditorsForWindow(closedWindowId, closedRuntimeWindow?.workspaceId);
   await killTerminalsForWindow(closedWindowId);
   removeBunnyWindowFromAllWorkspaces(closedWindowId);
@@ -4195,6 +3746,23 @@ function updateBunnyWindowFrame(
   );
 }
 
+function syncHostDashWindowPresentation(
+  windowId: string,
+  title: string,
+  frame: { x: number; y: number; width: number; height: number },
+) {
+  post({
+    type: "action",
+    action: "window-set-title",
+    payload: { windowId, title },
+  });
+  post({
+    type: "action",
+    action: "window-set-frame",
+    payload: { windowId, frame },
+  });
+}
+
 function schedulePersistWindowFrame(windowId: string) {
   const existing = framePersistTimers.get(windowId);
   if (existing) {
@@ -4253,16 +3821,12 @@ async function restoreLensInCurrentWindow(lensId: string) {
     currentWindow.id,
     restoredWindow.workspaceId,
   );
-  const existingBrowserWindow = browserWindows.get(currentWindow.id);
-  if (existingBrowserWindow) {
-    existingBrowserWindow.setTitle(restoredWindow.title);
-    existingBrowserWindow.setFrame(
-      restoredBunnyWindow.position.x,
-      restoredBunnyWindow.position.y,
-      restoredBunnyWindow.position.width,
-      restoredBunnyWindow.position.height,
-    );
-  }
+  syncHostDashWindowPresentation(currentWindow.id, restoredWindow.title, {
+    x: restoredBunnyWindow.position.x,
+    y: restoredBunnyWindow.position.y,
+    width: restoredBunnyWindow.position.width,
+    height: restoredBunnyWindow.position.height,
+  });
   state.currentLayoutId = lens.key;
   state.commandPaletteOpen = false;
   state.commandQuery = "";
@@ -4317,10 +3881,10 @@ function getPreferredWorkspaceIdForDashOpen() {
 
 async function openDashWindow() {
   log(
-    `openDashWindow runtimeWindows=${runtimeWindows.length} browserWindows=${browserWindows.size} currentWindow=${state.currentWindowId}`,
+    `openDashWindow runtimeWindows=${runtimeWindows.length} hostWindows=${hostWindowIds.size} currentWindow=${state.currentWindowId}`,
   );
 
-  if (runtimeWindows.length > 0 && browserWindows.size === 0) {
+  if (runtimeWindows.length > 0 && hostWindowIds.size === 0) {
     log(`openDashWindow restoring ${runtimeWindows.length} snapshot window(s)`);
     await restoreCurrentState();
     return snapshot();
@@ -4387,7 +3951,7 @@ async function openLens(lensId: string) {
 
 async function restoreCurrentState() {
   log(
-    `restoreCurrentState begin runtimeWindows=${runtimeWindows.length} browserWindows=${browserWindows.size}`,
+    `restoreCurrentState begin runtimeWindows=${runtimeWindows.length} hostWindows=${hostWindowIds.size}`,
   );
   for (const runtimeWindow of runtimeWindows) {
     await closeTsServerEditorsForWindow(runtimeWindow.id, runtimeWindow.workspaceId);
@@ -4414,8 +3978,8 @@ async function restoreCurrentState() {
   emitSnapshot();
   if (runtimeWindows.length > 0) {
     for (const runtimeWindow of runtimeWindows) {
-      log(`restoreCurrentState creating browser window ${runtimeWindow.id}`);
-      getOrCreateBrowserWindow(runtimeWindow.id, runtimeWindow.title);
+      log(`restoreCurrentState creating host window ${runtimeWindow.id}`);
+      ensureHostDashWindow(runtimeWindow.id, runtimeWindow.title);
     }
     focusWindow(state.currentWindowId, getCurrentWindow().title);
   }
@@ -4862,16 +4426,12 @@ async function deleteLens(lensId: string) {
       runtimeWindow.id,
       restoredWindow.workspaceId,
     );
-    const existingBrowserWindow = browserWindows.get(runtimeWindow.id);
-    if (existingBrowserWindow) {
-      existingBrowserWindow.setTitle(restoredWindow.title);
-      existingBrowserWindow.setFrame(
-        restoredBunnyWindow.position.x,
-        restoredBunnyWindow.position.y,
-        restoredBunnyWindow.position.width,
-        restoredBunnyWindow.position.height,
-      );
-    }
+    syncHostDashWindowPresentation(runtimeWindow.id, restoredWindow.title, {
+      x: restoredBunnyWindow.position.x,
+      y: restoredBunnyWindow.position.y,
+      width: restoredBunnyWindow.position.width,
+      height: restoredBunnyWindow.position.height,
+    });
   }
 
   ensureDb().collection("layouts").remove(lens.id);
@@ -5311,52 +4871,18 @@ async function handleBunnyDashRequest(method: string, params: any) {
       return invokeFsCarrot<boolean>("cancelFindAll", {}, {
         windowId: getCurrentWindow().id,
       });
-    case "gitShow":
-    case "gitCommit":
-    case "gitCommitAmend":
-    case "gitAdd":
-    case "gitLog":
-    case "gitStatus":
-    case "gitDiff":
-    case "gitCheckout":
-    case "gitCheckIsRepoRoot":
-    case "gitCheckIsRepoInTree":
-    case "gitRevParse":
-    case "gitReset":
-    case "gitRevert":
-    case "gitApply":
-    case "gitStageHunkFromPatch":
-    case "gitStageSpecificLines":
-    case "gitStageMonacoChange":
-    case "gitUnstageMonacoChange":
-    case "gitCreatePatchFromLines":
-    case "gitStashList":
-    case "gitStashCreate":
-    case "gitStashApply":
-    case "gitStashPop":
-    case "gitStashShow":
-    case "gitRemote":
-    case "gitAddRemote":
-    case "gitFetch":
-    case "gitPull":
-    case "gitPush":
-    case "gitBranch":
-    case "gitCheckoutBranch":
-    case "gitLogRemoteOnly":
-    case "gitClone":
-    case "gitValidateUrl":
-    case "getGitConfig":
-    case "setGitConfig":
-    case "checkGitHubCredentials":
-    case "storeGitHubCredentials":
-    case "removeGitHubCredentials":
-    case "gitCreateBranch":
-    case "gitDeleteBranch":
-    case "gitTrackRemoteBranch":
-    case "initGit":
-      return invokeGitCarrot(method, params, {
-        windowId: getCurrentWindow().id,
-      });
+    case "invokeCarrot":
+      return Carrots.invoke(
+        String(params?.carrotId || ""),
+        String(params?.method || ""),
+        params?.params,
+        {
+          windowId:
+            typeof params?.windowId === "string"
+              ? params.windowId
+              : getCurrentWindow().id,
+        },
+      );
     case "findFirstNestedGitRepo":
       return invokeFsCarrot<string | null>("findFirstNestedGitRepo", {
         searchPath: String(params?.searchPath || ""),
@@ -5636,8 +5162,28 @@ self.onmessage = async (event) => {
       return;
     }
 
+    if (message.name === "window-move" || message.name === "window-resize") {
+      const windowId = String(message.payload?.windowId || "");
+      if (!windowId) {
+        return;
+      }
+      hostWindowIds.add(windowId);
+      updateBunnyWindowFrame(windowId, {
+        x: typeof message.payload?.x === "number" ? message.payload.x : undefined,
+        y: typeof message.payload?.y === "number" ? message.payload.y : undefined,
+        width: typeof message.payload?.width === "number" ? message.payload.width : undefined,
+        height: typeof message.payload?.height === "number" ? message.payload.height : undefined,
+      });
+      schedulePersistWindowFrame(windowId);
+      return;
+    }
+
     if (message.name === "window-focus") {
-      setActiveWindow(String(message.payload?.windowId || ""));
+      const windowId = String(message.payload?.windowId || "");
+      if (windowId) {
+        hostWindowIds.add(windowId);
+      }
+      setActiveWindow(windowId);
       syncTray();
       emitSnapshot();
       return;

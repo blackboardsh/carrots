@@ -726,5 +726,45 @@ You are a helpful assistant with the following characteristics:
 
 export const electrobun = new Electroview({ rpc });
 
+export function invokeCarrot<T = unknown>(
+	carrotId: string,
+	method: string,
+	params?: unknown,
+	options?: { windowId?: string },
+) {
+	return electrobun.carrots.invoke<T>(carrotId, method, params, options);
+}
+
+export function invokeGitCarrot<T = unknown>(method: string, params?: unknown) {
+	return invokeCarrot<T>("bunny.git", method, params);
+}
+
+export function invokePtyCarrot<T = unknown>(method: string, params?: unknown) {
+	const requestProxy = (electrobun as any)?.rpc?.request;
+	if (requestProxy && typeof requestProxy.invokeCarrot === "function") {
+		return invokeCarrot<T>("bunny.pty", method, params);
+	}
+
+	switch (method) {
+		case "createTerminal":
+			return requestProxy?.createTerminal?.(params) as Promise<T>;
+		case "writeToTerminal":
+			return requestProxy?.writeToTerminal?.(params) as Promise<T>;
+		case "resizeTerminal":
+			return requestProxy?.resizeTerminal?.(params) as Promise<T>;
+		case "killTerminal":
+			return requestProxy?.killTerminal?.(params) as Promise<T>;
+		case "getTerminalCwd":
+			return requestProxy?.getTerminalCwd?.(params) as Promise<T>;
+		case "heartbeatTerminals":
+			if (typeof requestProxy?.heartbeatTerminals === "function") {
+				return requestProxy.heartbeatTerminals(params) as Promise<T>;
+			}
+			return Promise.resolve({ refreshedCount: 0 } as T);
+		default:
+			throw new Error(`Unsupported PTY carrot method fallback: ${method}`);
+	}
+}
+
 // Expose electrobun on window for web components (like bunny-terminal) to access
 (window as any).electrobun = electrobun;

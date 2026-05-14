@@ -11,7 +11,7 @@ import type {
 } from "../../shared/types/types";
 import { getNode } from "./FileWatcher";
 import { getSlateForNode } from "./files";
-import { electrobun } from "./init";
+import { electrobun, invokePtyCarrot } from "./init";
 import { trackFrontend } from "./analytics";
 
 // export type PreviewFileTreeType = FileTreeType<{
@@ -1178,9 +1178,9 @@ export const closeTab = (tabId: string) => {
       
       // If this is a terminal tab, kill the terminal process
       if (tab.type === "terminal" && tab.terminalId) {
-        electrobun.rpc?.request.killTerminal({
+        void invokePtyCarrot<boolean>("killTerminal", {
           terminalId: tab.terminalId,
-        });
+        }).catch(() => {});
       }
       
       const pane = getPaneWithId(_state, tab.paneId);

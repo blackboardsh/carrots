@@ -6,7 +6,9 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { SearchAddon } from "@xterm/addon-search";
-import { electrobun } from "../init";
+import { invokePtyCarrot } from "../init";
+
+const PTY_HEARTBEAT_INTERVAL_MS = 60 * 1000;
 
 export const TerminalSlate = ({ tabId }: { tabId: string }) => {
   const tab = () => getWindow()?.tabs[tabId] as TerminalTabType | undefined;
@@ -20,6 +22,7 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
   let webglAddon: WebglAddon | null = null;
   let searchAddon: SearchAddon | null = null;
   let cwdUpdateTimeout: ReturnType<typeof setTimeout> | null = null;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   const pendingTerminalOutput: Array<{ terminalId: string; data: string }> = [];
   const pendingTerminalExit: Array<{ terminalId: string; exitCode: number }> = [];
   const [showSearch, setShowSearch] = createSignal(false);
@@ -58,6 +61,22 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
     });
   };
 
+  const stopHeartbeat = () => {
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+  };
+
+  const startHeartbeat = (id: string) => {
+    stopHeartbeat();
+    heartbeatTimer = setInterval(() => {
+      void invokePtyCarrot("heartbeatTerminals", {
+        terminalIds: [id],
+      }).catch(() => {});
+    }, PTY_HEARTBEAT_INTERVAL_MS);
+  };
+
   // Function to update current directory from the terminal process (debounced)
   const updateCurrentDir = async () => {
     const id = terminalId();
@@ -66,7 +85,9 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
     }
 
     try {
-      const cwd = await electrobun.rpc?.request.getTerminalCwd({ terminalId: id });
+      const cwd = await invokePtyCarrot<string | null>("getTerminalCwd", {
+        terminalId: id,
+      });
 
       if (cwd && cwd !== currentDir()) {
         setCurrentDir(cwd);
@@ -174,10 +195,10 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
         if (event.key === 'Enter' && (event.metaKey || event.shiftKey) && !event.ctrlKey) {
           event.preventDefault();
           if (terminalId()) {
-            electrobun.rpc?.request.writeToTerminal({
+            void invokePtyCarrot<boolean>("writeToTerminal", {
               terminalId: terminalId()!,
               data: ' \\\n', // Backslash for line continuation, then newline
-            });
+            }).catch(() => {});
           }
           return false;
         }
@@ -188,10 +209,10 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
           terminal?.clear();
           // Also send clear command to the shell
           if (terminalId()) {
-            electrobun.rpc?.request.writeToTerminal({
+            void invokePtyCarrot<boolean>("writeToTerminal", {
               terminalId: terminalId()!,
               data: '\x0c', // Form feed character (clear screen)
-            });
+            }).catch(() => {});
           }
           return false;
         }
@@ -232,10 +253,10 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
       // Handle user input
       terminal.onData((data) => {
         if (terminalId()) {
-          electrobun.rpc?.request.writeToTerminal({
+          void invokePtyCarrot<boolean>("writeToTerminal", {
             terminalId: terminalId()!,
             data,
-          });
+          }).catch(() => {});
 
           // Check for cwd change after user presses Enter (debounced)
           if (data === '\r' || data === '\n') {
@@ -250,11 +271,11 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
       // Handle resize
       terminal.onResize(({ cols, rows }) => {
         if (terminalId()) {
-          electrobun.rpc?.request.resizeTerminal({
+          void invokePtyCarrot<boolean>("resizeTerminal", {
             terminalId: terminalId()!,
             cols,
             rows,
-          });
+          }).catch(() => {});
         }
       });
 
@@ -275,7 +296,7 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
 
       // Create terminal in bun process after listeners and xterm are ready.
       const requestedShell = _tab.cmd?.trim();
-      const id = await electrobun.rpc?.request.createTerminal({
+      const id = await invokePtyCarrot<string>("createTerminal", {
         cwd: _tab.cwd || "/",
         shell: requestedShell || undefined,
       });
@@ -286,6 +307,14 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
       }
 
       setTerminalId(id);
+      startHeartbeat(id);
+      if (terminal.cols > 0 && terminal.rows > 0) {
+        void invokePtyCarrot<boolean>("resizeTerminal", {
+          terminalId: id,
+          cols: terminal.cols,
+          rows: terminal.rows,
+        }).catch(() => {});
+      }
 
       for (const pending of pendingTerminalOutput.splice(0)) {
         if (pending.terminalId === id && terminal) {
@@ -334,10 +363,11 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
         pendingTerminalExit.push(data);
         return;
       }
-      if (data.terminalId === terminalId() && terminal) {
-        terminal.write(`\r\n\x1b[31mProcess exited with code ${data.exitCode}\x1b[0m\r\n`);
-      }
-    };
+        if (data.terminalId === terminalId() && terminal) {
+          stopHeartbeat();
+          terminal.write(`\r\n\x1b[31mProcess exited with code ${data.exitCode}\x1b[0m\r\n`);
+        }
+      };
 
     // Listen for terminal messages via CustomEvents
     window.addEventListener('terminalOutput', handleTerminalOutput as EventListener);
@@ -356,11 +386,13 @@ export const TerminalSlate = ({ tabId }: { tabId: string }) => {
         clearTimeout(cwdUpdateTimeout);
       }
 
+      stopHeartbeat();
+
       // Clean up terminal resources
       if (terminalId()) {
-        electrobun.rpc?.request.killTerminal({
+        void invokePtyCarrot<boolean>("killTerminal", {
           terminalId: terminalId()!,
-        });
+        }).catch(() => {});
       }
       terminal?.dispose();
       fitAddon?.dispose();

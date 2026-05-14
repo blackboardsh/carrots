@@ -1,4 +1,3 @@
-import { Carrots } from "electrobun/bun";
 import { TerminalManager, type TerminalMessage } from "./terminalManager";
 
 type InvocationSource = {
@@ -100,6 +99,25 @@ function extractSource(params: { __source?: InvocationSource } | null | undefine
   };
 }
 
+function emitToCarrotView(
+  carrotId: string,
+  name: string,
+  payload?: unknown,
+  options?: { windowId?: string | null },
+) {
+  post({
+    type: "action",
+    action: "emit-carrot-view-event",
+    payload: {
+      carrotId,
+      name,
+      payload,
+      raw: true,
+      windowId: options?.windowId ?? null,
+    },
+  });
+}
+
 function emitToOwner(message: TerminalMessage) {
   const owner = terminalOwners.get(message.terminalId);
   if (!owner) {
@@ -108,19 +126,21 @@ function emitToOwner(message: TerminalMessage) {
   }
 
   if (message.type === "terminalOutput") {
-    Carrots.emit(owner.carrotId, "pty-terminal-output", {
+    emitToCarrotView(owner.carrotId, "terminalOutput", {
       terminalId: message.terminalId,
       data: message.data,
+    }, {
       windowId: owner.windowId ?? null,
     });
     return;
   }
 
   if (message.type === "terminalExit") {
-    Carrots.emit(owner.carrotId, "pty-terminal-exit", {
+    emitToCarrotView(owner.carrotId, "terminalExit", {
       terminalId: message.terminalId,
       exitCode: message.exitCode,
       signal: message.signal ?? 0,
+    }, {
       windowId: owner.windowId ?? null,
     });
     log(`terminal exited ${message.terminalId} for ${owner.carrotId}`);

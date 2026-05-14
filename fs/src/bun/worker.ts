@@ -590,7 +590,9 @@ function getNodeForPath(path: string) {
 
   if (stat.isDirectory()) {
     const children = readdirSync(path)
-      .filter((entry) => !isIgnoredPath(join(path, entry)))
+      // Keep .git visible as a special top-level slate target in Dash while
+      // still hiding its internals and other ignored filesystem noise.
+      .filter((entry) => entry === ".git" || !isIgnoredPath(join(path, entry)))
       .sort((left, right) => left.localeCompare(right));
     return {
       name,

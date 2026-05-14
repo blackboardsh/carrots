@@ -14,7 +14,7 @@ import { state, setState, openNewTabForNode } from "../store";
 import { getProjectForNodePath } from "../files";
 import type { CachedFileType } from "../../../shared/types/types";
 import { join } from "../../utils/pathUtils";
-import { electrobun } from "../init";
+import { electrobun, invokeGitCarrot } from "../init";
 import { Dialog } from "../components/Dialog";
 
 type FileChangeType = {
@@ -97,6 +97,8 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
   }
 
   const repoRootPath = node.path.replace(/\.git/, "");
+  const gitRequest = <T = unknown>(method: string, params?: unknown) =>
+    invokeGitCarrot<T>(method, params);
 
   let refreshLogAndStageTimeout: Timer;
 
@@ -217,8 +219,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       return content;
     } else if (commitRef === "INDEX") {
       // Special case: read from git index (staged version)
-      const content = await electrobun.rpc?.request
-        .gitShow({
+      const content = await gitRequest<string>("gitShow", {
           options: [`:${filepath}`], // :filename reads from index
           repoRoot: repoRootPath,
         })
@@ -226,8 +227,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       return content || "";
     } else if (commitRef !== "HEAD") {
       console.log('Reading from commit:', commitRef);
-      const content = await electrobun.rpc?.request
-        .gitShow({
+      const content = await gitRequest<string>("gitShow", {
           options: [`${commitRef}:${filepath}`],
           repoRoot: repoRootPath,
         })
@@ -239,8 +239,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
     } else {
       console.log('Reading from HEAD');
       // HEAD - get from git
-      const content = await electrobun.rpc?.request
-        .gitShow({
+      const content = await gitRequest<string>("gitShow", {
           options: [`HEAD:${filepath}`],
           repoRoot: repoRootPath,
         })
@@ -437,7 +436,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
 
     try {
       console.log('Creating branch:', branchName);
-      await electrobun.rpc?.request.gitCreateBranch({
+      await gitRequest("gitCreateBranch", {
         repoRoot: repoRootPath,
         branchName: branchName,
         options: []
@@ -501,7 +500,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
 
     try {
       console.log('Adding remote:', remoteName, remoteUrl);
-      await electrobun.rpc?.request.gitAddRemote({
+      await gitRequest("gitAddRemote", {
         repoRoot: repoRootPath,
         remoteName: remoteName,
         remoteUrl: remoteUrl
@@ -580,7 +579,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       
       // Perform git reset --soft HEAD~1 to undo the last commit
       // This moves HEAD back one commit while keeping changes in working tree
-      await electrobun.rpc?.request.gitReset({
+      await gitRequest("gitReset", {
         repoRoot: repoRootPath,
         options: ['--soft', 'HEAD~1']
       });
@@ -620,7 +619,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       console.log('Soft reverting commit:', commit.hash, commit.message);
       
       // Use git revert with --no-commit to stage the revert changes without committing
-      await electrobun.rpc?.request.gitRevert({
+      await gitRequest("gitRevert", {
         repoRoot: repoRootPath,
         commitHash: commit.hash,
         options: ['--no-commit']
@@ -642,7 +641,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       
       console.log('Staging all files:', unstagedFiles);
       
-      await electrobun.rpc?.request.gitAdd({
+      await gitRequest("gitAdd", {
         files: unstagedFiles,
         repoRoot: repoRootPath,
       });
@@ -663,7 +662,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       
       console.log('Unstaging all files:', stagedFiles);
       
-      await electrobun.rpc?.request.gitReset({
+      await gitRequest("gitReset", {
         repoRoot: repoRootPath,
         options: ['HEAD', '--', ...stagedFiles]
       });
@@ -724,12 +723,12 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
     if (numPendingChanges) {
       if (isAmend) {
         // For amend, we use git commit --amend
-        await electrobun.rpc?.request.gitCommitAmend({
+        await gitRequest("gitCommitAmend", {
           msg: commitMessage,
           repoRoot: repoRootPath,
         });
       } else {
-        await electrobun.rpc?.request.gitCommit({
+        await gitRequest("gitCommit", {
           msg: commitMessage,
           repoRoot: repoRootPath,
         });
@@ -745,26 +744,26 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
     }
     
     const [gitLog, gitStatus, shortStat, gitStashes, gitRemotes, gitBranches] = await Promise.all([
-      electrobun.rpc?.request.gitLog({
+      gitRequest("gitLog", {
         repoRoot: repoRootPath,
         options: ["--name-status"],
         limit: pagination.limit,
         skip: resetPagination ? 0 : pagination.offset,
       }),
-      electrobun.rpc?.request.gitStatus({
+      gitRequest("gitStatus", {
         repoRoot: repoRootPath,
       }),
-      electrobun.rpc?.request.gitDiff({
+      gitRequest("gitDiff", {
         repoRoot: repoRootPath,
         options: ["--shortstat", "HEAD"],
       }),
-      electrobun.rpc?.request.gitStashList({
+      gitRequest("gitStashList", {
         repoRoot: repoRootPath,
       }),
-      electrobun.rpc?.request.gitRemote({
+      gitRequest("gitRemote", {
         repoRoot: repoRootPath,
       }),
-      electrobun.rpc?.request.gitBranch({
+      gitRequest("gitBranch", {
         repoRoot: repoRootPath,
         options: ["-a"], // Get all branches including remotes
       }),
@@ -774,7 +773,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
     let gitRemoteOnlyLog = { all: [] };
     if (gitStatus?.tracking && gitBranches?.current) {
       try {
-        gitRemoteOnlyLog = await electrobun.rpc?.request.gitLogRemoteOnly({
+        gitRemoteOnlyLog = await gitRequest("gitLogRemoteOnly", {
           repoRoot: repoRootPath,
           localBranch: gitBranches.current,
           remoteBranch: gitStatus.tracking,
@@ -1006,7 +1005,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
     setPagination('isLoading', true);
     
     try {
-      const gitLog = await electrobun.rpc?.request.gitLog({
+      const gitLog = await gitRequest("gitLog", {
         repoRoot: repoRootPath,
         options: ["--name-status"],
         limit: pagination.limit,
@@ -1060,7 +1059,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
 
   // Stage a file
   const stageFile = async (filePath: string) => {
-    await electrobun.rpc?.request.gitAdd({
+    await gitRequest("gitAdd", {
       files: [filePath],
       repoRoot: repoRootPath,
     });
@@ -1079,7 +1078,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
 
   // Unstage a file
   const unstageFile = async (filePath: string) => {
-    await electrobun.rpc?.request.gitReset({
+    await gitRequest("gitReset", {
       repoRoot: repoRootPath,
       options: ["--", filePath], // Remove from index, keep in working directory
     });
@@ -1126,7 +1125,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       // Check for undefined/null, not truthiness - empty string is valid for new files
       if (lineChange && originalText !== undefined && modifiedText !== undefined) {
         // Use the new Monaco-based staging approach
-        const result = await electrobun.rpc?.request.gitStageMonacoChange({
+        const result = await gitRequest("gitStageMonacoChange", {
           repoRoot: repoRootPath,
           filePath: filePath,
           originalContent: originalText,
@@ -1135,7 +1134,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
         });
       } else {
         // Fallback to the old approach if Monaco data is missing
-        const result = await electrobun.rpc?.request.gitStageSpecificLines({
+        const result = await gitRequest("gitStageSpecificLines", {
           repoRoot: repoRootPath,
           filePath: filePath,
           startLine: startLine,
@@ -1168,7 +1167,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       // Check for undefined/null, not truthiness - empty string is valid for new files
       if (lineChange && originalText !== undefined && stagedText !== undefined) {
         // Use the new Monaco-based unstaging approach
-        const result = await  electrobun.rpc?.request.gitUnstageMonacoChange({
+        const result = await gitRequest("gitUnstageMonacoChange", {
           repoRoot: repoRootPath,
           filePath: filePath,
           originalContent: originalText,  // HEAD version
@@ -1204,7 +1203,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       const message = stashMessage().trim() || "Stash from Bunny Dash";
       const options = includeUntracked() ? ["-u"] : [];
       
-      await electrobun.rpc?.request.gitStashCreate({
+      await gitRequest("gitStashCreate", {
         repoRoot: repoRootPath,
         message: message,
         options: options,
@@ -1223,7 +1222,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
 
   const applyStash = async (stashName: string) => {
     try {
-      await electrobun.rpc?.request.gitStashApply({
+      await gitRequest("gitStashApply", {
         repoRoot: repoRootPath,
         stashName: stashName,
       });
@@ -1235,7 +1234,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
 
   const popStash = async (stashName: string) => {
     try {
-      await electrobun.rpc?.request.gitStashPop({
+      await gitRequest("gitStashPop", {
         repoRoot: repoRootPath,
         stashName: stashName,
       });
@@ -1260,7 +1259,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
 
   const fetchStashFiles = async (stashName: string) => {
     try {
-      const stashContent = await electrobun.rpc?.request.gitStashShow({
+      const stashContent = await gitRequest<string>("gitStashShow", {
         repoRoot: repoRootPath,
         stashName: stashName,
       });
@@ -1489,7 +1488,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       dest: tempRootPath,
     });
 
-    await electrobun.rpc?.request.gitCheckout({
+    await gitRequest("gitCheckout", {
       repoRoot: tempRootPath,
       hash: commit.hash,
     });
@@ -1990,7 +1989,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
                     }}
                     onClick={async () => {
                       try {
-                        await electrobun.rpc?.request.gitFetch({
+                        await gitRequest("gitFetch", {
                           repoRoot: repoRootPath,
                           remote: undefined,
                           options: [],
@@ -2025,7 +2024,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
                     disabled={uiState.syncStatus?.behind === 0}
                     onClick={async () => {
                       try {
-                        await electrobun.rpc?.request.gitPull({
+                        await gitRequest("gitPull", {
                           repoRoot: repoRootPath,
                           remote: undefined,
                           branch: undefined,
@@ -2080,7 +2079,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
                           onConfirm: async () => {
                             setDialogOpen(false);
                             try {
-                              await electrobun.rpc?.request.gitPush({
+                              await gitRequest("gitPush", {
                                 repoRoot: repoRootPath,
                                 remote: undefined,
                                 branch: undefined,
@@ -2098,7 +2097,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
                       } else {
                         // Normal push
                         try {
-                          await electrobun.rpc?.request.gitPush({
+                          await gitRequest("gitPush", {
                             repoRoot: repoRootPath,
                             remote: undefined,
                             branch: undefined,
@@ -2331,7 +2330,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
                         onClick={async (e) => {
                           e.stopPropagation();
                           try {
-                            await electrobun.rpc?.request.gitCheckout({
+                            await gitRequest("gitCheckout", {
                               repoRoot: repoRootPath,
                               hash: commit.hash,
                             });
@@ -2776,7 +2775,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
                                 onClick={async (e) => {
                                   e.stopPropagation();
                                   try {
-                                    await electrobun.rpc?.request.gitPush({
+                                    await gitRequest("gitPush", {
                                       repoRoot: repoRootPath,
                                       remote: "origin",
                                       branch: branch,
@@ -2818,7 +2817,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
                                 onClick={async (e) => {
                                   e.stopPropagation();
                                   try {
-                                    await electrobun.rpc?.request.gitCheckoutBranch({
+                                    await gitRequest("gitCheckoutBranch", {
                                       repoRoot: repoRootPath,
                                       branch: branch,
                                       options: [],
@@ -2858,7 +2857,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
                                     onConfirm: async () => {
                                       setDialogOpen(false);
                                       try {
-                                        await electrobun.rpc?.request.gitDeleteBranch({
+                                        await gitRequest("gitDeleteBranch", {
                                           repoRoot: repoRootPath,
                                           branchName: branch,
                                           options: []
@@ -3286,7 +3285,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
                                               try {
                                                 if (hasLocalBranch) {
                                                   // Switch to existing local tracking branch
-                                                  await electrobun.rpc?.request.gitCheckoutBranch({
+                                                  await gitRequest("gitCheckoutBranch", {
                                                     repoRoot: repoRootPath,
                                                     branch: branchName,
                                                     options: [],
@@ -3294,7 +3293,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
                                                   console.log('Switched to local tracking branch, refreshing status...');
                                                 } else {
                                                   // Create and checkout a new local branch tracking the remote
-                                                  await electrobun.rpc?.request.gitTrackRemoteBranch({
+                                                  await gitRequest("gitTrackRemoteBranch", {
                                                     repoRoot: repoRootPath,
                                                     branchName: branchName,
                                                     remoteName: remote.name,
@@ -4059,4 +4058,3 @@ const FileListItem = ({
     </div>
   );
 };
-

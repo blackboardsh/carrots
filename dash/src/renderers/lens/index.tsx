@@ -17,7 +17,7 @@ import { render, untrack } from "solid-js/web";
 import "./FileWatcher";
 // import { Electroview } from "electrobun/view";
 // import { type WorkspaceRPC } from "./rpc";
-import { electrobun } from "./init";
+import { electrobun, invokeGitCarrot } from "./init";
 
 import {
 	//   createDevlinkFiles,
@@ -3271,8 +3271,7 @@ const NodeSettings = () => {
 				expandWhenReady();
 
 				// Clone the repository in the background (don't await)
-				electrobun.rpc?.request
-					.gitClone({
+				invokeGitCarrot("gitClone", {
 						repoPath: _previewNode.path,
 						gitUrl,
 						createMainBranch: shouldCreateMainBranch(),
@@ -3389,7 +3388,7 @@ const NodeSettings = () => {
 		setGitUrlValidation({ status: "validating" });
 
 		try {
-			const result = await electrobun.rpc?.request.gitValidateUrl({
+			const result = await invokeGitCarrot<any>("gitValidateUrl", {
 				gitUrl: url,
 			});
 			if (result?.valid) {

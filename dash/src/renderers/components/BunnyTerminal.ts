@@ -33,10 +33,21 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 
+const PTY_CARROT_ID = "bunny.pty";
+const PTY_HEARTBEAT_INTERVAL_MS = 60 * 1000;
+
 // We need to access electrobun RPC - it's set on window by the init script
 declare global {
   interface Window {
     electrobun?: {
+      carrots?: {
+        invoke: <T = unknown>(
+          carrotId: string,
+          method: string,
+          params?: unknown,
+          options?: { windowId?: string },
+        ) => Promise<T>;
+      };
       rpc?: {
         request: {
           createTerminal: (params: { cwd: string; shell?: string }) => Promise<string>;
@@ -49,6 +60,37 @@ declare global {
   }
 }
 
+async function invokePtyCarrot<T = unknown>(method: string, params?: unknown): Promise<T> {
+  const directInvoke = window.electrobun?.carrots?.invoke;
+  if (typeof directInvoke === "function") {
+    try {
+      return await directInvoke<T>(PTY_CARROT_ID, method, params);
+    } catch (error) {
+      if (!window.electrobun?.rpc?.request) {
+        throw error;
+      }
+    }
+  }
+
+  const requestProxy = window.electrobun?.rpc?.request;
+  switch (method) {
+    case "createTerminal":
+      return requestProxy?.createTerminal(params as { cwd: string; shell?: string }) as Promise<T>;
+    case "writeToTerminal":
+      return requestProxy?.writeToTerminal(
+        params as { terminalId: string; data: string },
+      ) as Promise<T>;
+    case "resizeTerminal":
+      return requestProxy?.resizeTerminal(
+        params as { terminalId: string; cols: number; rows: number },
+      ) as Promise<T>;
+    case "killTerminal":
+      return requestProxy?.killTerminal(params as { terminalId: string }) as Promise<T>;
+    default:
+      throw new Error(`Unsupported PTY carrot method fallback: ${method}`);
+  }
+}
+
 export class BunnyTerminal extends HTMLElement {
   private terminal: Terminal | null = null;
   private fitAddon: FitAddon | null = null;
@@ -56,6 +98,7 @@ export class BunnyTerminal extends HTMLElement {
   private resizeObserver: ResizeObserver | null = null;
   private container: HTMLDivElement | null = null;
   private isInitialized = false;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
   // Command queue - commands are queued until terminal is ready
   private commandQueue: string[] = [];
@@ -274,6 +317,22 @@ export class BunnyTerminal extends HTMLElement {
     this.shadowRoot.appendChild(this.container);
   }
 
+  private stopHeartbeat() {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  private startHeartbeat(terminalId: string) {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      void invokePtyCarrot("heartbeatTerminals", {
+        terminalIds: [terminalId],
+      }).catch(() => {});
+    }, PTY_HEARTBEAT_INTERVAL_MS);
+  }
+
   private async initTerminal() {
     if (this.isInitialized || !this.container) return;
     this.isInitialized = true;
@@ -288,12 +347,12 @@ export class BunnyTerminal extends HTMLElement {
     try {
       // Create terminal in main process via RPC
       const electrobun = window.electrobun;
-      if (!electrobun?.rpc) {
-        console.error('[BunnyTerminal] electrobun RPC not available');
+      if (!electrobun?.carrots?.invoke && !electrobun?.rpc) {
+        console.error('[BunnyTerminal] electrobun runtime not available');
         return;
       }
 
-      const terminalId = await electrobun.rpc.request.createTerminal({
+      const terminalId = await invokePtyCarrot<string>("createTerminal", {
         cwd,
         shell,
       });
@@ -304,6 +363,7 @@ export class BunnyTerminal extends HTMLElement {
       }
 
       this.terminalId = terminalId;
+      this.startHeartbeat(terminalId);
 
       // Create xterm instance
       this.terminal = new Terminal({
@@ -374,26 +434,33 @@ export class BunnyTerminal extends HTMLElement {
       // Fit after a short delay to ensure container has dimensions
       requestAnimationFrame(() => {
         this.fitAddon?.fit();
+        if (this.terminalId && this.terminal && this.terminal.cols > 0 && this.terminal.rows > 0) {
+          void invokePtyCarrot<boolean>("resizeTerminal", {
+            terminalId: this.terminalId,
+            cols: this.terminal.cols,
+            rows: this.terminal.rows,
+          }).catch(() => {});
+        }
       });
 
       // Handle user input
       this.terminal.onData((data) => {
         if (this.terminalId) {
-          electrobun.rpc?.request.writeToTerminal({
+          void invokePtyCarrot<boolean>("writeToTerminal", {
             terminalId: this.terminalId,
             data,
-          });
+          }).catch(() => {});
         }
       });
 
       // Handle resize
       this.terminal.onResize(({ cols, rows }) => {
         if (this.terminalId) {
-          electrobun.rpc?.request.resizeTerminal({
+          void invokePtyCarrot<boolean>("resizeTerminal", {
             terminalId: this.terminalId,
             cols,
             rows,
-          });
+          }).catch(() => {});
         }
       });
 
@@ -419,6 +486,7 @@ export class BunnyTerminal extends HTMLElement {
       this.boundHandleExit = (event: Event) => {
         const customEvent = event as CustomEvent<{ terminalId: string; exitCode: number }>;
         if (customEvent.detail.terminalId === this.terminalId) {
+          this.stopHeartbeat();
           this.terminal?.write(`\r\n\x1b[90mProcess exited with code ${customEvent.detail.exitCode}\x1b[0m\r\n`);
           this.dispatchEvent(new CustomEvent('terminal-exit', {
             detail: { exitCode: customEvent.detail.exitCode },
@@ -451,8 +519,8 @@ export class BunnyTerminal extends HTMLElement {
 
     while (this.commandQueue.length > 0) {
       const command = this.commandQueue.shift();
-      if (command && window.electrobun?.rpc) {
-        await window.electrobun.rpc.request.writeToTerminal({
+      if (command && this.terminalId) {
+        await invokePtyCarrot<boolean>("writeToTerminal", {
           terminalId: this.terminalId,
           data: command,
         });
@@ -471,9 +539,11 @@ export class BunnyTerminal extends HTMLElement {
       window.removeEventListener('terminalExit', this.boundHandleExit);
     }
 
+    this.stopHeartbeat();
+
     // Kill terminal process
-    if (this.terminalId && window.electrobun?.rpc) {
-      window.electrobun.rpc.request.killTerminal({ terminalId: this.terminalId });
+    if (this.terminalId) {
+      void invokePtyCarrot<boolean>("killTerminal", { terminalId: this.terminalId }).catch(() => {});
     }
 
     // Cleanup observers
@@ -516,8 +586,9 @@ export class BunnyTerminal extends HTMLElement {
 
   /** Kill the terminal process */
   kill() {
-    if (this.terminalId && window.electrobun?.rpc) {
-      window.electrobun.rpc.request.killTerminal({ terminalId: this.terminalId });
+    if (this.terminalId) {
+      this.stopHeartbeat();
+      void invokePtyCarrot<boolean>("killTerminal", { terminalId: this.terminalId }).catch(() => {});
     }
   }
 

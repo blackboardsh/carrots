@@ -10,7 +10,7 @@ import {
   SettingsPaneFormSection,
   SettingsPaneField,
 } from "./forms";
-import { electrobun } from "../init";
+import { electrobun, invokeGitCarrot } from "../init";
 
 export const GitHubSettings = (): JSXElement => {
   const [statusMessage, setStatusMessage] = createSignal<string>("");
@@ -43,14 +43,14 @@ export const GitHubSettings = (): JSXElement => {
   onMount(async () => {
     // Fetch git config and credential status
     try {
-      const config = await electrobun.rpc?.request.getGitConfig();
+      const config = await invokeGitCarrot<any>("getGitConfig");
       if (config) {
         setGitName(config.name);
         setGitEmail(config.email);
         setHasKeychainHelper(config.hasKeychainHelper);
       }
 
-      const credentials = await electrobun.rpc?.request.checkGitHubCredentials();
+      const credentials = await invokeGitCarrot<any>("checkGitHubCredentials");
       if (credentials) {
         setKeychainCredentials(credentials);
         if (credentials.username) {
@@ -116,7 +116,7 @@ export const GitHubSettings = (): JSXElement => {
 
   const saveIdentity = async () => {
     try {
-      await electrobun.rpc?.request.setGitConfig({
+      await invokeGitCarrot("setGitConfig", {
         name: gitName(),
         email: gitEmail(),
       });
@@ -145,7 +145,7 @@ export const GitHubSettings = (): JSXElement => {
     // Store in keychain for push/pull
     if (hasKeychainHelper()) {
       try {
-        await electrobun.rpc?.request.storeGitHubCredentials({
+        await invokeGitCarrot("storeGitHubCredentials", {
           username: username,
           token: token,
         });
@@ -164,7 +164,7 @@ export const GitHubSettings = (): JSXElement => {
     try {
       // Remove from keychain
       if (hasKeychainHelper()) {
-        await electrobun.rpc?.request.removeGitHubCredentials();
+        await invokeGitCarrot("removeGitHubCredentials");
         setKeychainCredentials({ hasCredentials: false });
       }
 

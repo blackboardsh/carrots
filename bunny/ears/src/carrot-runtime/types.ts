@@ -168,6 +168,7 @@ export type HostActionMessage = {
     | "open-manager"
     | "stop-carrot"
     | "emit-view"
+    | "emit-carrot-view-event"
     | "emit-carrot-event"
     | "log";
   payload?: unknown;
@@ -223,6 +224,15 @@ export type CarrotViewRPC = {
     requests: {
       invoke: {
         params: { method: string; params?: unknown };
+        response: unknown;
+      };
+      invokeCarrot: {
+        params: {
+          carrotId: string;
+          method: string;
+          params?: unknown;
+          windowId?: string;
+        };
         response: unknown;
       };
     };

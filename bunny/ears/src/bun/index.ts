@@ -389,7 +389,7 @@ class CarrotInstance {
 
     const existing = this.controllerWindows.get(windowId);
     if (existing) {
-      existing.focus();
+      existing.activate();
       return;
     }
 
@@ -401,7 +401,7 @@ class CarrotInstance {
       hidden: false,
       title: options?.title,
     });
-    this.controllerWindows.get(windowId)?.focus();
+    this.controllerWindows.get(windowId)?.activate();
   }
 
   async closeWindow(windowId = this.getPrimaryControllerWindowId()) {
@@ -456,6 +456,59 @@ class CarrotInstance {
     runtime.notifyDashboardChanged();
   }
 
+  emitViewMessage(
+    name: string,
+    payload?: unknown,
+    options?: {
+      raw?: boolean;
+      windowId?: string;
+    },
+  ) {
+    const targets = options?.windowId
+      ? [this.controllerWindows.get(options.windowId)].filter(Boolean)
+      : Array.from(this.controllerWindows.values());
+
+    if (options?.raw) {
+      for (const target of targets) {
+        (target?.webview.rpc as any)?.send?.[name]?.(payload);
+      }
+    } else {
+      for (const target of targets) {
+        (target?.webview.rpc as any)?.send?.runtimeEvent({ name, payload });
+      }
+    }
+
+    for (const client of this.webClients.values()) {
+      try {
+        client.send(JSON.stringify({
+          type: "message",
+          name,
+          payload,
+        }));
+      } catch {}
+    }
+
+    if (runtime.hopWs && this.hopBrowserIds.size > 0) {
+      for (const browserId of this.hopBrowserIds) {
+        try {
+          runtime.hopWs.send(JSON.stringify({
+            browserId,
+            payload: {
+              type: "message",
+              id: name,
+              payload,
+            },
+          }));
+        } catch (err) {
+          console.warn(
+            "[hop] Failed to forward view message:",
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+    }
+  }
+
   private createControllerWindow(
     windowId = "main",
     options?: {
@@ -483,6 +536,14 @@ class CarrotInstance {
       handlers: {
         requests: {
           invoke: async ({ method, params }) => this.invoke(method, params, windowId),
+          invokeCarrot: async (payload) =>
+            (runtime as any).invokeCarrotFrom(
+              this.carrot.manifest.id,
+              String(payload?.carrotId || ""),
+              String(payload?.method || ""),
+              payload?.params,
+              typeof payload?.windowId === "string" ? payload.windowId : windowId,
+            ),
           _: async (method, params) => this.invoke(String(method), params, windowId),
         },
         messages: {
@@ -952,50 +1013,34 @@ class CarrotInstance {
           raw?: boolean;
           windowId?: string;
         };
-        const targets = eventPayload.windowId
-          ? [this.controllerWindows.get(eventPayload.windowId)].filter(Boolean)
-          : Array.from(this.controllerWindows.values());
-        if (eventPayload.raw) {
-          for (const target of targets) {
-            (target?.webview.rpc as any)?.send?.[eventPayload.name]?.(eventPayload.payload);
-          }
-        } else {
-          for (const target of targets) {
-            (target?.webview.rpc as any)?.send?.runtimeEvent(eventPayload);
-          }
-        }
-        // Also forward to all WebSocket clients — web clients mirror the
-        // primary window so they receive all view messages.
-        for (const client of this.webClients.values()) {
-          try {
-            client.send(JSON.stringify({
-              type: "message",
-              name: eventPayload.name,
-              payload: eventPayload.payload,
-            }));
-          } catch {}
-        }
-
-        // Forward to Hop remote browsers (using electrobun RPC message format)
-        if (runtime.hopWs && this.hopBrowserIds.size > 0) {
-          for (const browserId of this.hopBrowserIds) {
-            try {
-              runtime.hopWs.send(JSON.stringify({
-                browserId,
-                payload: {
-                  type: "message",
-                  id: eventPayload.name,
-                  payload: eventPayload.payload,
-                },
-              }));
-            } catch (err) {
-              console.warn(
-                "[hop] Failed to forward view message:",
-                err instanceof Error ? err.message : err,
-              );
-            }
-          }
-        }
+        this.emitViewMessage(eventPayload.name, eventPayload.payload, {
+          raw: Boolean(eventPayload.raw),
+          windowId: eventPayload.windowId,
+        });
+        break;
+      }
+      case "emit-carrot-view-event": {
+        const eventPayload =
+          payload && typeof payload === "object"
+            ? (payload as {
+                carrotId?: string;
+                name?: string;
+                payload?: unknown;
+                raw?: boolean;
+                windowId?: string | null;
+              })
+            : {};
+        (runtime as any).emitCarrotViewEventFrom(
+          this.carrot.manifest.id,
+          String(eventPayload.carrotId || ""),
+          String(eventPayload.name || ""),
+          eventPayload.payload,
+          {
+            raw: Boolean(eventPayload.raw),
+            windowId:
+              typeof eventPayload.windowId === "string" ? eventPayload.windowId : undefined,
+          },
+        );
         break;
       }
       case "emit-carrot-event": {
@@ -2171,9 +2216,18 @@ class BunnyEarsRuntime {
 
               if (msg.type === "request") {
                 try {
-                  // Don't pass a windowId — let the worker use its current
-                  // window so the request is processed in the right context.
-                  const result = await dashCarrot.invoke(msg.method, msg.params);
+                  const result =
+                    msg.method === "invokeCarrot"
+                      ? await self.invokeCarrotFrom(
+                          "bunny-dash",
+                          String(msg?.params?.carrotId || ""),
+                          String(msg?.params?.method || ""),
+                          msg?.params?.params,
+                          typeof msg?.params?.windowId === "string"
+                            ? msg.params.windowId
+                            : undefined,
+                        )
+                      : await dashCarrot.invoke(msg.method, msg.params);
                   ws.send(JSON.stringify({
                     type: "response",
                     id: msg.id,
@@ -2349,6 +2403,27 @@ class BunnyEarsRuntime {
     }
 
     target.sendEvent(name, this.withSourceEnvelope(sourceCarrotId, undefined, payload));
+  }
+
+  emitCarrotViewEventFrom(
+    _sourceCarrotId: string,
+    targetCarrotId: string,
+    name: string,
+    payload?: unknown,
+    options?: {
+      raw?: boolean;
+      windowId?: string;
+    },
+  ) {
+    if (!targetCarrotId || !name) {
+      return;
+    }
+
+    const target = this.carrots.get(targetCarrotId);
+    if (!target) {
+      return;
+    }
+    target.emitViewMessage(name, payload, options);
   }
 
   buildTrayMenu() {
