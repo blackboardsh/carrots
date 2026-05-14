@@ -520,6 +520,7 @@ function initCloudApi(): CloudApi | null {
         bunnyDashState.appSettings.bunnyCloud.accessToken = tokens.accessToken;
         bunnyDashState.appSettings.bunnyCloud.refreshToken = tokens.refreshToken;
         writePersistedDashState().catch(() => {});
+        broadcastAppSettings();
       }
     },
   });
@@ -717,6 +718,7 @@ async function getBunnyCloudOverview(): Promise<BunnyCloudOverview> {
   if (user) {
     persistBunnyCloudUser(user);
     await writePersistedDashState().catch(() => {});
+    broadcastAppSettings();
   }
 
   const currentInstanceId = currentMachine.machineId

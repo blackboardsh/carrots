@@ -29,6 +29,14 @@ import { trackFrontend } from "./analytics";
 import {untrack} from "solid-js";
 import { registerBunnyTerminal } from "../components/BunnyTerminal";
 import { registerDashDiffEditor } from "../components/DashDiffEditor";
+import {
+  mergeAppSettingsForBoot,
+  mergeWorkspaceForBoot,
+  loadPersistedAppSettings,
+  loadPersistedWorkspaceState,
+  persistAppSettings,
+  persistWorkspaceState,
+} from "./localStateDb";
 // import { readSlateConfigFile } from "./files";
 
 // Register web components for plugins to use
@@ -90,7 +98,15 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
       },
       appSettingsChanged: ({ appSettings }: { appSettings: any }) => {
         if (appSettings) {
-          setState("appSettings", { ...state.appSettings, ...appSettings });
+          const nextAppSettings = mergeAppSettingsForBoot(
+            state.appSettings,
+            appSettings,
+            null,
+          );
+          setState("appSettings", nextAppSettings);
+          persistAppSettings(nextAppSettings).catch((error) => {
+            console.warn("Failed to persist app settings locally:", error);
+          });
         }
       },
       setProjects: ({ projects, tokens, workspace, appSettings, bunnyDash }) => {
@@ -127,8 +143,19 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
 	        setState("projects", projectsById || {});
 	        setState("tokens", tokens || []);
 	        if (appSettings) {
-	          setState("appSettings", { ...state.appSettings, ...appSettings });
+	          const nextAppSettings = mergeAppSettingsForBoot(
+	            state.appSettings,
+	            appSettings,
+	            null,
+	          );
+	          setState("appSettings", nextAppSettings);
+	          persistAppSettings(nextAppSettings).catch((error) => {
+	            console.warn("Failed to persist app settings locally:", error);
+	          });
 	        }
+          persistWorkspaceState(workspace).catch((error) => {
+            console.warn("Failed to persist workspace locally:", error);
+          });
 
         console.log("projects", state.projects);
       },
@@ -351,6 +378,17 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
           appSettings,
         } = response;
 
+        let persistedWorkspace = null;
+        let persistedAppSettings = null;
+        try {
+          [persistedWorkspace, persistedAppSettings] = await Promise.all([
+            loadPersistedWorkspaceState(workspace?.id || ""),
+            loadPersistedAppSettings(),
+          ]);
+        } catch (error) {
+          console.warn("Failed to refresh local Dash state from IndexedDB:", error);
+        }
+
         const projectsById = projects?.reduce(
           (acc: Record<string, ProjectType>, project: ProjectType) => {
             acc[project.id] = project;
@@ -359,20 +397,47 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
           {},
         );
 
+        const nextWorkspace = mergeWorkspaceForBoot(
+          workspace,
+          persistedWorkspace,
+        );
+        const nextAppSettings = mergeAppSettingsForBoot(
+          state.appSettings,
+          appSettings,
+          persistedAppSettings,
+        );
+
         setState({
           windowId,
           buildVars,
           paths,
           webBridgeOrigin: webBridgeOrigin || "",
           peerDependencies,
-          workspace,
+          workspace: nextWorkspace,
           bunnyDash,
           projects: projectsById || {},
           tokens: tokens || [],
-          appSettings: appSettings
-            ? { ...state.appSettings, ...appSettings }
-            : state.appSettings,
+          appSettings: nextAppSettings,
         });
+
+        try {
+          await persistWorkspaceState(nextWorkspace);
+          await persistAppSettings(nextAppSettings);
+        } catch (error) {
+          console.warn("Failed to persist refreshed local Dash state:", error);
+        }
+
+        if (persistedWorkspace) {
+          await electrobun.rpc?.request.syncWorkspace({
+            workspace: nextWorkspace,
+          });
+        }
+
+        if (persistedAppSettings) {
+          await electrobun.rpc?.request.syncAppSettings({
+            appSettings: nextAppSettings,
+          });
+        }
       },
       showNodeSettings: ({ nodePath }) => {
         const node = getNode(nodePath);

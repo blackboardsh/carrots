@@ -13,6 +13,10 @@ import { getNode } from "./FileWatcher";
 import { getSlateForNode } from "./files";
 import { electrobun, invokePtyCarrot } from "./init";
 import { trackFrontend } from "./analytics";
+import {
+  persistAppSettings,
+  persistWorkspaceState,
+} from "./localStateDb";
 
 // export type PreviewFileTreeType = FileTreeType<{
 //   isExpanded: boolean;
@@ -225,6 +229,11 @@ export const syncWorkspaceNow = async () => {
     pendingWorkspaceSyncTimer = null;
   }
 
+  try {
+    await persistWorkspaceState(unwrap(state.workspace));
+  } catch (error) {
+    console.warn("Failed to persist workspace locally:", error);
+  }
   await electrobun.rpc?.request.syncWorkspace({
     workspace: unwrap(state.workspace),
   });
@@ -243,6 +252,9 @@ export const updateSyncedState = () => {
 
 export const updateSyncedAppSettings = () => {
   setTimeout(() => {
+    persistAppSettings(unwrap(state.appSettings)).catch((error) => {
+      console.warn("Failed to persist app settings locally:", error);
+    });
     electrobun.rpc?.request.syncAppSettings({
       appSettings: unwrap(state.appSettings),
     });

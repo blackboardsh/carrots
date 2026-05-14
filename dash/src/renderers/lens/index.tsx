@@ -46,6 +46,14 @@ import {
 import { makeFileNameSafe } from "../../shared/utils/files";
 import "./index.css";
 import {
+	loadPersistedAppSettings,
+	loadPersistedWorkspaceState,
+	mergeAppSettingsForBoot,
+	mergeWorkspaceForBoot,
+	persistAppSettings,
+	persistWorkspaceState,
+} from "./localStateDb";
+import {
 	type AppState,
 	type FileTabType,
 	type LayoutContainerType,
@@ -482,7 +490,7 @@ const getInitialState = () => {
 	electrobun.rpc.request
 		.getInitialState()
 		.then(
-			({
+			async ({
 				windowId,
 				buildVars,
 				paths,
@@ -497,6 +505,17 @@ const getInitialState = () => {
 					"renderer getInitialState - received appSettings:",
 					appSettings,
 				);
+				let persistedWorkspace = null;
+				let persistedAppSettings = null;
+				try {
+					[persistedWorkspace, persistedAppSettings] = await Promise.all([
+						loadPersistedWorkspaceState(workspace?.id || ""),
+						loadPersistedAppSettings(),
+					]);
+				} catch (error) {
+					console.warn("Failed to load local Dash state from IndexedDB:", error);
+				}
+
 				// todo: this is duplicated in setProjects. should be a util, maybe in goldfish
 				const projectsById = projects?.reduce(
 					(acc: Record<string, ProjectType>, project: ProjectType) => {
@@ -506,20 +525,45 @@ const getInitialState = () => {
 					},
 					{},
 				);
+				const nextWorkspace = mergeWorkspaceForBoot(
+					workspace,
+					persistedWorkspace,
+				);
+				const nextAppSettings = mergeAppSettingsForBoot(
+					state.appSettings,
+					appSettings,
+					persistedAppSettings,
+				);
 				setState({
 					windowId,
 					buildVars,
 					paths,
 					peerDependencies,
-					workspace,
+					workspace: nextWorkspace,
 					bunnyDash,
 					projects: projectsById,
 					tokens,
-					// Merge appSettings from database with existing defaults
-					appSettings: appSettings
-						? { ...state.appSettings, ...appSettings }
-						: state.appSettings,
+					appSettings: nextAppSettings,
 				});
+
+				try {
+					await persistWorkspaceState(nextWorkspace);
+					await persistAppSettings(nextAppSettings);
+				} catch (error) {
+					console.warn("Failed to persist initial local Dash state:", error);
+				}
+
+				if (persistedWorkspace) {
+					await electrobun.rpc?.request.syncWorkspace({
+						workspace: nextWorkspace,
+					});
+				}
+
+				if (persistedAppSettings) {
+					await electrobun.rpc?.request.syncAppSettings({
+						appSettings: nextAppSettings,
+					});
+				}
 
 			},
 		)
