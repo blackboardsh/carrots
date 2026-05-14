@@ -950,12 +950,6 @@ function post(message: unknown) {
   self.postMessage(message);
 }
 
-function sleep(ms: number) {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
 function parseDurationMs(value: unknown, fallback: number, minimum: number) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
@@ -1025,10 +1019,6 @@ function closeWindow(windowId?: string) {
     action: "close-window",
     payload: { windowId: targetWindowId },
   });
-}
-
-function stopCarrot() {
-  app.quit();
 }
 
 function getMenuStartingFolder() {
@@ -3566,29 +3556,10 @@ function buildRuntimeWindowFromLens(lens: LensDoc, windowId?: string): LensWindo
   };
 }
 
-function buildDefaultRuntimeWindowForWorkspace(workspaceId: string, windowId: string): LensWindow {
-  const workspace = getWorkspaceByKey(workspaceId);
-  const currentLens = ensureWorkspaceCurrentLens(workspace.key);
-  return {
-    ...structuredClone(DEFAULT_STARTER_LENS_WINDOW),
-    id: windowId,
-    lensId: currentLens.key,
-    workspaceId: workspace.key,
-    title: "Main",
-  };
-}
-
 function applyLensWindowStateToRuntimeWindow(lens: LensDoc, runtimeWindowId: string, workspaceId: string) {
   removeBunnyWindowFromAllWorkspaces(runtimeWindowId);
   const nextWindow = cloneBunnyWindow(parseStoredBunnyWindow(lens));
   nextWindow.id = runtimeWindowId;
-  upsertBunnyWindowForWorkspace(workspaceId, nextWindow);
-  return nextWindow;
-}
-
-function applyDefaultWorkspaceStateToRuntimeWindow(runtimeWindowId: string, workspaceId: string) {
-  removeBunnyWindowFromAllWorkspaces(runtimeWindowId);
-  const nextWindow = makeDefaultBunnyWindow(runtimeWindowId);
   upsertBunnyWindowForWorkspace(workspaceId, nextWindow);
   return nextWindow;
 }
@@ -3790,26 +3761,6 @@ async function openDashWindow() {
   }
 
   emitSnapshot();
-  return snapshot();
-}
-
-async function focusExistingLensWindow(windowId: string) {
-  const runtimeWindow = runtimeWindows.find((window) => window.id === windowId);
-  if (!runtimeWindow) {
-    throw new Error(`Unknown runtime window: ${windowId}`);
-  }
-
-  state.currentWindowId = runtimeWindow.id;
-  state.currentLayoutId = getLensIdForWindow(runtimeWindow);
-  state.commandPaletteOpen = false;
-  state.commandQuery = "";
-  syncActiveTreeNode();
-  await saveState();
-  syncTray();
-  emitSnapshot();
-  emitSetProjectsForWindow(runtimeWindow.id);
-  focusWindow(runtimeWindow.id, runtimeWindow.title);
-  log(`lens focused: ${state.currentLayoutId}`);
   return snapshot();
 }
 
@@ -4137,44 +4088,6 @@ async function addProjectMount(params: {
   syncTray();
   emitSnapshot();
   log(`project added: ${created.name}`);
-  return snapshot();
-}
-
-async function removeProjectMountFromWorkspace(params: {
-  workspaceId?: string;
-  projectId?: string;
-  mountId?: string;
-}) {
-  const workspaceId = params.workspaceId || getCurrentWorkspace().key;
-  const workspace = getWorkspaceByKey(workspaceId);
-
-  if (isCloudShadowWorkspaceKey(workspace.key)) {
-    if (!cloudApi) {
-      throw new Error("Not signed in to Bunny Cloud");
-    }
-    const mountId = String(params.mountId || "");
-    if (!mountId) {
-      throw new Error("Workspace mount id is required");
-    }
-    await cloudApi.deleteProjectMount(
-      cloudWorkspaceIdFromShadowKey(workspace.key),
-      mountId,
-    );
-    await refreshCloudData();
-    emitSetProjects();
-    await writePersistedDashState();
-    return snapshot();
-  }
-
-  const projectId = String(params.projectId || "");
-  if (!projectId) {
-    throw new Error("Local project id is required");
-  }
-  ensureDb().collection("projectMounts").remove(projectId);
-  flushDb();
-  syncProjectWatchers();
-  emitSetProjects();
-  await writePersistedDashState();
   return snapshot();
 }
 
