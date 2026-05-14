@@ -7,7 +7,7 @@ import {
   onMount,
 } from "solid-js";
 import { setState, openNewTabForNode } from "../store";
-import { electrobun } from "../init";
+import { electrobun, hostOpenFileDialog } from "../init";
 import {
   SettingsPaneFormSection,
 } from "./forms";
@@ -157,7 +157,7 @@ export const PluginMarketplace = (): JSXElement => {
   const handleInstallFromFolder = async () => {
     try {
       // Open folder picker dialog
-      const folders = await electrobun.rpc?.request.openFileDialog({
+      const folders = await hostOpenFileDialog({
         startingFolder: "",
         allowedFileTypes: "",
         canChooseFiles: false,

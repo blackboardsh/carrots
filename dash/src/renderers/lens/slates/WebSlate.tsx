@@ -18,7 +18,18 @@ import type {
 } from "../../../shared/types/types";
 import { state, setState } from "../store";
 import { produce } from "solid-js/store";
-import { electrobun as electrobunImport, getFaviconForUrl } from "../init";
+import {
+	electrobun as electrobunImport,
+	getFaviconForUrl,
+	fsExists,
+	fsTouchFile,
+	fsMkdir,
+	fsWriteFile,
+	fsSafeDeleteFileOrFolder,
+	hostOpenFileDialog,
+	fsReadFile,
+	hostShowInFinder,
+} from "../init";
 import { getWindow } from "../store";
 
 import { getSlateForNode, getProjectForNodePath } from "../files";
@@ -407,15 +418,12 @@ console.log('Preload script loaded for:', window.location.href);
 
 		try {
 			// Check if file already exists
-			const exists = await electrobun.rpc?.request.exists({ path: filePath });
+			const exists = await fsExists(filePath);
 
 			let wasCreated = false;
 			if (!exists) {
 				// Create the file if it doesn't exist
-				await electrobun.rpc?.request.touchFile({
-					path: filePath,
-					contents: defaultContent,
-				});
+				await fsTouchFile(filePath, defaultContent);
 				wasCreated = true;
 			}
 
@@ -665,9 +673,7 @@ console.log('Preload script loaded for:', window.location.href);
 			const browserProfilePath = join(parentFolderPath, nodeName);
 
 			// Create the browser profile directory
-			const mkdirResult = await electrobun.rpc?.request.mkdir({
-				path: browserProfilePath,
-			});
+			const mkdirResult = await fsMkdir(browserProfilePath);
 			if (!mkdirResult?.success) {
 				console.error(
 					"Failed to create browser profile directory:",
@@ -691,17 +697,15 @@ console.log('Preload script loaded for:', window.location.href);
 			};
 
 			const slateConfigPath = join(browserProfilePath, ".bunny.json");
-			const writeResult = await electrobun.rpc?.request.writeFile({
-				path: slateConfigPath,
-				value: JSON.stringify(slateConfig, null, 2),
-			});
+			const writeResult = await fsWriteFile(
+				slateConfigPath,
+				JSON.stringify(slateConfig, null, 2),
+			);
 
 			if (!writeResult?.success) {
 				console.error("Failed to write slate config:", writeResult?.error);
 				// Try to clean up the created directory
-				await electrobun.rpc?.request.safeDeleteFileOrFolder({
-					absolutePath: browserProfilePath,
-				});
+				await fsSafeDeleteFileOrFolder(browserProfilePath);
 				alert(
 					"Failed to create browser profile configuration. Please try again.",
 				);
@@ -723,10 +727,10 @@ console.log('Preload script loaded for:', window.location.href);
 					if (favicon && favicon !== slateConfig.icon) {
 						// Update the slate config with the favicon
 						const updatedSlateConfig = { ...slateConfig, icon: favicon };
-						await electrobun.rpc?.request.writeFile({
-							path: slateConfigPath,
-							value: JSON.stringify(updatedSlateConfig, null, 2),
-						});
+						await fsWriteFile(
+							slateConfigPath,
+							JSON.stringify(updatedSlateConfig, null, 2),
+						);
 					}
 				})
 				.catch((error) => {
@@ -763,7 +767,7 @@ console.log('Preload script loaded for:', window.location.href);
 
 		try {
 			// Open folder picker
-			const result = await electrobun.rpc?.request.openFileDialog({
+			const result = await hostOpenFileDialog({
 				startingFolder: state.paths?.BUNNY_HOME_FOLDER || "",
 				allowedFileTypes: "",
 				canChooseFiles: false,
@@ -804,9 +808,7 @@ console.log('Preload script loaded for:', window.location.href);
 			const browserProfilePath = join(selectedPath, nodeName);
 
 			// Create the browser profile directory
-			const mkdirResult = await electrobun.rpc?.request.mkdir({
-				path: browserProfilePath,
-			});
+			const mkdirResult = await fsMkdir(browserProfilePath);
 			if (!mkdirResult?.success) {
 				console.error(
 					"Failed to create browser profile directory:",
@@ -829,17 +831,15 @@ console.log('Preload script loaded for:', window.location.href);
 			};
 
 			const slateConfigPath = join(browserProfilePath, ".bunny.json");
-			const writeResult = await electrobun.rpc?.request.writeFile({
-				path: slateConfigPath,
-				value: JSON.stringify(slateConfig, null, 2),
-			});
+			const writeResult = await fsWriteFile(
+				slateConfigPath,
+				JSON.stringify(slateConfig, null, 2),
+			);
 
 			if (!writeResult?.success) {
 				console.error("Failed to write slate config:", writeResult?.error);
 				// Try to clean up the created directory
-				await electrobun.rpc?.request.safeDeleteFileOrFolder({
-					absolutePath: browserProfilePath,
-				});
+				await fsSafeDeleteFileOrFolder(browserProfilePath);
 				alert(
 					"Failed to create browser profile configuration. Please try again.",
 				);
@@ -860,10 +860,10 @@ console.log('Preload script loaded for:', window.location.href);
 				.then(async (favicon) => {
 					if (favicon && favicon !== slateConfig.icon) {
 						const updatedSlateConfig = { ...slateConfig, icon: favicon };
-						await electrobun.rpc?.request.writeFile({
-							path: slateConfigPath,
-							value: JSON.stringify(updatedSlateConfig, null, 2),
-						});
+						await fsWriteFile(
+							slateConfigPath,
+							JSON.stringify(updatedSlateConfig, null, 2),
+						);
 					}
 				})
 				.catch((error) => {
@@ -925,10 +925,7 @@ console.log('Preload script loaded for:', window.location.href);
 
 			// Always try to read the file directly first - this ensures we get the latest content
 			try {
-				const { textContent } =
-					(await electrobun.rpc?.request.readFile({
-						path: preloadFilePath(),
-					})) || {};
+				const { textContent } = (await fsReadFile(preloadFilePath())) || {};
 
 				if (textContent) {
 					setPreloadContent(textContent);
@@ -1083,9 +1080,7 @@ console.log('Preload script loaded for:', window.location.href);
 										notification?.status === "completed" &&
 										notification.path
 									) {
-										await electrobunImport.rpc?.request.showInFinder({
-											path: notification.path,
-										});
+										await hostShowInFinder(notification.path);
 										setState("downloadNotification", null);
 									} else if (notification?.status === "failed") {
 										setState("downloadNotification", null);
@@ -1616,10 +1611,10 @@ console.log('Preload script loaded for:', window.location.href);
 														try {
 															const slateConfig = JSON.parse(content);
 															slateConfig.icon = favicon;
-															electrobun.rpc?.request.writeFile({
-																path: slateConfigPath,
-																value: JSON.stringify(slateConfig, null, 2),
-															});
+															fsWriteFile(
+																slateConfigPath,
+																JSON.stringify(slateConfig, null, 2),
+															);
 														} catch (error) {
 															console.error(
 																"Error updating slate config favicon:",

@@ -4,7 +4,7 @@ import { state, setState, type AppState } from "./store";
 import type { CachedFileType } from "../../shared/types/types";
 import { produce } from "solid-js/store";
 
-import { electrobun } from "./init";
+import { fsGetNode, fsReadFile } from "./init";
 
 // TODO:
 // 1. in the rendering flow, we should check if we have the file in the cache and subscribe to changes
@@ -95,7 +95,7 @@ export const _getNode = (
   // Note: because this is async there's a race condition with the early exit above
   // where multiple things can call getNode for the same path triggering multiple calls
   // todo: We need to update the architecture to have a pending state for state objects like this
-  electrobun.rpc?.request.getNode({ path }).then((node) => {
+  fsGetNode(path).then((node) => {
     delete pendingNodeRequests[path];
 
     if (node) {
@@ -127,9 +127,7 @@ export const createModel = async (absolutePath: string) => {
   if (absolutePath.startsWith(ACTIVE_TEMPLATE_PREFIX)) {
     contents = "";
   } else {
-    const fileContents = await electrobun.rpc?.request.readFile({
-      path: absolutePath,
-    }); //?.slice(0, 1024 * 1024 * 2); //, "utf-8");
+    const fileContents = await fsReadFile(absolutePath); //?.slice(0, 1024 * 1024 * 2); //, "utf-8");
     contents = fileContents?.textContent || "";
   }
 

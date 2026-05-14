@@ -3,7 +3,7 @@ import type { CachedFileType } from "../../../shared/types/types";
 import { getSlateForNode } from "../files";
 import { createSignal, createEffect, For, Show } from "solid-js";
 import { produce } from "solid-js/store";
-import { electrobun } from "../init";
+import { electrobun, fsExists, fsReadFile, fsWriteFile } from "../init";
 import { join } from "../../utils/pathUtils";
 
 interface Message {
@@ -138,11 +138,11 @@ export const AgentSlate = ({
     console.log("AgentSlate: Loading initial context file from:", contextFilePath);
     
     try {
-      const exists = await electrobun.rpc?.request.exists({ path: contextFilePath });
+      const exists = await fsExists(contextFilePath);
       console.log("AgentSlate: Context file exists on mount:", exists);
       
       if (exists) {
-        const result = await electrobun.rpc?.request.readFile({ path: contextFilePath });
+        const result = await fsReadFile(contextFilePath);
         console.log("AgentSlate: Initial context file content length:", result?.textContent?.length || 0);
         
         if (result?.textContent) {
@@ -209,10 +209,7 @@ export const AgentSlate = ({
       // Save to file
       const configPath = node.path + "/.bunny.json";
       const contents = JSON.stringify(updatedSlate, null, 2);
-      electrobun.rpc?.request.writeFile({
-        path: configPath,
-        value: contents,
-      });
+      fsWriteFile(configPath, contents);
     }
   };
 
@@ -230,11 +227,11 @@ export const AgentSlate = ({
     console.log("AgentSlate: Reloading context file from:", contextFilePath);
     
     try {
-      const exists = await electrobun.rpc?.request.exists({ path: contextFilePath });
+      const exists = await fsExists(contextFilePath);
       console.log("AgentSlate: Context file exists (reload):", exists);
       
       if (exists) {
-        const result = await electrobun.rpc?.request.readFile({ path: contextFilePath });
+        const result = await fsReadFile(contextFilePath);
         console.log("AgentSlate: Context file content length (reload):", result?.textContent?.length || 0);
         console.log("AgentSlate: Context file content (reload):", JSON.stringify(result?.textContent));
         

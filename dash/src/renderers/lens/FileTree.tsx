@@ -51,7 +51,16 @@ import {
 	removeOpenFile,
 } from "./store";
 
-import { electrobun, getUniqueLensNameFromState } from "./init";
+import {
+	electrobun,
+	getUniqueLensNameFromState,
+	fsGetUniqueNewName,
+	fsMkdir,
+	fsWriteFile,
+	fsGetNode,
+	fsFindFirstNestedGitRepo,
+	fsRename,
+} from "./init";
 import { parentNodePath } from "../utils/fileUtils";
 
 import { join, basename, dirname } from "../utils/pathUtils";
@@ -443,13 +452,10 @@ const TemplateNodeItem = ({
 				openNewTerminalTab(terminalCwd);
 			} else if (templateId === "browser") {
 				const baseName = "Browser";
-				const uniqueName = await electrobun.rpc?.request.getUniqueNewName({
-					parentPath: targetFolderPath,
-					baseName,
-				});
+				const uniqueName = await fsGetUniqueNewName(targetFolderPath, baseName);
 				const browserProfilePath = join(targetFolderPath, uniqueName);
 
-				await electrobun.rpc?.request.mkdir({ path: browserProfilePath });
+				await fsMkdir(browserProfilePath);
 
 				const slateConfig = {
 					v: 1,
@@ -463,21 +469,15 @@ const TemplateNodeItem = ({
 				};
 
 				const slateConfigPath = join(browserProfilePath, ".bunny.json");
-				await electrobun.rpc?.request.writeFile({
-					path: slateConfigPath,
-					value: JSON.stringify(slateConfig, null, 2),
-				});
+				await fsWriteFile(slateConfigPath, JSON.stringify(slateConfig, null, 2));
 
 				openNewTabForNode(browserProfilePath, false, { focusNewTab: true });
 			} else if (templateId === "agent") {
 				const baseName = "AI Chat";
-				const uniqueName = await electrobun.rpc?.request.getUniqueNewName({
-					parentPath: targetFolderPath,
-					baseName,
-				});
+				const uniqueName = await fsGetUniqueNewName(targetFolderPath, baseName);
 				const agentPath = join(targetFolderPath, uniqueName);
 
-				await electrobun.rpc?.request.mkdir({ path: agentPath });
+				await fsMkdir(agentPath);
 
 				const slateConfig = {
 					v: 1,
@@ -488,10 +488,7 @@ const TemplateNodeItem = ({
 				};
 
 				const slateConfigPath = join(agentPath, ".bunny.json");
-				await electrobun.rpc?.request.writeFile({
-					path: slateConfigPath,
-					value: JSON.stringify(slateConfig, null, 2),
-				});
+				await fsWriteFile(slateConfigPath, JSON.stringify(slateConfig, null, 2));
 
 				openNewTabForNode(agentPath, false, { focusNewTab: true });
 			}
@@ -1805,7 +1802,7 @@ const OpenFileItem = ({
 		if (file.type === "file") {
 			// For non-project files, we need to ensure the node is cached first
 			if (!state.fileCache[path]) {
-				const node = await electrobun.rpc?.request.getNode({ path });
+				const node = await fsGetNode(path);
 				if (node) {
 					setState("fileCache", path, node);
 				} else {
@@ -2643,10 +2640,7 @@ const NodeName = ({
 				try {
 					// Use vendored fd binary for fast searching with timeout
 					// This searches the entire tree to prevent nested git repos
-					const gitPath = await electrobun.rpc?.request.findFirstNestedGitRepo({
-						searchPath: path,
-						timeoutMs: 5000, // 5 second timeout
-					});
+					const gitPath = await fsFindFirstNestedGitRepo(path);
 
 					return gitPath || false;
 				} catch (error) {
@@ -3049,11 +3043,10 @@ const NodeName = ({
 						}
 
 						// this will make sure we get a new path that doesn't already exist
-						const uniqueFileName =
-							await electrobun.rpc?.request.getUniqueNewName({
-								parentPath: targetFolderPath,
-								baseName: node.name,
-							});
+						const uniqueFileName = await fsGetUniqueNewName(
+							targetFolderPath,
+							node.name,
+						);
 						const newPath = join(targetFolderPath, uniqueFileName);
 
 						setNodeExpanded(targetFolderPath, true);
@@ -3061,7 +3054,7 @@ const NodeName = ({
 						// When dragging a regular node we can rename it
 						// renaming the actual file on disk will trigger a file watcher event
 						// and update the file tree accordingly
-						electrobun.rpc?.request.rename({ oldPath: node.path, newPath });
+						fsRename(node.path, newPath);
 
 						// When dragging a previewNode there's no file on disk yet, we just
 						// want to reparent it

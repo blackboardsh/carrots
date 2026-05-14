@@ -10,7 +10,7 @@ import {
   type CachedFileType,
   type FolderNodeType,
 } from "../../shared/types/types";
-import { electrobun } from "./init";
+import { fsWriteFile } from "./init";
 
 // const HOME_DIRECTORY = homedir();
 // const BUNNY_DIRECTORY = join(HOME_DIRECTORY, "bunny");
@@ -97,10 +97,7 @@ export const writeSlateConfigFile = (
     }
 
     // save your file here
-    const result = electrobun.rpc?.request.writeFile({
-      path: configPath,
-      value: contents,
-    });
+    const result = fsWriteFile(configPath, contents);
 
     // todo: handle failure
     // if (!result?.success) {

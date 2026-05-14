@@ -4540,10 +4540,6 @@ async function hideCurrentWorkspaceWindows() {
 
 async function handleBunnyDashRequest(method: string, params: any) {
   switch (method) {
-    case "openFarm": {
-      app.openManager();
-      return { ok: true };
-    }
     case "logoutBunnyCloud": {
       await app.setAuthToken("");
       emitSetProjects();
@@ -4673,19 +4669,6 @@ async function handleBunnyDashRequest(method: string, params: any) {
       bunnyDashState.appSettings = params.appSettings;
       await writePersistedDashState();
       return;
-    case "execSpawnSync": {
-      const cmd = String(params?.cmd || "");
-      const args = Array.isArray(params?.args) ? params.args.map(String) : [];
-      const result = Bun.spawnSync([cmd, ...args], {
-        ...(typeof params?.opts === "object" && params?.opts ? params.opts : {}),
-      });
-      if (result.exitCode !== 0) {
-        throw new Error(new TextDecoder().decode(result.stderr || new Uint8Array()) || `${cmd} exited with code ${result.exitCode}`);
-      }
-      return new TextDecoder().decode(result.stdout || new Uint8Array());
-    }
-    case "activateLens":
-      return activateLens(String(params?.lensId || state.currentLayoutId));
     case "showContextMenu":
       ContextMenu.showContextMenu(Array.isArray(params?.menuItems) ? params.menuItems : []);
       return;
@@ -4731,11 +4714,6 @@ async function handleBunnyDashRequest(method: string, params: any) {
       return bunnyDashState.tokens || [];
     case "setToken":
       return;
-    case "safeDeleteFileOrFolder":
-    case "safeTrashFileOrFolder":
-      return invokeFsCarrot(method, params, {
-        windowId: getCurrentWindow().id,
-      });
     default:
       return UNHANDLED_DASH_REQUEST;
   }

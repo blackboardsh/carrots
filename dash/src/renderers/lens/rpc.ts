@@ -13,12 +13,6 @@ export type WorkspaceRPC = {
   // to bun
   bun: RPCSchema<{
     requests: {
-      openFarm: {
-        params: void;
-        response: {
-          ok: boolean;
-        };
-      };
       logoutBunnyCloud: {
         params: void;
         response: {
@@ -358,24 +352,6 @@ export type WorkspaceRPC = {
           candidateFilename: string;
         };
         response: string;
-      };
-      safeDeleteFileOrFolder: {
-        params: {
-          absolutePath: string;
-        };
-      };
-      execSpawnSync: {
-        params: {
-          cmd: string;
-          args: string[];
-          opts?: any;
-        };
-        response: string;
-      };
-      safeTrashFileOrFolder: {
-        params: {
-          path: string;
-        };
       };
       createTerminal: {
         params: {

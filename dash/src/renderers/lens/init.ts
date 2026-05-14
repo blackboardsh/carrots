@@ -42,7 +42,7 @@ registerDashDiffEditor();
 
 async function syncGitFolderNode(folderPath: string) {
   const gitFolderPath = join(folderPath, ".git");
-  const gitNode = await electrobun.rpc?.request.getNode({ path: gitFolderPath });
+  const gitNode = await fsGetNode(gitFolderPath);
   if (!gitNode) {
     return;
   }
@@ -239,9 +239,7 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
               // Only fetch file contents if the file has been explicitly loaded by the user
               const currentContents =
                 stateFile.model?.getValue() || stateFile.persistedContent;
-              const response = await electrobun.rpc?.request.readFile({
-                path: absolutePath,
-              });
+              const response = await fsReadFile(absolutePath);
 
               if (!response) {
                 console.error('No response from readFile for:', absolutePath);
@@ -411,10 +409,7 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
           data: {}
         })        
         setTimeout(async () => {
-          const nodeName = await electrobun.rpc?.request.getUniqueNewName({
-            parentPath: node.path,
-            baseName,
-          });
+          const nodeName = await fsGetUniqueNewName(node.path, baseName);
           
           const childNode: CachedFileType | PreviewFolderNodeType = {
             type: actualNodeType === "dir" ? "dir" : "file",
@@ -718,15 +713,12 @@ You are a helpful assistant with the following characteristics:
 
         try {
           // Check if file already exists
-          const exists = await electrobun.rpc?.request.exists({ path: filePath });
+          const exists = await fsExists(filePath);
 
           let wasCreated = false;
           if (!exists) {
             // Create the file if it doesn't exist
-            await electrobun.rpc?.request.touchFile({
-              path: filePath,
-              contents: defaultContent,
-            });
+            await fsTouchFile(filePath, defaultContent);
             wasCreated = true;
           }
 
@@ -779,8 +771,88 @@ export function invokeCarrot<T = unknown>(
 	return electrobun.carrots.invoke<T>(carrotId, method, params, options);
 }
 
+export function invokeFsCarrot<T = unknown>(method: string, params?: unknown) {
+	return invokeCarrot<T>("bunny.fs", method, params, {
+		windowId: state.windowId,
+	});
+}
+
 export function invokeGitCarrot<T = unknown>(method: string, params?: unknown) {
 	return invokeCarrot<T>("bunny.git", method, params);
+}
+
+export function fsGetNode(path: string) {
+	return invokeFsCarrot("getNode", { path });
+}
+
+export function fsReadSlateConfigFile(path: string) {
+	return invokeFsCarrot("readSlateConfigFile", { path });
+}
+
+export function fsReadFile(path: string) {
+	return invokeFsCarrot("readFile", { path });
+}
+
+export function fsWriteFile(path: string, value: string) {
+	return invokeFsCarrot("writeFile", { path, value });
+}
+
+export function fsTouchFile(path: string, contents = "") {
+	return invokeFsCarrot("touchFile", { path, contents });
+}
+
+export function fsRename(oldPath: string, newPath: string) {
+	return invokeFsCarrot("rename", { oldPath, newPath });
+}
+
+export function fsExists(path: string) {
+	return invokeFsCarrot<boolean>("exists", { path });
+}
+
+export function fsIsFolder(path: string) {
+	return invokeFsCarrot<boolean>("isFolder", { path });
+}
+
+export function fsMkdir(path: string) {
+	return invokeFsCarrot("mkdir", { path });
+}
+
+export function fsCopy(src: string, dest: string) {
+	return invokeFsCarrot("copy", { src, dest });
+}
+
+export function fsSafeDeleteFileOrFolder(path: string) {
+	return invokeFsCarrot("safeDeleteFileOrFolder", { path });
+}
+
+export function fsSafeTrashFileOrFolder(path: string) {
+	return invokeFsCarrot("safeTrashFileOrFolder", { path });
+}
+
+export function fsMakeFileNameSafe(value: string) {
+	return invokeFsCarrot<string>("makeFileNameSafe", { value });
+}
+
+export function fsGetUniqueNewName(parentPath: string, baseName: string) {
+	return invokeFsCarrot<string>("getUniqueNewName", { parentPath, baseName });
+}
+
+export function fsFindFirstNestedGitRepo(path: string) {
+	return invokeFsCarrot<string | null>("findFirstNestedGitRepo", { path });
+}
+
+export function hostOpenFileDialog(options: {
+	startingFolder?: string;
+	allowedFileTypes?: string;
+	canChooseFiles?: boolean;
+	canChooseDirectory?: boolean;
+	allowsMultipleSelection?: boolean;
+}) {
+	return electrobun.rpc?.request.openFileDialog(options);
+}
+
+export function hostShowInFinder(path: string) {
+	return electrobun.rpc?.request.showInFinder({ path });
 }
 
 function buildCurrentWorkspaceSearchTargets() {

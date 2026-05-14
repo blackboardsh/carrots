@@ -23,7 +23,7 @@ import { produce } from "solid-js/store";
 import { relative, basename } from "../utils/pathUtils";
 import { aiCompletionService } from "./services/aiCompletionService";
 import { getProjectForNodePath } from "./files";
-import { electrobun } from "./init";
+import { electrobun, fsWriteFile } from "./init";
 import type { ParsedResponseType } from "../../shared/types/types";
 
 let currentRequestId = 0;
@@ -487,10 +487,7 @@ export const Editor = ({ currentTabId }: { currentTabId: string }) => {
           return;
         }
         // save your file here
-        const result = await electrobun.rpc?.request.writeFile({
-          path: model.uri.path,
-          value,
-        });
+        const result = await fsWriteFile(model.uri.path, value);
 
         if (!result?.success) {
           // todo: handle failed write

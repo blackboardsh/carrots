@@ -22,6 +22,15 @@ import {
 	findAllInCurrentWorkspace,
 	cancelCurrentWorkspaceFindAll,
 	getFaviconForUrl,
+	fsGetNode,
+	fsRename,
+	fsExists,
+	fsMkdir,
+	fsWriteFile,
+	fsGetUniqueNewName,
+	hostOpenFileDialog,
+	fsSafeDeleteFileOrFolder,
+	fsTouchFile,
 } from "./init";
 
 import {
@@ -657,7 +666,7 @@ const App = () => {
 			// For non-project files, we need to fetch the node and cache it first
 			// since the FileWatcher doesn't track these files
 			if (!state.fileCache[filePath]) {
-				const node = await electrobun.rpc?.request.getNode({ path: filePath });
+				const node = await fsGetNode(filePath);
 				if (node) {
 					setState("fileCache", filePath, node);
 				} else {
@@ -3150,25 +3159,17 @@ const NodeSettings = () => {
 			if (settingsType === "add-node" || _node.path !== _previewNode?.path) {
 				// if the node path existed before, rename it
 				if (settingsType === "edit-node" && _node) {
-					const result = await electrobun.rpc?.request.rename({
-						oldPath: _node.path,
-						newPath: _previewNode.path,
-					});
+					const result = await fsRename(_node.path, _previewNode.path);
 					if (!result?.success) {
 						console.error("Failed to rename node");
 					}
-				} else if (
-					!(await electrobun.rpc?.request.exists({ path: _previewNode.path }))
-				) {
+				} else if (!(await fsExists(_previewNode.path))) {
 					// otherwise create the file or folder
 					if (_previewNode.type === "dir") {
-						await electrobun.rpc?.request.mkdir({ path: _previewNode.path });
+						await fsMkdir(_previewNode.path);
 					} else if (_previewNode.type === "file") {
 						// save your file here
-						const result = electrobun.rpc?.request.writeFile({
-							path: _previewNode.path,
-							value: "",
-						});
+						const result = fsWriteFile(_previewNode.path, "");
 
 						// if (!result?.success) {
 						//   // todo: handle failed write
@@ -3309,10 +3310,10 @@ const NodeSettings = () => {
 		// setup
 		if (type === "project") {
 			// For project type, get a unique name but keep the existing slate intact
-			const newName = await electrobun.rpc?.request.getUniqueNewName({
-				parentPath: parentNodePath(_previewNode),
-				baseName: "new-project",
-			});
+			const newName = await fsGetUniqueNewName(
+				parentNodePath(_previewNode),
+				"new-project",
+			);
 
 			// Update the preview node with the unique name
 			setState(
@@ -3336,10 +3337,10 @@ const NodeSettings = () => {
 			return;
 		}
 		if (type === "web") {
-			const newName = await electrobun.rpc?.request.getUniqueNewName({
-				parentPath: parentNodePath(_previewNode),
-				baseName: "new-browser-profile",
-			});
+			const newName = await fsGetUniqueNewName(
+				parentNodePath(_previewNode),
+				"new-browser-profile",
+			);
 			setPreviewNode({
 				type: "dir",
 				name: newName,
@@ -3359,10 +3360,10 @@ const NodeSettings = () => {
 			});
 			// setState("settingsPane", "data", "previewNode", );
 		} else if (type === "agent") {
-			const newName = await electrobun.rpc?.request.getUniqueNewName({
-				parentPath: parentNodePath(_previewNode),
-				baseName: "new-agent",
-			});
+			const newName = await fsGetUniqueNewName(
+				parentNodePath(_previewNode),
+				"new-agent",
+			);
 			setPreviewNode({
 				type: "dir",
 				name: newName,
@@ -3405,10 +3406,10 @@ const NodeSettings = () => {
 			});
 		} else {
 			if (nodeType === "file") {
-				const nodeName = await electrobun.rpc?.request.getUniqueNewName({
-					parentPath: parentNodePath(_previewNode),
-					baseName: "new-file",
-				});
+				const nodeName = await fsGetUniqueNewName(
+					parentNodePath(_previewNode),
+					"new-file",
+				);
 				setPreviewNode({
 					type: "file",
 					name: nodeName,
@@ -3419,10 +3420,10 @@ const NodeSettings = () => {
 					editors: {},
 				});
 			} else if (nodeType === "dir") {
-				const nodeName = await electrobun.rpc?.request.getUniqueNewName({
-					parentPath: parentNodePath(_previewNode),
-					baseName: "new-folder",
-				});
+				const nodeName = await fsGetUniqueNewName(
+					parentNodePath(_previewNode),
+					"new-folder",
+				);
 				setPreviewNode({
 					type: "dir",
 					name: nodeName,
@@ -3437,7 +3438,7 @@ const NodeSettings = () => {
 	const onPathChooserClick = async () => {
 		const startingFolder =
 			previewNode()?.path || state.paths?.BUNNY_PROJECTS_FOLDER || "";
-		const filesAndFolders = await electrobun.rpc?.request.openFileDialog({
+		const filesAndFolders = await hostOpenFileDialog({
 			startingFolder,
 			allowedFileTypes: "",
 			canChooseFiles: false,
@@ -3630,10 +3631,8 @@ const NodeSettings = () => {
 		const _node = node();
 		if (getSlateForNode(_node)?.type === "web" && _node?.path) {
 			const slateConfigPath = join(_node.path, ".bunny.json");
-			if (await electrobun.rpc?.request.exists({ path: slateConfigPath })) {
-				await electrobun.rpc?.request.safeDeleteFileOrFolder({
-					absolutePath: slateConfigPath,
-				});
+			if (await fsExists(slateConfigPath)) {
+				await fsSafeDeleteFileOrFolder(slateConfigPath);
 			}
 		}
 
@@ -3656,9 +3655,7 @@ const NodeSettings = () => {
 			return false;
 		}
 
-		const _exists = Boolean(
-			await electrobun.rpc?.request.exists({ path: _previewNode?.path }),
-		);
+		const _exists = Boolean(await fsExists(_previewNode?.path || ""));
 
 		setFileNameConflict(_exists);
 	});
@@ -3679,9 +3676,7 @@ const NodeSettings = () => {
 
 		const preloadScriptPath = join(nodePath, ".preload.js");
 
-		const result = await electrobun.rpc?.request.touchFile({
-			path: preloadScriptPath,
-		});
+		const result = await fsTouchFile(preloadScriptPath);
 
 		if (!result?.success) {
 			// todo: handle error
@@ -3702,7 +3697,7 @@ const NodeSettings = () => {
 			}
 
 			setFolderInputLabel(
-				(await electrobun.rpc?.request.exists({ path: _projectPath }))
+				(await fsExists(_projectPath))
 					? "Select folder"
 					: "Create folder",
 			);
