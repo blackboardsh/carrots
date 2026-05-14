@@ -301,7 +301,12 @@ export const gitValidateUrl = async (gitUrl: string) => {
   }
 };
 
-export const gitClone = async (repoPath: string, gitUrl: string, createMainBranch: boolean = false) => {
+export const gitClone = async (
+  repoPath: string,
+  gitUrl: string,
+  createMainBranch: boolean = false,
+  branch?: string,
+) => {
   try {
     const parentDir = path.dirname(repoPath);
     const folderName = path.basename(repoPath);
@@ -359,6 +364,9 @@ export const gitClone = async (repoPath: string, gitUrl: string, createMainBranc
       const cloneArgs: string[] = [];
       if (hasOsxKeychainHelper) {
         cloneArgs.push('-c', `credential.helper=${OSXKEYCHAIN_HELPER}`);
+      }
+      if (branch && branch.trim()) {
+        cloneArgs.push('--branch', branch.trim(), '--single-branch');
       }
       cloneArgs.push('clone', gitUrl, folderName);
 
@@ -694,6 +702,68 @@ export const removeGitHubCredentials = async (): Promise<void> => {
     execSync(`echo "${input}" | ${OSXKEYCHAIN_HELPER} erase`, { encoding: 'utf-8' });
   } catch (error) {
     console.error('Error removing GitHub credentials:', error);
+    throw error;
+  }
+};
+
+export const gitStashDrop = async (repoRoot: string, stashName: string) => {
+  try {
+    return await git(repoRoot).raw(["stash", "drop", stashName]);
+  } catch (error) {
+    console.error("Error dropping stash:", error);
+    throw error;
+  }
+};
+
+export const gitDiscardFileChanges = async (
+  repoRoot: string,
+  filePath: string,
+  changeType: string,
+) => {
+  try {
+    const fullPath = path.isAbsolute(filePath) ? filePath : path.join(repoRoot, filePath);
+
+    if (changeType === "?" || changeType === "A") {
+      if (fs.existsSync(fullPath)) {
+        fs.rmSync(fullPath, { recursive: true, force: true });
+      }
+      return;
+    }
+
+    try {
+      await git(repoRoot).raw(["checkout", "--", filePath]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("unmerged")) {
+        throw error;
+      }
+
+      await git(repoRoot).raw(["reset", "--", filePath]);
+      await git(repoRoot).raw(["checkout", "HEAD", "--", filePath]);
+    }
+  } catch (error) {
+    console.error("Error discarding file changes:", error);
+    throw error;
+  }
+};
+
+export const gitDiscardAllChanges = async (repoRoot: string) => {
+  try {
+    const status = await git(repoRoot).status();
+    for (const file of status.files || []) {
+      const changeType =
+        file.working_dir && file.working_dir.trim() !== ""
+          ? file.working_dir.trim()
+          : file.index && file.index.trim() !== ""
+            ? file.index.trim()
+            : "";
+      if (!file.path) {
+        continue;
+      }
+      await gitDiscardFileChanges(repoRoot, file.path, changeType);
+    }
+  } catch (error) {
+    console.error("Error discarding all changes:", error);
     throw error;
   }
 };

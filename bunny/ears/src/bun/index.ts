@@ -63,6 +63,12 @@ type CarrotRemoteUIInfo = {
   path: string;
 };
 
+type CarrotSlateUIInfo = {
+  id: string;
+  name: string;
+  path: string;
+};
+
 type CarrotInfo = {
   id: string;
   name: string;
@@ -81,6 +87,7 @@ type CarrotInfo = {
   // "Open in browser" links pointing through Hop. Empty array for background
   // carrots or carrots that don't expose remote UIs.
   remoteUIs: CarrotRemoteUIInfo[];
+  slateUIs: CarrotSlateUIInfo[];
   contributions?: CarrotContributions;
 };
 
@@ -194,6 +201,10 @@ class CarrotInstance {
     const remoteUIs: CarrotRemoteUIInfo[] = Object.entries(manifestRemoteUIs).map(
       ([id, ui]) => ({ id, name: ui.name, path: ui.path }),
     );
+    const manifestSlateUIs = this.carrot.manifest.slateUIs || {};
+    const slateUIs: CarrotSlateUIInfo[] = Object.entries(manifestSlateUIs).map(
+      ([id, ui]) => ({ id, name: ui.name, path: ui.path }),
+    );
 
     return {
       id: this.carrot.manifest.id,
@@ -210,6 +221,7 @@ class CarrotInstance {
       lastBuildError: this.carrot.install.lastBuildError ?? null,
       logTail: this.logs.slice(-4),
       remoteUIs,
+      slateUIs,
       contributions: this.carrot.manifest.contributions,
     };
   }
@@ -816,6 +828,9 @@ class CarrotInstance {
       case "list-carrots": {
         return runtime.summaries();
       }
+      case "get-web-bridge-port": {
+        return { port: runtime.webBridgePort };
+      }
       case "start-carrot": {
         const id = String((params as any)?.id || "");
         const carrot = runtime.carrots.get(id);
@@ -1193,6 +1208,7 @@ class BunnyEarsRuntime {
   tray: Tray | null;
   managerWindow: BrowserWindow | null = null;
   hopWs: WebSocket | null = null;
+  webBridgePort: number | null = null;
   channel: string = "dev";
   carrots = new Map<string, CarrotInstance>();
   activeApplicationMenuOwnerId: string | null = null;
@@ -1694,73 +1710,144 @@ class BunnyEarsRuntime {
 
   private handleHopFileRequest(message: { requestId: number; carrotId: string; path: string }) {
     const { requestId, carrotId, path: filePath } = message;
-    const carrot = getInstalledCarrot(carrotId);
+    const resolved = this.resolveCarrotFile(carrotId, filePath);
 
-    if (!carrot) {
+    if (!resolved.ok) {
       this.hopWs?.send(JSON.stringify({
         type: "hop:file-response",
         requestId,
-        status: 404,
+        status: resolved.status,
         contentType: "text/plain",
-        body: btoa(`Carrot not found: ${carrotId}`),
+        body: btoa(resolved.error),
       }));
       return;
     }
 
-    // Resolve the file path within the carrot's current directory
-    const fs = require("node:fs");
-    const pathMod = require("node:path");
-    const normalizedPath = filePath.replace(/^\/+/, "");
-    const fullPath = pathMod.resolve(carrot.currentDir, normalizedPath);
+    const base64 = Buffer.from(resolved.body).toString("base64");
 
-    // Security: ensure path doesn't escape the carrot dir
-    if (!fullPath.startsWith(carrot.currentDir)) {
-      this.hopWs?.send(JSON.stringify({
-        type: "hop:file-response",
-        requestId,
-        status: 403,
-        contentType: "text/plain",
-        body: btoa("Path escapes carrot directory"),
-      }));
-      return;
-    }
+    this.hopWs?.send(JSON.stringify({
+      type: "hop:file-response",
+      requestId,
+      contentType: resolved.contentType,
+      body: base64,
+    }));
+  }
 
-    if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
-      this.hopWs?.send(JSON.stringify({
-        type: "hop:file-response",
-        requestId,
-        status: 404,
-        contentType: "text/plain",
-        body: btoa(`File not found: ${normalizedPath}`),
-      }));
-      return;
-    }
-
-    const ext = pathMod.extname(fullPath).toLowerCase();
+  private getContentTypeForPath(fullPath: string) {
+    const ext = require("node:path").extname(fullPath).toLowerCase();
     const mimeTypes: Record<string, string> = {
       ".html": "text/html",
       ".js": "application/javascript",
+      ".mjs": "application/javascript",
       ".css": "text/css",
       ".json": "application/json",
       ".svg": "image/svg+xml",
       ".png": "image/png",
       ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
       ".gif": "image/gif",
+      ".webp": "image/webp",
       ".woff": "font/woff",
       ".woff2": "font/woff2",
       ".ttf": "font/ttf",
+      ".map": "application/json",
     };
 
-    const contentType = mimeTypes[ext] || "application/octet-stream";
-    const fileData = fs.readFileSync(fullPath);
-    const base64 = Buffer.from(fileData).toString("base64");
+    return mimeTypes[ext] || "application/octet-stream";
+  }
 
-    this.hopWs?.send(JSON.stringify({
-      type: "hop:file-response",
-      requestId,
-      contentType,
-      body: base64,
-    }));
+  private resolveCarrotFile(carrotId: string, filePath: string) {
+    const carrot = getInstalledCarrot(carrotId);
+    if (!carrot) {
+      return {
+        ok: false as const,
+        status: 404,
+        error: `Carrot not found: ${carrotId}`,
+      };
+    }
+
+    const fs = require("node:fs");
+    const pathMod = require("node:path");
+    const normalizedPath = filePath.replace(/^\/+/, "");
+    const fullPath = pathMod.resolve(carrot.currentDir, normalizedPath);
+
+    if (!fullPath.startsWith(carrot.currentDir)) {
+      return {
+        ok: false as const,
+        status: 403,
+        error: "Path escapes carrot directory",
+      };
+    }
+
+    if (!fs.existsSync(fullPath) || !fs.statSync(fullPath).isFile()) {
+      return {
+        ok: false as const,
+        status: 404,
+        error: `File not found: ${normalizedPath}`,
+      };
+    }
+
+    return {
+      ok: true as const,
+      body: fs.readFileSync(fullPath),
+      contentType: this.getContentTypeForPath(fullPath),
+    };
+  }
+
+  private resolveCarrotRemoteUIFile(carrotId: string, remoteUIId: string, restPath: string[]) {
+    const carrot = getInstalledCarrot(carrotId);
+    if (!carrot) {
+      return {
+        ok: false as const,
+        status: 404,
+        error: `Carrot not found: ${carrotId}`,
+      };
+    }
+
+    const remoteUI = carrot.manifest.remoteUIs?.[remoteUIId];
+    if (!remoteUI) {
+      return {
+        ok: false as const,
+        status: 404,
+        error: `Remote UI not found: ${remoteUIId}`,
+      };
+    }
+
+    const pathMod = require("node:path");
+    const basePath = remoteUI.path.replace(/^\/+/, "");
+    const relativePath = restPath.length
+      ? pathMod.join(pathMod.dirname(basePath), ...restPath)
+      : basePath;
+
+    return this.resolveCarrotFile(carrotId, relativePath);
+  }
+
+  private resolveCarrotSlateUIFile(carrotId: string, slateUIId: string, restPath: string[]) {
+    const carrot = getInstalledCarrot(carrotId);
+    if (!carrot) {
+      return {
+        ok: false as const,
+        status: 404,
+        error: `Carrot not found: ${carrotId}`,
+      };
+    }
+
+    const slateUI = carrot.manifest.slateUIs?.[slateUIId];
+    if (!slateUI) {
+      return {
+        ok: false as const,
+        status: 404,
+        error: `Slate UI not found: ${slateUIId}`,
+      };
+    }
+
+    const pathMod = require("node:path");
+    const basePath = slateUI.path.replace(/^\/+/, "");
+    const relativePath = restPath.length
+      ? pathMod.join(pathMod.dirname(basePath), ...restPath)
+      : basePath;
+
+    return this.resolveCarrotFile(carrotId, relativePath);
   }
 
   private handleHopRuntimeRequest(browserId: string, requestId: number, method: string, params: unknown) {
@@ -2210,109 +2297,137 @@ class BunnyEarsRuntime {
    * and emit-view messages from the worker are forwarded back over WebSocket.
    */
   private startWebBridge() {
-    const WEB_BRIDGE_PORT = 9333;
     const self = this;
     let clientId = 0;
+    const candidatePorts = Array.from({ length: 20 }, (_, index) => 9333 + index);
 
-    try {
-      Bun.serve({
-        port: WEB_BRIDGE_PORT,
-        fetch(req, server) {
-          if (server.upgrade(req, { data: { id: `web-${++clientId}` } })) {
-            return;
-          }
-          return new Response("Bunny Ears Web Bridge", { status: 200 });
-        },
-        websocket: {
-          open(ws) {
-            const id = (ws.data as any).id as string;
-            console.log(`[web-bridge] Client connected: ${id}`);
+    for (const port of candidatePorts) {
+      try {
+        Bun.serve({
+          port,
+          fetch(req, server) {
+            const url = new URL(req.url);
 
-            const dashCarrot = self.carrots.get("bunny-dash");
-            if (dashCarrot) {
-              dashCarrot.webClients.set(id, {
-                send: (data: string) => {
-                  try { ws.send(data); } catch {}
+            if (url.pathname.startsWith("/carrot/")) {
+              const segments = url.pathname.split("/").filter(Boolean);
+              const carrotId = segments[1] || "";
+              const uiKind = segments[2] || "";
+              const uiId = segments[3] || "";
+              const restPath = segments.slice(4);
+              const resolved =
+                uiKind === "remote-ui"
+                  ? self.resolveCarrotRemoteUIFile(carrotId, uiId, restPath)
+                  : uiKind === "slate-ui"
+                    ? self.resolveCarrotSlateUIFile(carrotId, uiId, restPath)
+                    : self.resolveCarrotRemoteUIFile(carrotId, uiKind, segments.slice(3));
+              if (!resolved.ok) {
+                return new Response(resolved.error, { status: resolved.status });
+              }
+              return new Response(resolved.body, {
+                status: 200,
+                headers: {
+                  "Content-Type": resolved.contentType,
+                  "Cache-Control": "no-store",
+                  "Access-Control-Allow-Origin": "*",
                 },
               });
-              // The web renderer will call getInitialState on its own when
-              // it mounts. No need to push state here.
-            } else {
-              console.warn("[web-bridge] bunny-dash carrot not found");
             }
+
+            if (server.upgrade(req, { data: { id: `web-${++clientId}` } })) {
+              return;
+            }
+            return new Response("Bunny Ears Web Bridge", { status: 200 });
           },
-          async message(ws, data) {
-            const id = (ws.data as any).id as string;
-            try {
-              const msg = JSON.parse(String(data));
+          websocket: {
+            open(ws) {
+              const id = (ws.data as any).id as string;
+              console.log(`[web-bridge] Client connected: ${id}`);
+
               const dashCarrot = self.carrots.get("bunny-dash");
-              if (!dashCarrot) {
+              if (dashCarrot) {
+                dashCarrot.webClients.set(id, {
+                  send: (data: string) => {
+                    try { ws.send(data); } catch {}
+                  },
+                });
+              } else {
+                console.warn("[web-bridge] bunny-dash carrot not found");
+              }
+            },
+            async message(ws, data) {
+              const id = (ws.data as any).id as string;
+              try {
+                const msg = JSON.parse(String(data));
+                const dashCarrot = self.carrots.get("bunny-dash");
+                if (!dashCarrot) {
+                  if (msg.type === "request") {
+                    ws.send(JSON.stringify({
+                      type: "response",
+                      id: msg.id,
+                      error: "bunny-dash carrot not running",
+                    }));
+                  }
+                  return;
+                }
+
                 if (msg.type === "request") {
-                  ws.send(JSON.stringify({
-                    type: "response",
-                    id: msg.id,
-                    error: "bunny-dash carrot not running",
-                  }));
+                  try {
+                    const direct = await self.handleDirectDashRequest(
+                      String(msg.method || ""),
+                      msg.params,
+                      typeof msg?.params?.windowId === "string"
+                        ? msg.params.windowId
+                        : undefined,
+                    );
+                    const result =
+                      direct.handled
+                        ? direct.result
+                        : msg.method === "invokeCarrot"
+                          ? await self.invokeCarrotFrom(
+                              "bunny-dash",
+                              String(msg?.params?.carrotId || ""),
+                              String(msg?.params?.method || ""),
+                              msg?.params?.params,
+                              typeof msg?.params?.windowId === "string"
+                                ? msg.params.windowId
+                                : undefined,
+                            )
+                          : await dashCarrot.invoke(msg.method, msg.params);
+                    ws.send(JSON.stringify({
+                      type: "response",
+                      id: msg.id,
+                      result,
+                    }));
+                  } catch (err) {
+                    ws.send(JSON.stringify({
+                      type: "response",
+                      id: msg.id,
+                      error: err instanceof Error ? err.message : String(err),
+                    }));
+                  }
                 }
-                return;
-              }
 
-              if (msg.type === "request") {
-                try {
-                  const direct = await self.handleDirectDashRequest(
-                    String(msg.method || ""),
-                    msg.params,
-                    typeof msg?.params?.windowId === "string"
-                      ? msg.params.windowId
-                      : undefined,
-                  );
-                  const result =
-                    direct.handled
-                      ? direct.result
-                      : msg.method === "invokeCarrot"
-                        ? await self.invokeCarrotFrom(
-                            "bunny-dash",
-                            String(msg?.params?.carrotId || ""),
-                            String(msg?.params?.method || ""),
-                            msg?.params?.params,
-                            typeof msg?.params?.windowId === "string"
-                              ? msg.params.windowId
-                              : undefined,
-                          )
-                        : await dashCarrot.invoke(msg.method, msg.params);
-                  ws.send(JSON.stringify({
-                    type: "response",
-                    id: msg.id,
-                    result,
-                  }));
-                } catch (err) {
-                  ws.send(JSON.stringify({
-                    type: "response",
-                    id: msg.id,
-                    error: err instanceof Error ? err.message : String(err),
-                  }));
+                if (msg.type === "message") {
+                  dashCarrot.invoke(`send:${msg.name}`, msg.payload).catch(() => {});
                 }
+              } catch (err) {
+                console.error("[web-bridge] Failed to handle message:", err);
               }
-
-              if (msg.type === "message") {
-                // Fire-and-forget message to the carrot worker
-                dashCarrot.invoke(`send:${msg.name}`, msg.payload).catch(() => {});
-              }
-            } catch (err) {
-              console.error("[web-bridge] Failed to handle message:", err);
-            }
+            },
+            close(ws) {
+              const id = (ws.data as any).id as string;
+              console.log(`[web-bridge] Client disconnected: ${id}`);
+              const dashCarrot = self.carrots.get("bunny-dash");
+              dashCarrot?.webClients.delete(id);
+            },
           },
-          close(ws) {
-            const id = (ws.data as any).id as string;
-            console.log(`[web-bridge] Client disconnected: ${id}`);
-            const dashCarrot = self.carrots.get("bunny-dash");
-            dashCarrot?.webClients.delete(id);
-          },
-        },
-      });
-      console.log(`[web-bridge] Listening on ws://localhost:${WEB_BRIDGE_PORT}`);
-    } catch (err) {
-      console.error(`[web-bridge] Failed to start on port ${WEB_BRIDGE_PORT}:`, err);
+        });
+        this.webBridgePort = port;
+        console.log(`[web-bridge] Listening on ws://localhost:${port}`);
+        return;
+      } catch (err) {
+        console.error(`[web-bridge] Failed to start on port ${port}:`, err);
+      }
     }
   }
 

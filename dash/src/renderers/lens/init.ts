@@ -30,6 +30,7 @@ import {untrack} from "solid-js";
 import { loadPluginSlates } from "./files";
 import { initializeSlateRegistry } from "./slates/pluginSlateRegistry";
 import { registerBunnyTerminal } from "../components/BunnyTerminal";
+import { registerDashDiffEditor } from "../components/DashDiffEditor";
 // import { readSlateConfigFile } from "./files";
 
 // Initialize the slate component registry early
@@ -37,6 +38,40 @@ initializeSlateRegistry();
 
 // Register web components for plugins to use
 registerBunnyTerminal();
+registerDashDiffEditor();
+
+async function syncGitFolderNode(folderPath: string) {
+  const gitFolderPath = join(folderPath, ".git");
+  const gitNode = await electrobun.rpc?.request.getNode({ path: gitFolderPath });
+  if (!gitNode) {
+    return;
+  }
+
+  setState(
+    produce((_state: AppState) => {
+      _state.fileCache[gitFolderPath] = gitNode;
+
+      const parentNode = _state.fileCache[folderPath];
+      if (parentNode?.type === "dir" && !parentNode.children.includes(".git")) {
+        parentNode.children = [...parentNode.children, ".git"];
+      }
+    }),
+  );
+
+  setNodeExpanded(folderPath, true);
+}
+
+function openGitSettingsPane(query?: Record<string, string>) {
+  setState("settingsPane", {
+    type: "carrot-remote-ui",
+    data: {
+      title: query?.mode === "clone" ? "Clone Repository" : "Git & GitHub",
+      carrotId: "bunny.git",
+      remoteUIId: "git-settings",
+      query,
+    },
+  });
+}
 
 const rpc = Electroview.defineRPC<WorkspaceRPC>({
   maxRequestTime: 60 * 1000,
@@ -46,8 +81,14 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
       // "*": (messageName, payload) => {
       //   console.log("bun onmessage", messageName, payload);
       // },
-      initState: ({ windowId, buildVars, paths, peerDependencies }) => {
-        setState({ windowId, buildVars, paths, peerDependencies });
+      initState: ({ windowId, buildVars, paths, peerDependencies, webBridgeOrigin }) => {
+        setState({
+          windowId,
+          buildVars,
+          paths,
+          peerDependencies,
+          webBridgeOrigin: webBridgeOrigin || "",
+        });
       },
       updateStatus: (data) => {
         setState("update", data);
@@ -308,6 +349,7 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
           windowId,
           buildVars,
           paths,
+          webBridgeOrigin,
           peerDependencies,
           workspace,
           bunnyDash,
@@ -328,6 +370,7 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
           windowId,
           buildVars,
           paths,
+          webBridgeOrigin: webBridgeOrigin || "",
           peerDependencies,
           workspace,
           bunnyDash,
@@ -355,8 +398,7 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
 
         // Always open settings panel to allow name editing
         const actualNodeType = nodeType || "file";
-        const baseName = actualNodeType === "dir" ? "new-folder" : 
-                         actualNodeType === "repo" ? "new-repo" : "new-file";
+        const baseName = actualNodeType === "dir" ? "new-folder" : "new-file";
 
         // clear settings and then set after a delay for animation to play
         // and to cleanly reset the add node settings
@@ -374,23 +416,7 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
             baseName,
           });
           
-          const childNode: CachedFileType | PreviewFolderNodeType = actualNodeType === "repo" ? {
-            type: "dir",
-            name: nodeName,
-            path: join(node.path, nodeName),
-            isExpanded: true,
-            previewChildren: [],
-            slate: {
-              v: 1,
-              name: nodeName,
-              type: "repo",
-              icon: "🔀",
-              config: {
-                gitUrl: "",
-                branch: "main",
-              },
-            },
-          } : {
+          const childNode: CachedFileType | PreviewFolderNodeType = {
             type: actualNodeType === "dir" ? "dir" : "file",
             name: nodeName,
             path: join(node.path, nodeName),
@@ -536,6 +562,24 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
       },
       openSettings: ({ settingsType }) => {
         setState("settingsPane", { type: settingsType, data: {} });
+      },
+      openGitCloneUI: ({ nodePath }) => {
+        const parentPath = String(nodePath || "");
+        if (!parentPath) {
+          return;
+        }
+        openGitSettingsPane({
+          mode: "clone",
+          parentPath,
+        });
+      },
+      initGitInFolder: async ({ nodePath }) => {
+        const repoRoot = String(nodePath || "");
+        if (!repoRoot) {
+          return;
+        }
+        await invokeGitCarrot("initGit", { repoRoot });
+        await syncGitFolderNode(repoRoot);
       },
       terminalOutput: (data: { terminalId: string; data: string }) => {
         // Notify all terminal components about new output

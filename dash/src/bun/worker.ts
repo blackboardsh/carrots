@@ -131,6 +131,11 @@ type CachedCarrotSummary = {
   mode: string;
   permissions: string[];
   status: string;
+  slateUIs?: Array<{
+    id: string;
+    name: string;
+    path: string;
+  }>;
   contributions?: {
     fileActivators?: Array<{
       baseName?: string;
@@ -574,6 +579,7 @@ async function refreshCarrotList() {
       mode: c.mode,
       permissions: c.permissions || [],
       status: c.status,
+      slateUIs: c.slateUIs,
       contributions: c.contributions,
     }));
   } catch {}
@@ -1216,28 +1222,16 @@ async function handleContextMenuAction(action: string, data: any) {
     case "new_terminal":
       sendToDashWindow(windowId, "newTerminal", { nodePath: data?.nodePath });
       return;
-    case "clone_repo_to_folder":
-      sendToDashWindow(windowId, "addChildNode", {
+    case "open_git_clone_ui":
+      sendToDashWindow(windowId, "openGitCloneUI", {
         nodePath: data?.nodePath,
-        nodeType: "repo",
       });
       return;
-    case "init_git_in_folder": {
-      const nodePath = String(data?.nodePath || "");
-      if (!nodePath) {
-        return;
-      }
-      await invokeGitCarrot("initGit", { repoRoot: nodePath }, { windowId });
-      handleFsFileWatchEvent({
-        absolutePath: join(nodePath, ".git"),
-        exists: true,
-        isDelete: false,
-        isAdding: true,
-        isFile: false,
-        isDir: true,
+    case "init_git_in_folder":
+      sendToDashWindow(windowId, "initGitInFolder", {
+        nodePath: data?.nodePath,
       });
       return;
-    }
     case "copy_path_to_clipboard":
       await Utils.clipboardWriteText(String(data?.nodePath || ""));
       return;
@@ -2291,6 +2285,14 @@ function bunnyPaths() {
     TYPESCRIPT_PACKAGE_PATH: "",
     BIOME_PACKAGE_PATH: "",
   };
+}
+
+async function getWebBridgeOrigin() {
+  const port = await app.getWebBridgePort().catch(() => null);
+  if (!port) {
+    return "";
+  }
+  return `http://localhost:${port}`;
 }
 
 function bunnyPeerDependencies() {
@@ -4621,6 +4623,7 @@ async function handleBunnyDashRequest(method: string, params: any) {
         windowId: getCurrentWindow().id,
         buildVars: bunnyBuildVars(),
         paths: bunnyPaths(),
+        webBridgeOrigin: await getWebBridgeOrigin(),
         peerDependencies: bunnyPeerDependencies(),
         workspace,
         bunnyDash: buildWorkspaceLensPayload(getCurrentWindow().id),
@@ -4728,6 +4731,11 @@ async function handleBunnyDashRequest(method: string, params: any) {
       return bunnyDashState.tokens || [];
     case "setToken":
       return;
+    case "safeDeleteFileOrFolder":
+    case "safeTrashFileOrFolder":
+      return invokeFsCarrot(method, params, {
+        windowId: getCurrentWindow().id,
+      });
     default:
       return UNHANDLED_DASH_REQUEST;
   }

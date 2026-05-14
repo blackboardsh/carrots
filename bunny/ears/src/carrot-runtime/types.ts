@@ -56,6 +56,13 @@ export type CarrotRemoteUI = {
   path: string;
 };
 
+export type CarrotSlateUI = {
+  name: string;
+  // Path within the carrot's currentDir to the entry ESM file.
+  // e.g. "slate-ui/git/index.js"
+  path: string;
+};
+
 export type CarrotFileActivator = {
   baseName?: string;
   nodeType?: "file" | "dir" | "any";
@@ -94,6 +101,9 @@ export type CarrotManifest = {
   // Remote UIs declared by the carrot — exposed for browser loading via Hop.
   // Map of remote UI ID → { name (label), path (within currentDir) }.
   remoteUIs?: Record<string, CarrotRemoteUI>;
+  // Slate UIs declared by the carrot — exposed for same-document Dash loading.
+  // Map of slate UI ID → { name (label), path (within currentDir) }.
+  slateUIs?: Record<string, CarrotSlateUI>;
   contributions?: CarrotContributions;
 };
 

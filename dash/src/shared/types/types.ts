@@ -107,6 +107,28 @@ export type SlateType =
       config?: Record<string, unknown>;
     }
   | {
+      v?: 1;
+      name: string;
+      type: "carrot-remote-ui";
+      icon?: string;
+      config: {
+        carrotId: string;
+        remoteUIId: string;
+        query?: Record<string, string>;
+      };
+    }
+  | {
+      v?: 1;
+      name: string;
+      type: "carrot-slate-ui";
+      icon?: string;
+      config: {
+        carrotId: string;
+        slateUIId: string;
+        query?: Record<string, string>;
+      };
+    }
+  | {
       // not stored in .bunny.json, based on subfolder
       type: "devlink";
     }

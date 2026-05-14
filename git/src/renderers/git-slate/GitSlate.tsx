@@ -4,21 +4,17 @@ import {
   createEffect,
   createSignal,
   onCleanup,
+  onMount,
   untrack,
 } from "solid-js";
 import { createStore, unwrap } from "solid-js/store";
 import { type Accessor } from "solid-js";
-import { DiffEditor } from "../DiffEditor";
-import { state, setState, openNewTabForNode } from "../store";
-
-import { getProjectForNodePath } from "../files";
-import type { CachedFileType } from "../../../shared/types/types";
-import { join } from "../../utils/pathUtils";
-import { electrobun, invokeGitCarrot } from "../init";
-import { Dialog } from "../components/Dialog";
+import { Dialog } from "../../../../dash/src/renderers/lens/components/Dialog";
+import { dirname, join } from "../../../../dash/src/renderers/utils/pathUtils";
+import { electrobun, invokeFsCarrot, invokeGitCarrot, sendToHost } from "../shared/bridge";
 
 type FileChangeType = {
-  changeType: "A" | "M" | "D" | "?" | "";
+  changeType: string;
   relPath: string;
 };
 
@@ -66,6 +62,30 @@ type SyncStatusType = {
   behind: number;
 };
 
+type DashDiffEditorElement = HTMLElement & {
+  originalText: string;
+  modifiedText: string;
+  filePath: string;
+  canStageLines: boolean;
+  isStaged: boolean;
+  onStageLines?: (
+    filePath: string,
+    startLine: number,
+    endLine: number,
+    lineChange?: any,
+    originalText?: string,
+    modifiedText?: string,
+  ) => void;
+  onUnstageLines?: (
+    filePath: string,
+    startLine: number,
+    endLine: number,
+    lineChange?: any,
+    originalText?: string,
+    stagedText?: string,
+  ) => void;
+};
+
 type UIStateType = {
   changes: UncommittedChangesType;
   log: CommitType[];
@@ -90,64 +110,66 @@ const parseStatusLine = (line: string) => {
   };
 };
 
-// todo (yoav): maybe we just give it a path and it fetches the node as needed
-export const GitSlate = ({ node }: { node?: CachedFileType }) => {
-  if (!node) {
+const getGitFilePath = (file: any): string => {
+  const maybePath = file?.file ?? file?.path ?? file?.to ?? file?.from ?? "";
+  return typeof maybePath === "string" ? maybePath : "";
+};
+
+const getGitFileChangeType = (file: any): string => {
+  const status = typeof file?.status === "string" ? file.status.trim() : "";
+  if (status) {
+    return status;
+  }
+  const indexStatus = typeof file?.index === "string" ? file.index.trim() : "";
+  if (indexStatus) {
+    return indexStatus;
+  }
+  const workingTreeStatus =
+    typeof file?.working_dir === "string" ? file.working_dir.trim() : "";
+  if (workingTreeStatus) {
+    return workingTreeStatus;
+  }
+  if (typeof file?.changes === "number") {
+    if (file.insertions > 0 && file.deletions === 0) {
+      return "A";
+    }
+    if (file.deletions > 0 && file.insertions === 0) {
+      return "D";
+    }
+    if (file.changes > 0) {
+      return "M";
+    }
+  }
+  return "";
+};
+
+export const GitSlate = ({ nodePath }: { nodePath: string }) => {
+  if (!nodePath) {
     return null;
   }
 
-  const repoRootPath = node.path.replace(/\.git/, "");
+  const repoRootPath = nodePath.replace(/\/?\.git\/?$/, "");
   const gitRequest = <T = unknown>(method: string, params?: unknown) =>
     invokeGitCarrot<T>(method, params);
+  let statusRefreshInFlight: Promise<void> | null = null;
+  let statusRefreshQueued = false;
 
-  let refreshLogAndStageTimeout: Timer;
+  let refreshLogAndStageTimeout: ReturnType<typeof setTimeout> | undefined;
 
-  createEffect(() => {
-    if (state.lastFileChange) {
-      const absolutePath = state.lastFileChange;
+  onMount(() => {
+    void getLogAndStatus();
 
-      // Check if this change is relevant to this git repo
-      const isInThisRepo = absolutePath.startsWith(repoRootPath);
-      if (!isInThisRepo) {
-        return;
+    const handleFocus = () => {
+      void getLogAndStatus();
+    };
+
+    window.addEventListener("focus", handleFocus);
+    onCleanup(() => {
+      window.removeEventListener("focus", handleFocus);
+      if (refreshLogAndStageTimeout) {
+        clearTimeout(refreshLogAndStageTimeout);
       }
-
-      // For .git/ folder changes, only react to meaningful ones (not lock files, etc.)
-      if (absolutePath.includes("/.git/")) {
-        // Ignore lock files - they're temporary and cause infinite loops
-        if (absolutePath.endsWith(".lock")) {
-          return;
-        }
-
-        // React to changes that indicate git state changed (commits, refs, index, etc.)
-        const isGitStateChange =
-          absolutePath.includes("/.git/refs/") ||
-          absolutePath.endsWith("/.git/HEAD") ||
-          absolutePath.endsWith("/.git/index") ||
-          absolutePath.endsWith("/.git/COMMIT_EDITMSG") ||
-          absolutePath.endsWith("/.git/FETCH_HEAD") ||
-          absolutePath.endsWith("/.git/ORIG_HEAD") ||
-          absolutePath.includes("/.git/logs/") ||
-          absolutePath.includes("/.git/hooks/");
-
-        if (!isGitStateChange) {
-          return;
-        }
-      }
-
-      clearTimeout(refreshLogAndStageTimeout);
-      refreshLogAndStageTimeout = setTimeout(() => {
-        getLogAndStatus();
-        // Note: We no longer clear/reset selectedFile here to avoid remounting
-        // the DiffEditor component. The diff content comparison in setUiState
-        // will prevent unnecessary re-renders.
-      }, 100);
-    }
-  });
-
-  // Cleanup timeout on component unmount
-  onCleanup(() => {
-    clearTimeout(refreshLogAndStageTimeout);
+    });
   });
 
   // startWatching();
@@ -200,21 +222,43 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       relPath: "",
       changeType: "",
     });
+  let diffEditorRef: DashDiffEditorElement | undefined;
+
+  const syncDiffEditorProps = () => {
+    const diffEditor = diffEditorRef;
+    if (!diffEditor) {
+      return;
+    }
+
+    console.log("[GitSlate] syncDiffEditorProps", {
+      relPath: selectedFile().relPath,
+      commitHash: selectedFile().commitHash,
+      originalLength: (uiState.originalText || "").length,
+      modifiedLength: (uiState.modifiedText || "").length,
+    });
+
+    diffEditor.originalText = uiState.originalText || "";
+    diffEditor.modifiedText = uiState.modifiedText || "";
+    diffEditor.filePath = selectedFile().relPath || "";
+    diffEditor.canStageLines = false;
+    diffEditor.isStaged = false;
+    diffEditor.onStageLines = undefined;
+    diffEditor.onUnstageLines = undefined;
+  };
 
   const getFileContents = async (
     filepath: string,
     commitRef: string = "HEAD"
   ) => {
-    console.log('getFileContents called:', filepath, commitRef);
     // todo (yoav): revisit this with simplegit, HEAD may have a different meaning
     if (commitRef === "WORKING") {
       // Special case: read from working directory
       const absolutePath = join(repoRootPath, filepath);
-      const exists = await electrobun.rpc?.request.exists({ path: absolutePath });
+      const exists = await invokeFsCarrot<boolean>("exists", { path: absolutePath });
       if (!exists) {
         return "";
       }
-      const result = await electrobun.rpc?.request.readFile({ path: absolutePath });
+      const result = await invokeFsCarrot<{ textContent?: string }>("readFile", { path: absolutePath });
       const content = result?.textContent || "";
       return content;
     } else if (commitRef === "INDEX") {
@@ -226,7 +270,6 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
         .catch(() => "");
       return content || "";
     } else if (commitRef !== "HEAD") {
-      console.log('Reading from commit:', commitRef);
       const content = await gitRequest<string>("gitShow", {
           options: [`${commitRef}:${filepath}`],
           repoRoot: repoRootPath,
@@ -237,7 +280,6 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
         });
       return content || "";
     } else {
-      console.log('Reading from HEAD');
       // HEAD - get from git
       const content = await gitRequest<string>("gitShow", {
           options: [`HEAD:${filepath}`],
@@ -313,6 +355,9 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
   };
 
   const onClickChange = async (change: FileChangeType, commitHash = "HEAD", isFromStaged = false) => {
+    if (!change?.relPath) {
+      return;
+    }
     setSelectedFile({
       commitHash,
       // oldPath: change.oldPath,
@@ -330,12 +375,10 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
         let isStaged: boolean;
         if (isFromStaged !== undefined) {
           isStaged = isFromStaged;
-          console.log(`Using explicit staged flag: ${isStaged} for ${relPath}`);
         } else {
           // Fallback: assume unstaged if file exists in unstaged, otherwise staged
           const isUnstaged = relPath in (uiState.changes.unstaged || {});
           isStaged = !isUnstaged;
-          console.log(`Detected staged status: ${isStaged} for ${relPath} (unstaged: ${isUnstaged})`);
         }
         
         const { originalText, modifiedText } = await getFileDiff(
@@ -344,6 +387,15 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
           changeType,
           isStaged
         );
+
+        console.log("[GitSlate] getFileDiff result", {
+          relPath,
+          commitHash,
+          changeType,
+          isStaged,
+          originalLength: (originalText || "").length,
+          modifiedLength: (modifiedText || "").length,
+        });
 
         // Only update if content actually changed to avoid unnecessary re-renders
         const newOriginal = originalText || "";
@@ -362,6 +414,32 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
         });
       }
     }
+  });
+
+  createEffect(() => {
+    const currentSelection = selectedFile();
+    const originalText = uiState.originalText || "";
+    const modifiedText = uiState.modifiedText || "";
+
+    const diffEditor = diffEditorRef;
+    if (!diffEditor) {
+      return;
+    }
+
+    console.log("[GitSlate] syncDiffEditorProps", {
+      relPath: currentSelection.relPath,
+      commitHash: currentSelection.commitHash,
+      originalLength: originalText.length,
+      modifiedLength: modifiedText.length,
+    });
+
+    diffEditor.originalText = originalText;
+    diffEditor.modifiedText = modifiedText;
+    diffEditor.filePath = currentSelection.relPath || "";
+    diffEditor.canStageLines = false;
+    diffEditor.isStaged = false;
+    diffEditor.onStageLines = undefined;
+    diffEditor.onUnstageLines = undefined;
   });
 
   let backupLabelRef: HTMLInputElement | undefined;
@@ -538,16 +616,6 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
     type: "default" as "default" | "danger"
   });
 
-  // Debug effect to monitor dialog state
-  createEffect(() => {
-    console.log('Dialog state changed - dialogOpen:', dialogOpen(), 'config:', dialogConfig());
-  });
-
-  // Debug effect to monitor description changes
-  createEffect(() => {
-    console.log('Description signal changed to:', descriptionValue());
-  });
-
   // Helper function to show error dialogs
   const showErrorDialog = (title: string, error: any) => {
     const errorMessage = error?.message || error?.toString() || 'An unknown error occurred';
@@ -567,15 +635,10 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       const latestCommit = uiState.log[0];
       const commitMessage = latestCommit?.message || '';
       
-      console.log('Undoing commit with message:', commitMessage);
-      
       // Split commit message into subject and description
       const lines = commitMessage.split('\n');
       const subject = lines[0] || '';
       const description = lines.slice(1).join('\n').trim();
-      
-      console.log('Subject:', subject);
-      console.log('Description:', description);
       
       // Perform git reset --soft HEAD~1 to undo the last commit
       // This moves HEAD back one commit while keeping changes in working tree
@@ -588,25 +651,15 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       await getLogAndStatus();
       
       // Now restore the commit message using reactive signals
-      console.log('Setting subject via signal to:', subject);
-      console.log('Setting description via signal to:', description);
-      console.log('Description length:', description.length);
-      
       setSubjectValue(subject);
       setSubjectLength(subject.length);
       setDescriptionValue(description);
-      
-      // Debug: Check what the signals contain after setting
-      console.log('Subject signal after setting:', subjectValue());
-      console.log('Description signal after setting:', descriptionValue());
-      
+
       // Fallback: Also try direct DOM manipulation as backup
       setTimeout(() => {
         if (descriptionRef) {
-          console.log('Fallback: Setting textarea via DOM to:', description);
           descriptionRef.value = description;
           descriptionRef.textContent = description;
-          console.log('Fallback: Textarea DOM value is now:', descriptionRef.value);
         }
       }, 100);
     } catch (error) {
@@ -739,263 +792,234 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
   };
 
   const getLogAndStatus = async (resetPagination = true) => {
-    if (resetPagination) {
-      setPagination({ offset: 0, hasMore: true, isLoading: false });
+    if (statusRefreshInFlight) {
+      statusRefreshQueued = true;
+      await statusRefreshInFlight;
+      if (statusRefreshQueued) {
+        statusRefreshQueued = false;
+      } else {
+        return;
+      }
     }
-    
-    const [gitLog, gitStatus, shortStat, gitStashes, gitRemotes, gitBranches] = await Promise.all([
-      gitRequest("gitLog", {
+
+    statusRefreshInFlight = (async () => {
+    try {
+      if (resetPagination) {
+        setPagination({ offset: 0, hasMore: true, isLoading: false });
+      }
+      
+      const gitLog = await gitRequest("gitLog", {
         repoRoot: repoRootPath,
         options: ["--name-status"],
         limit: pagination.limit,
         skip: resetPagination ? 0 : pagination.offset,
-      }),
-      gitRequest("gitStatus", {
+      });
+      const gitStatus = await gitRequest("gitStatus", {
         repoRoot: repoRootPath,
-      }),
-      gitRequest("gitDiff", {
+      });
+      const shortStat = await gitRequest("gitDiff", {
         repoRoot: repoRootPath,
         options: ["--shortstat", "HEAD"],
-      }),
-      gitRequest("gitStashList", {
+      });
+      const gitStashes = await gitRequest("gitStashList", {
         repoRoot: repoRootPath,
-      }),
-      gitRequest("gitRemote", {
+      });
+      const gitRemotes = await gitRequest("gitRemote", {
         repoRoot: repoRootPath,
-      }),
-      gitRequest("gitBranch", {
+      });
+      const gitBranches = await gitRequest("gitBranch", {
         repoRoot: repoRootPath,
         options: ["-a"], // Get all branches including remotes
-      }),
-    ]);
+      });
 
-    // Fetch remote-only commits if we have a tracking branch
-    let gitRemoteOnlyLog = { all: [] };
-    if (gitStatus?.tracking && gitBranches?.current) {
-      try {
-        gitRemoteOnlyLog = await gitRequest("gitLogRemoteOnly", {
-          repoRoot: repoRootPath,
-          localBranch: gitBranches.current,
-          remoteBranch: gitStatus.tracking,
-        }) || { all: [] };
-        console.log('Remote-only commits:', gitRemoteOnlyLog.all?.length || 0);
-      } catch (error) {
-        console.error('Error fetching remote-only commits:', error);
+      // Fetch remote-only commits if we have a tracking branch
+      let gitRemoteOnlyLog = { all: [] };
+      if (gitStatus?.tracking && gitBranches?.current) {
+        try {
+          gitRemoteOnlyLog = await gitRequest("gitLogRemoteOnly", {
+            repoRoot: repoRootPath,
+            localBranch: gitBranches.current,
+            remoteBranch: gitStatus.tracking,
+          }) || { all: [] };
+        } catch (error) {
+          console.error('Error fetching remote-only commits:', error);
+        }
       }
-    }
 
-    // Create a map of commit hash to refs (branches/tags)
-    const refsMap = new Map<string, string[]>();
-    
-    // Add current branch to HEAD commit
-    if (gitBranches?.current && gitLog?.all?.length > 0) {
-      const headCommit = gitLog.all[0];
-      if (headCommit) {
-        const refs = [gitBranches.current];
-        refsMap.set(headCommit.hash, refs);
-        console.log('Added HEAD refs:', refs, 'to commit', headCommit.hash);
-      }
-    }
-    
-    // Add remote tracking branch indicators
-    if (gitStatus?.tracking) {
-      const trackingBranch = gitStatus.tracking;
-      console.log('Tracking branch:', trackingBranch, 'ahead:', gitStatus.ahead, 'behind:', gitStatus.behind);
+      // Create a map of commit hash to refs (branches/tags)
+      const refsMap = new Map<string, string[]>();
       
-      if (gitStatus.ahead > 0) {
-        // We are ahead - remote is behind us by gitStatus.ahead commits
-        const remoteCommitIndex = gitStatus.ahead;
-        console.log('Remote is behind by', gitStatus.ahead, 'commits, looking at index', remoteCommitIndex);
-        
-        if (gitLog?.all?.length > remoteCommitIndex) {
-          const remoteCommit = gitLog.all[remoteCommitIndex];
-          if (remoteCommit) {
-            const existingRefs = refsMap.get(remoteCommit.hash) || [];
-            existingRefs.push(trackingBranch);
-            refsMap.set(remoteCommit.hash, existingRefs);
-            console.log('Added remote tracking refs:', existingRefs, 'to commit', remoteCommit.hash, 'at index', remoteCommitIndex);
-          }
+      // Add current branch to HEAD commit
+      if (gitBranches?.current && gitLog?.all?.length > 0) {
+        const headCommit = gitLog.all[0];
+        if (headCommit) {
+          const refs = [gitBranches.current];
+          refsMap.set(headCommit.hash, refs);
         }
-      } else if (gitStatus.behind > 0) {
-        // We are behind - remote is ahead (but this case is less common for showing in history)
-        console.log('We are behind the remote by', gitStatus.behind, 'commits');
-        // Could add logic here if needed
-      } else if (gitStatus.ahead === 0 && gitStatus.behind === 0) {
-        // We are in sync - remote is at the same commit as us
-        console.log('In sync with remote, adding remote ref to HEAD commit');
-        if (gitLog?.all?.length > 0) {
-          const headCommit = gitLog.all[0];
-          const existingRefs = refsMap.get(headCommit.hash) || [];
-          if (!existingRefs.includes(trackingBranch)) {
-            existingRefs.push(trackingBranch);
-            refsMap.set(headCommit.hash, existingRefs);
-            console.log('Added remote tracking refs to HEAD:', existingRefs, 'to commit', headCommit.hash);
+      }
+
+      // Add remote tracking branch indicators
+      if (gitStatus?.tracking) {
+        const trackingBranch = gitStatus.tracking;
+        if (gitStatus.ahead > 0) {
+          // We are ahead - remote is behind us by gitStatus.ahead commits
+          const remoteCommitIndex = gitStatus.ahead;
+          if (gitLog?.all?.length > remoteCommitIndex) {
+            const remoteCommit = gitLog.all[remoteCommitIndex];
+            if (remoteCommit) {
+              const existingRefs = refsMap.get(remoteCommit.hash) || [];
+              existingRefs.push(trackingBranch);
+              refsMap.set(remoteCommit.hash, existingRefs);
+            }
+          }
+        } else if (gitStatus.ahead === 0 && gitStatus.behind === 0) {
+          if (gitLog?.all?.length > 0) {
+            const headCommit = gitLog.all[0];
+            const existingRefs = refsMap.get(headCommit.hash) || [];
+            if (!existingRefs.includes(trackingBranch)) {
+              existingRefs.push(trackingBranch);
+              refsMap.set(headCommit.hash, existingRefs);
+            }
           }
         }
       }
-    }
 
-    // Process remote-only commits (these go at the top with lower opacity)
-    const remoteOnlyCommits = gitRemoteOnlyLog?.all?.map((commit: any) => {
-      return {
-        author: commit.author_name,
-        date: new Date(commit.date).getTime(),
-        hash: commit.hash,
-        files: commit.diff?.files?.reduce((acc: any, file: any) => {
-          if (file.file) {
-            acc[file.file] = {
-              changeType: file.status || "",
-              relPath: file.file,
+      // Process remote-only commits (these go at the top with lower opacity)
+      const remoteOnlyCommits = gitRemoteOnlyLog?.all?.map((commit: any) => {
+        return {
+          author: commit.author_name,
+          date: new Date(commit.date).getTime(),
+          hash: commit.hash,
+          files: commit.diff?.files?.reduce((acc: any, file: any) => {
+            const filePath = getGitFilePath(file);
+            if (filePath) {
+              acc[filePath] = {
+                changeType: getGitFileChangeType(file),
+                relPath: filePath,
+              };
+            }
+            return acc;
+          }, {}) || {},
+          message: commit.message,
+          body: commit.body,
+          shortStat: `added: ${commit.diff?.insertions || 0} removed: ${commit.diff?.deletions || 0} changed: ${commit.diff?.changed || 0}`,
+          refs: refsMap.get(commit.hash) || [],
+          isRemoteOnly: true, // Flag to show with lower opacity
+        };
+      }) || [];
+
+      // Process local commits
+      const localCommits = gitLog?.all?.map((commit) => {
+        return {
+          author: commit.author_name,
+          date: new Date(commit.date).getTime(),
+          hash: commit.hash,
+          files: commit.diff?.files?.reduce((acc: any, file: any) => {
+            const filePath = getGitFilePath(file);
+            if (filePath) {
+              acc[filePath] = {
+                changeType: getGitFileChangeType(file),
+                relPath: filePath,
+              };
+            }
+            return acc;
+          }, {}) || {},
+          message: commit.message,
+          body: commit.body,
+          shortStat: `added: ${commit.diff?.insertions || 0} removed: ${commit.diff?.deletions || 0} changed: ${commit.diff?.changed || 0}`,
+          refs: refsMap.get(commit.hash) || [],
+          isRemoteOnly: false,
+        };
+      }) || [];
+
+      const log = [...remoteOnlyCommits, ...localCommits];
+      const staged: FileChangesType = {};
+      const unstaged: FileChangesType = {};
+      
+      gitStatus?.files.forEach((file: any) => {
+        const filePath = getGitFilePath(file);
+        if (filePath) {
+          if (file.index && file.index.trim() !== ' ' && file.index.trim() !== '' && file.index.trim() !== '?') {
+            staged[filePath] = {
+              changeType: file.index.trim(),
+              relPath: filePath,
             };
           }
-          return acc;
-        }, {}) || {},
-        message: commit.message,
-        body: commit.body,
-        shortStat: `added: ${commit.diff?.insertions || 0} removed: ${commit.diff?.deletions || 0} changed: ${commit.diff?.changed || 0}`,
-        refs: refsMap.get(commit.hash) || [],
-        isRemoteOnly: true, // Flag to show with lower opacity
-      };
-    }) || [];
-
-    // Process local commits
-    const localCommits = gitLog?.all?.map((commit, index) => {
-      // Debug the first commit to see what properties are available
-      if (index === 0) {
-        console.log('Raw commit object:', commit);
-        console.log('Commit message:', commit.message);
-        console.log('Commit body:', commit.body);
-        console.log('Refs for this commit:', refsMap.get(commit.hash));
-      }
-      
-      return {
-        author: commit.author_name,
-        date: new Date(commit.date).getTime(),
-        hash: commit.hash,
-        files: commit.diff?.files?.reduce((acc: any, file: any) => {
-          if (file.file) {
-            acc[file.file] = {
-              changeType: file.status || "",
-              relPath: file.file,
+          if (file.working_dir && file.working_dir.trim() !== ' ' && file.working_dir.trim() !== '') {
+            unstaged[filePath] = {
+              changeType: file.working_dir.trim(),
+              relPath: filePath,
             };
           }
-          return acc;
-        }, {}) || {},
-        message: commit.message,
-        body: commit.body,
-        shortStat: `added: ${commit.diff?.insertions || 0} removed: ${commit.diff?.deletions || 0} changed: ${commit.diff?.changed || 0}`,
-        refs: refsMap.get(commit.hash) || [],
-        isRemoteOnly: false,
+        }
+      });
+
+      const changes = {
+        staged,
+        unstaged,
+        shortStat: shortStat || "",
       };
-    }) || [];
 
-    // Combine: remote-only commits first, then local commits
-    const log = [...remoteOnlyCommits, ...localCommits];
-    
-    console.log('Combined log:', log.length, 'commits (', remoteOnlyCommits.length, 'remote-only,', localCommits.length, 'local)');
+      const remotes = (gitRemotes || []).map((remote: any) => ({
+        name: remote.name,
+        refs: remote.refs,
+      }));
 
-    // Separate staged and unstaged changes
-    const staged: FileChangesType = {};
-    const unstaged: FileChangesType = {};
-    
-    gitStatus?.files.forEach((file: any) => {
-      if (file.path) {
-        console.log(`File: ${file.path}, index: "${file.index}", working_dir: "${file.working_dir}"`);
-        // file.index = staged changes (ready to commit)
-        // file.working_dir = unstaged changes (not yet staged)
-        if (file.index && file.index.trim() !== ' ' && file.index.trim() !== '' && file.index.trim() !== '?') {
-          staged[file.path] = {
-            changeType: file.index.trim(),
-            relPath: file.path,
-          };
-          console.log(`  -> Added to staged: ${file.path} (${file.index.trim()})`);
-        }
-        if (file.working_dir && file.working_dir.trim() !== ' ' && file.working_dir.trim() !== '') {
-          unstaged[file.path] = {
-            changeType: file.working_dir.trim(),
-            relPath: file.path,
-          };
-          console.log(`  -> Added to unstaged: ${file.path} (${file.working_dir.trim()})`);
+      const branches: BranchInfo = {
+        current: gitBranches?.current || "",
+        all: gitBranches?.all || [],
+        remote: (gitBranches?.all || []).filter((b: string) => b.includes("remotes/")),
+      };
+      
+      let syncStatus = { ahead: 0, behind: 0 };
+      if (branches.current && remotes.length > 0) {
+        const trackingBranch = gitStatus?.tracking;
+        if (trackingBranch) {
+          syncStatus.ahead = gitStatus?.ahead || 0;
+          syncStatus.behind = gitStatus?.behind || 0;
+          branches.trackingBranch = trackingBranch;
         }
       }
-    });
 
-    const changes = {
-      staged,
-      unstaged,
-      shortStat: shortStat || "",
-    };
+      setUiState('branches', { current: '', all: [], remote: [] });
+      
+      const finalLog = resetPagination ? log : [...uiState.log, ...log];
+      
+      setUiState({ 
+        log: finalLog, 
+        changes: changes, 
+        stashes: gitStashes || [],
+        remotes: remotes,
+        branches: { ...branches },
+        syncStatus: syncStatus,
+      });
+      
+      setPagination({
+        offset: resetPagination ? pagination.limit : pagination.offset + pagination.limit,
+        hasMore: log.length === pagination.limit,
+        isLoading: false,
+      });
+      
+      if (remotes.length > 0) {
+        const allRemoteNames = new Set(remotes.map((r: any) => r.name as string));
+        setExpandedRemotes(allRemoteNames);
+      }
+      
+    } catch (error) {
+      console.error("Error loading git slate state:", error);
+      setPagination("isLoading", false);
+    }
+    })();
 
-    // Process remotes
-    const remotes = (gitRemotes || []).map((remote: any) => ({
-      name: remote.name,
-      refs: remote.refs,
-    }));
-
-    // Process branches
-    const branches: BranchInfo = {
-      current: gitBranches?.current || "",
-      all: gitBranches?.all || [],
-      remote: (gitBranches?.all || []).filter((b: string) => b.includes("remotes/")),
-    };
-    
-    console.log('Branch data from git:', {
-      current: gitBranches?.current,
-      all: gitBranches?.all,
-      allCount: gitBranches?.all?.length,
-      rawGitBranches: gitBranches
-    });
-    
-    console.log('UI branches before update:', {
-      current: uiState.branches.current,
-      all: uiState.branches.all
-    });
-
-    // Calculate sync status (ahead/behind)
-    let syncStatus = { ahead: 0, behind: 0 };
-    if (branches.current && remotes.length > 0) {
-      // Check tracking branch
-      const trackingBranch = gitStatus?.tracking;
-      if (trackingBranch) {
-        // Get ahead/behind from status
-        syncStatus.ahead = gitStatus?.ahead || 0;
-        syncStatus.behind = gitStatus?.behind || 0;
-        branches.trackingBranch = trackingBranch;
+    try {
+      await statusRefreshInFlight;
+    } finally {
+      statusRefreshInFlight = null;
+      if (statusRefreshQueued) {
+        statusRefreshQueued = false;
+        void getLogAndStatus(resetPagination);
       }
     }
-
-    // Force SolidJS reactivity by clearing first, then setting
-    setUiState('branches', { current: '', all: [], remote: [] });
-    
-    // Handle pagination: append or replace commits
-    const finalLog = resetPagination ? log : [...uiState.log, ...log];
-    
-    setUiState({ 
-      log: finalLog, 
-      changes: changes, 
-      stashes: gitStashes || [],
-      remotes: remotes,
-      branches: { ...branches }, // Force reactivity by creating new object
-      syncStatus: syncStatus,
-    });
-    
-    // Update pagination state
-    setPagination({
-      offset: resetPagination ? pagination.limit : pagination.offset + pagination.limit,
-      hasMore: log.length === pagination.limit, // If we got a full batch, there might be more
-      isLoading: false,
-    });
-    
-    // Expand all remotes by default
-    if (remotes.length > 0) {
-      const allRemoteNames = new Set(remotes.map((r: any) => r.name as string));
-      setExpandedRemotes(allRemoteNames);
-    }
-    
-    console.log('UI updated with branches:', {
-      current: branches.current,
-      all: branches.all
-    });
   };
 
   // Function to load more commits for infinite scroll
@@ -1019,9 +1043,13 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
           
           if (commit.diff && commit.diff.files) {
             commit.diff.files.forEach((file: any) => {
-              files[file.file] = {
-                changeType: file.changes > 0 ? (file.insertions > 0 ? "M" : "A") : "D",
-                relPath: file.file,
+              const filePath = getGitFilePath(file);
+              if (!filePath) {
+                return;
+              }
+              files[filePath] = {
+                changeType: getGitFileChangeType(file),
+                relPath: filePath,
               };
             });
           }
@@ -1246,10 +1274,9 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
 
   const dropStash = async (stashName: string) => {
     try {
-      await electrobun.rpc?.request.execSpawnSync({
-        cmd: 'git',
-        args: ['stash', 'drop', stashName],
-        opts: { cwd: repoRootPath },
+      await gitRequest("gitDropStash", {
+        repoRoot: repoRootPath,
+        stashName,
       });
       await getLogAndStatus();
     } catch (error) {
@@ -1287,10 +1314,8 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
   };
 
   const discardFileChanges = (filePath: string) => {
-    console.log('discardFileChanges called with:', filePath);
     const change = uiState.changes.unstaged[filePath];
     if (!change) {
-      console.log('No change found for:', filePath);
       return;
     }
     
@@ -1304,7 +1329,6 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       message = `Are you sure you want to discard all changes in "${filePath}"? This action cannot be undone.`;
     }
     
-    console.log('Setting dialog config:', { title, message });
     setDialogConfig({
       title,
       message,
@@ -1313,46 +1337,17 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       onConfirm: async () => {
         setDialogOpen(false);
         try {
-          if (change.changeType === '?' || change.changeType === 'A') {
-            // For new/untracked files, delete them
-            const fullPath = filePath.startsWith('/') 
-              ? filePath 
-              : `${repoRootPath}/${filePath}`;
-            await electrobun.rpc?.request.safeDeleteFileOrFolder({
-              absolutePath: fullPath,
-            });
-          } else {
-            // First try regular checkout
-            const result = await electrobun.rpc?.request.execSpawnSync({
-              cmd: 'git',
-              args: ['checkout', '--', filePath],
-              opts: { cwd: repoRootPath },
-            }) as { stdout?: string; stderr?: string; exitCode?: number | null } | string | undefined;
-
-            // If that fails due to unmerged file, try reset then checkout
-            const output = typeof result === 'string' ? result : (result?.stdout || result?.stderr || '');
-            if (output.includes('unmerged')) {
-              // Reset the file in the index first
-              await electrobun.rpc?.request.execSpawnSync({
-                cmd: 'git',
-                args: ['reset', '--', filePath],
-                opts: { cwd: repoRootPath },
-              });
-              // Then checkout from HEAD
-              await electrobun.rpc?.request.execSpawnSync({
-                cmd: 'git',
-                args: ['checkout', 'HEAD', '--', filePath],
-                opts: { cwd: repoRootPath },
-              });
-            }
-          }
+          await gitRequest("gitDiscardFileChanges", {
+            repoRoot: repoRootPath,
+            filePath,
+            changeType: change.changeType,
+          });
           await getLogAndStatus();
         } catch (error) {
           console.error('Error discarding changes:', error);
         }
       }
     });
-    console.log('Setting dialog open to true');
     setDialogOpen(true);
   };
 
@@ -1367,39 +1362,9 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       onConfirm: async () => {
         setDialogOpen(false);
         try {
-          // Handle each file individually to properly deal with new files
-          for (const [filePath, change] of Object.entries(uiState.changes.unstaged)) {
-            if (change.changeType === '?' || change.changeType === 'A') {
-              // Delete new/untracked files
-              const fullPath = filePath.startsWith('/') 
-                ? filePath 
-                : `${repoRootPath}/${filePath}`;
-              await electrobun.rpc?.request.safeDeleteFileOrFolder({
-                absolutePath: fullPath,
-              });
-            } else {
-              // Discard changes for modified/deleted files
-              try {
-                await electrobun.rpc?.request.execSpawnSync({
-                  cmd: 'git',
-                  args: ['checkout', '--', filePath],
-                  opts: { cwd: repoRootPath },
-                });
-              } catch (checkoutError) {
-                // If unmerged, reset then checkout
-                await electrobun.rpc?.request.execSpawnSync({
-                  cmd: 'git',
-                  args: ['reset', '--', filePath],
-                  opts: { cwd: repoRootPath },
-                });
-                await electrobun.rpc?.request.execSpawnSync({
-                  cmd: 'git',
-                  args: ['checkout', 'HEAD', '--', filePath],
-                  opts: { cwd: repoRootPath },
-                });
-              }
-            }
-          }
+          await gitRequest("gitDiscardAllChanges", {
+            repoRoot: repoRootPath,
+          });
           await getLogAndStatus();
         } catch (error) {
           console.error('Error discarding all changes:', error);
@@ -1408,9 +1373,6 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
     });
     setDialogOpen(true);
   };
-
-  // todo (yoav): you could add filewatchers in here for just the .git folder for both status and log
-  getLogAndStatus();
 
   // Alt key tracking for modifier actions
   createEffect(() => {
@@ -1461,17 +1423,6 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
     const tempGitPath = join(tempRootPath, ".git");
     const originalGitPath = join(repoRootPath, ".git");
 
-    const project = getProjectForNodePath(node.path);
-
-    if (!project) {
-      console.error("no project for node path");
-      return;
-    }
-    // Recreate the file watchers because we're actually going to move and replace the entire folder.
-    electrobun.rpc?.send("removeProjectDirectoryWatcher", {
-      projectId: project.id,
-    });
-
     // const oldGitWatcher = watcher;
     // oldGitWatcher.close();
 
@@ -1483,7 +1434,7 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
     await onClickSaveBackup();
 
     // duplicate the repo and checkout the target commit in that duplicate repo
-    await electrobun.rpc?.request.copy({
+    await invokeFsCarrot("copy", {
       src: repoRootPath,
       dest: tempRootPath,
     });
@@ -1493,21 +1444,21 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
       hash: commit.hash,
     });
     // replace that duplicate repo's .git folder with the original
-    await electrobun.rpc?.request.safeDeleteFileOrFolder({
+    await invokeFsCarrot("safeDeleteFileOrFolder", {
       absolutePath: tempGitPath,
     });
 
-    await electrobun.rpc?.request.copy({
+    await invokeFsCarrot("copy", {
       src: originalGitPath,
       dest: tempGitPath,
     });
 
     // save the original repo as -backup just in case and replace the duplicate to the original
-    await electrobun.rpc?.request.rename({
+    await invokeFsCarrot("rename", {
       oldPath: repoRootPath,
       newPath: backupPath,
     });
-    await electrobun.rpc?.request.rename({
+    await invokeFsCarrot("rename", {
       oldPath: tempRootPath,
       newPath: repoRootPath,
     });
@@ -1519,22 +1470,29 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
 
     await onClickSaveBackup();
 
-    electrobun.rpc?.send("removeProjectDirectoryWatcher", {
-      projectId: project.id,
-    });
-
-    await electrobun.rpc?.request.safeTrashFileOrFolder({ path: backupPath });
+    await invokeFsCarrot("safeTrashFileOrFolder", { path: backupPath });
   };
 
   return (
-    <div style={{ height: "100%", display: "flex" }}>
+    <div
+      style={{
+        height: "100%",
+        width: "100%",
+        display: "flex",
+        overflow: "hidden",
+        "min-width": "0",
+        "min-height": "0",
+      }}
+    >
       <div
         id="backup-sidbar"
         style={{
           width: "500px",
+          flex: "0 0 500px",
+          "max-width": "500px",
           "min-width": "340px",
           height: "100%",
-          overflow: "scroll",
+          overflow: "hidden",
           background: "#4d4d4d",
           color: "#e0e0e0",
         }}
@@ -2235,8 +2193,9 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
                             <For each={commit.refs}>
                               {(ref) => {
                                 // Determine ref type and color
-                                const isRemote = ref.includes('/');
-                                const isHead = ref === uiState.branches.current;
+                                const refName = typeof ref === "string" ? ref : "";
+                                const isRemote = refName.includes('/');
+                                const isHead = refName === uiState.branches.current;
                                 
                                 let bgColor = "#555";
                                 let textColor = "#cccccc";
@@ -2266,12 +2225,12 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
                                     }}
                                     title={isRemote ? 
                                       (uiState.syncStatus.ahead > 0 || uiState.syncStatus.behind > 0) ?
-                                        `${ref} (common ancestor - this is where local and remote branches diverged)` :
-                                        `Remote branch: ${ref}` :
-                                      `Local branch: ${ref}`
+                                        `${refName} (common ancestor - this is where local and remote branches diverged)` :
+                                        `Remote branch: ${refName}` :
+                                      `Local branch: ${refName}`
                                     }
                                   >
-                                    {isHead ? 'HEAD' : ref}
+                                    {isHead ? 'HEAD' : refName}
                                   </div>
                                 );
                               }}
@@ -3673,51 +3632,62 @@ export const GitSlate = ({ node }: { node?: CachedFileType }) => {
         </div>
       </div>
       </div>
-      <div id="backup-diff" style={{ height: "100%", width: "100%" }}>
-        <Show 
-          when={`${selectedFile().relPath}-${selectedFile().isFromStaged ? 'staged' : 'unstaged'}`}
-          keyed
-          fallback={<div>Loading...</div>}
+      <div
+        id="backup-diff"
+        style={{
+          flex: "1 1 0",
+          display: "flex",
+          "flex-direction": "column",
+          "min-width": "0",
+          "min-height": "0",
+          overflow: "hidden",
+        }}
+      >
+        <Show
+          when={selectedFile().relPath}
+          fallback={
+            <div
+              style={{
+                height: "100%",
+                width: "100%",
+                display: "flex",
+                "align-items": "center",
+                "justify-content": "center",
+                background: "#1e1e1e",
+                color: "#858585",
+                "font-size": "12px",
+                "font-family": "'Segoe UI', system-ui, sans-serif",
+              }}
+            >
+              Select a changed file to view its diff
+            </div>
+          }
         >
-          <DiffEditor
-            originalText={() => uiState.originalText || ""}
-            modifiedText={() => uiState.modifiedText || ""}
-            onStageLines={stageLines}
-            onUnstageLines={unstageLines}
-            canStageLines={(() => {
-              const canStage = selectedFile().commitHash === "HEAD";
-              console.log("GitSlate: canStageLines =", canStage, "commitHash =", selectedFile().commitHash);
-              return canStage;
-            })()}
-            filePath={(() => {
-              const path = selectedFile().relPath;
-              console.log("GitSlate: filePath =", path);
-              return path;
-            })()}
-            isStaged={(() => {
-              const staged = selectedFile().isFromStaged || false;
-              console.log("GitSlate: passing isStaged =", staged, "to DiffEditor");
-              return staged;
-            })()}
+          <dash-diff-editor
+            ref={(el) => {
+              diffEditorRef = el as DashDiffEditorElement;
+              syncDiffEditorProps();
+            }}
+            style={{
+              display: "block",
+              width: "100%",
+              height: "100%",
+              "min-height": "0",
+            }}
           />
         </Show>
       </div>
       
       {/* Dialog Component */}
-      {(() => {
-        console.log('About to render Dialog - isOpen:', dialogOpen(), 'title:', dialogConfig().title);
-        return (
-          <Dialog
-            isOpen={dialogOpen}
-            title={dialogConfig().title}
-            message={dialogConfig().message}
-            onConfirm={dialogConfig().onConfirm}
-            onCancel={() => setDialogOpen(false)}
-            confirmText={dialogConfig().confirmText}
-            type={dialogConfig().type}
-          />
-        );
-      })()}
+      <Dialog
+        isOpen={dialogOpen}
+        title={dialogConfig().title}
+        message={dialogConfig().message}
+        onConfirm={dialogConfig().onConfirm}
+        onCancel={() => setDialogOpen(false)}
+        confirmText={dialogConfig().confirmText}
+        type={dialogConfig().type}
+      />
     </div>
   );
 };
@@ -3806,9 +3776,9 @@ const ChangeTypeSpan = ({
 };
 
 const filesAsChanges = (files: FileChangesType = {}) => {
-  return Object.keys(files).map((relPath) => {
-    return files[relPath];
-  });
+  return Object.keys(files)
+    .map((relPath) => files[relPath])
+    .filter((change): change is FileChangeType => Boolean(change?.relPath));
 };
 
 const FileList = ({
@@ -3880,9 +3850,10 @@ const FileListItem = ({
   repoRootPath: string;
 }) => {
   const [isHovered, setIsHovered] = createSignal(false);
+  const relPath = () => change?.relPath || "";
   const isSelected = () =>
     commitHash === selectedFile().commitHash &&
-    change.relPath === selectedFile().relPath &&
+    relPath() === selectedFile().relPath &&
     isStaged === selectedFile().isFromStaged;
   const backgroundStyle = () => {
     if (isSelected()) {
@@ -3893,23 +3864,33 @@ const FileListItem = ({
 
   const handleStageClick = (e: Event) => {
     e.stopPropagation();
+    if (!relPath()) {
+      return;
+    }
     if (isStaged && onUnstage) {
-      onUnstage(change.relPath);
+      onUnstage(relPath());
     } else if (!isStaged && onStage) {
-      onStage(change.relPath);
+      onStage(relPath());
     }
   };
 
   const handleDoubleClick = (e: Event) => {
     e.stopPropagation();
     e.preventDefault();
+    if (!relPath()) {
+      return;
+    }
     
     // Construct full file path from repo root and relative path
-    const fullPath = change.relPath.startsWith('/') 
-      ? change.relPath 
-      : `${repoRootPath}/${change.relPath}`;
-    
-    openNewTabForNode(fullPath, false, { focusNewTab: true });
+    const fullPath = relPath().startsWith('/') 
+      ? relPath() 
+      : `${repoRootPath}/${relPath()}`;
+
+    sendToHost({
+      type: "open-file",
+      path: fullPath,
+      focusNewTab: true,
+    });
   };
 
   return (
@@ -3950,9 +3931,9 @@ const FileListItem = ({
             color: "#ffffff",
             "white-space": "nowrap",
           }}>
-            {change.relPath.split('/').pop()}
+            {relPath().split('/').pop() || relPath() || "(unknown file)"}
           </span>
-          <Show when={change.relPath.includes('/')}>
+          <Show when={relPath().includes('/')}>
             <span style={{
               color: "#858585",
               "margin-left": "6px",
@@ -3961,7 +3942,7 @@ const FileListItem = ({
               "text-overflow": "ellipsis",
               "min-width": 0,
             }}>
-              {change.relPath.substring(0, change.relPath.lastIndexOf('/'))}
+              {relPath().substring(0, relPath().lastIndexOf('/'))}
             </span>
           </Show>
         </span>
@@ -3973,7 +3954,9 @@ const FileListItem = ({
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                onDiscard?.(change.relPath);
+                if (relPath()) {
+                  onDiscard?.(relPath());
+                }
               }}
               style={{
                 background: "transparent",

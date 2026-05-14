@@ -19,7 +19,6 @@ import "./FileWatcher";
 // import { type WorkspaceRPC } from "./rpc";
 import {
 	electrobun,
-	invokeGitCarrot,
 	findAllInCurrentWorkspace,
 	cancelCurrentWorkspaceFindAll,
 	getFaviconForUrl,
@@ -105,13 +104,10 @@ import {
 } from "./FileTree";
 import { getNode } from "./FileWatcher";
 import { BlackboardAnimation } from "./components/BlackboardAnimation";
-import { GitHubRepoSelector } from "./components/GitHubRepoSelector";
 import { StatusBar } from "./components/StatusBar";
 import { Dialog } from "./components/Dialog";
 import { TopBar } from "./components/TopBar";
-import { type GitHubRepository, githubService } from "./services/githubService";
 import { BunnyCloudSettings } from "./settings/BunnyCloudSettings";
-import { GitHubSettings } from "./settings/GitHubSettings";
 import { LlamaSettings } from "./settings/LlamaSettings";
 import { PluginMarketplace } from "./settings/PluginMarketplace";
 import { PluginSettings } from "./settings/PluginSettings";
@@ -129,7 +125,8 @@ import { join } from "../utils/pathUtils";
 
 import { Editor } from "./CodeEditor";
 import { AgentSlate } from "./slates/AgentSlate";
-import { GitSlate } from "./slates/GitSlate";
+import { CarrotRemoteUIHost, handleCloneSuccessInDash } from "./slates/CarrotRemoteUIHost";
+import { CarrotSlateUIHost } from "./slates/CarrotSlateUIHost";
 import { PluginSlate } from "./slates/PluginSlate";
 // XXX - terminal slate
 import { TerminalSlate } from "./slates/TerminalSlate";
@@ -475,16 +472,6 @@ const moveTabToPane = (
 // ephemeral mapping set whenever a context menu is opened
 // let contextMenuCommands = null;
 
-// todo (yoav): There's a better place for this
-console.log("🟢 DEBUG: index.tsx module loaded and executing");
-
-createEffect(() => {
-	// clean up authUrl when settingsPane is closed
-	if (!state.settingsPane.type && state.githubAuth.authUrl) {
-		setState("githubAuth", { authUrl: null, resolver: null });
-	}
-});
-
 function syncAllElectrobunWebviews() {
 	document
 		.querySelectorAll("electrobun-webview")
@@ -625,7 +612,6 @@ const App = () => {
 	//   }
 	// );
 
-	const githubAuthUrl = () => state.githubAuth.authUrl || "";
 	const workbenchTabIds = createMemo(() => {
 		const win = getWindow();
 		if (!win) {
@@ -636,9 +622,6 @@ const App = () => {
 		collectPaneTabIds(win.rootPane, tabIds, new Set());
 		return tabIds.filter((tabId) => Boolean(win.tabs[tabId]));
 	});
-
-	// YYY - Electron.WebviewTag;
-	let githubAuthWebview: any; //
 
 	let shadowHost: HTMLDivElement | undefined;
 	let shadowRoot: ShadowRoot;
@@ -653,16 +636,6 @@ const App = () => {
 		previousSettingsPaneOpen = isSettingsPaneOpen;
 		settingsPaneWebviewSync.start();
 	});
-
-	// GitHub auth webview navigation handler
-	const githubAuthWebviewWillNavigate = async (e: any) => {
-		const { detail: url } = e;
-		console.log("GitHub auth webview navigated to:", url);
-
-		// For GitHub Personal Access Token flow, user manually creates token
-		// We don't need to extract anything automatically, just let them navigate GitHub
-		// They will copy the token and paste it in the settings form
-	};
 
 	onMount(() => {
 		if (shadowHost) {
@@ -1043,9 +1016,6 @@ const App = () => {
 											<Match when={state.settingsPane.type === "llama-settings"}>
 												<LlamaSettings />
 											</Match>
-											<Match when={state.settingsPane.type === "github-settings"}>
-												<GitHubSettings />
-											</Match>
 											<Match when={state.settingsPane.type === "bunny-cloud-settings"}>
 												<BunnyCloudSettings />
 											</Match>
@@ -1055,37 +1025,52 @@ const App = () => {
 											<Match when={state.settingsPane.type === "plugin-settings"}>
 												<PluginSettings />
 											</Match>
+											<Match when={state.settingsPane.type === "carrot-slate-ui"}>
+												<CarrotSlateUIHost
+													carrotId={state.settingsPane.data.carrotId}
+													slateUIId={state.settingsPane.data.slateUIId}
+													query={state.settingsPane.data.query}
+													style={{
+														height: "100%",
+														width: "100%",
+														background: "#1e1e1e",
+													}}
+													onHostMessage={(message) => {
+														if (
+															message.type === "clone-success" &&
+															typeof message.folderPath === "string"
+														) {
+															setState("settingsPane", { type: "", data: {} });
+															handleCloneSuccessInDash(message.folderPath);
+														}
+													}}
+												/>
+											</Match>
+											<Match when={state.settingsPane.type === "carrot-remote-ui"}>
+												<CarrotRemoteUIHost
+													carrotId={state.settingsPane.data.carrotId}
+													remoteUIId={state.settingsPane.data.remoteUIId}
+													query={state.settingsPane.data.query}
+													style={{
+														height: "100%",
+														width: "100%",
+														background: "#1e1e1e",
+													}}
+													onHostMessage={(message) => {
+														if (
+															message.type === "clone-success" &&
+															typeof message.folderPath === "string"
+														) {
+															setState("settingsPane", { type: "", data: {} });
+															handleCloneSuccessInDash(message.folderPath);
+														}
+													}}
+												/>
+											</Match>
 										</Switch>
 									</div>
 								</Show>
 							</div>
-							{githubAuthUrl() && (
-								<electrobun-webview
-									// nodeintegration={false}
-									ref={(el) => {
-										// YYY - el was Electron.WebviewTag type
-										githubAuthWebview = el; // as Electron.WebviewTag;
-										el.addEventListener(
-											"did-navigate",
-											githubAuthWebviewWillNavigate,
-										);
-									}}
-									class="webview-overlay"
-									partition={`persist:sites:${state.workspace.id}`}
-									style={{
-										position: "absolute",
-										top: "0px",
-										bottom: "0px", // Full height like settings pane
-										left: "514px", // Start after settings pane (500px + 14px border)
-										"z-index": 10,
-										right: "0px",
-										height: "auto",
-										width: "auto",
-										background: "#fff",
-									}}
-									src={githubAuthUrl()}
-								/>
-							)}
 						</div>
 					</div>
 					<StatusBar />
@@ -1249,6 +1234,7 @@ const LensSettings = () => {
 			windowId,
 			buildVars,
 			paths,
+			webBridgeOrigin,
 			peerDependencies,
 			workspace,
 			bunnyDash,
@@ -1269,6 +1255,7 @@ const LensSettings = () => {
 			windowId,
 			buildVars,
 			paths,
+			webBridgeOrigin: webBridgeOrigin || "",
 			peerDependencies,
 			workspace,
 			bunnyDash,
@@ -2338,8 +2325,51 @@ const TabContent = ({ tabId }: { tabId: string }) => {
 				<Match when={getSlateForNode(getNode(tab()?.path))?.type === "agent"}>
 					<AgentSlate node={getNode(tab()?.path)} tabId={tabId} />
 				</Match>
-				<Match when={getSlateForNode(getNode(tab()?.path))?.type === "git"}>
-					<GitSlate node={getNode(tab()?.path)} />
+				<Match when={getSlateForNode(getNode(tab()?.path))?.type === "carrot-slate-ui"}>
+					{(() => {
+						const slate = getSlateForNode(getNode(tab()?.path));
+						if (slate?.type !== "carrot-slate-ui") {
+							return null;
+						}
+						return (
+							<CarrotSlateUIHost
+								carrotId={slate.config.carrotId}
+								slateUIId={slate.config.slateUIId}
+								nodePath={tab()?.path || ""}
+								query={{
+									...slate.config.query,
+								}}
+								style={{
+									height: "100%",
+									width: "100%",
+									background: "#1e1e1e",
+								}}
+							/>
+						);
+					})()}
+				</Match>
+				<Match when={getSlateForNode(getNode(tab()?.path))?.type === "carrot-remote-ui"}>
+					{(() => {
+						const slate = getSlateForNode(getNode(tab()?.path));
+						if (slate?.type !== "carrot-remote-ui") {
+							return null;
+						}
+						return (
+							<CarrotRemoteUIHost
+								carrotId={slate.config.carrotId}
+								remoteUIId={slate.config.remoteUIId}
+								query={{
+									...slate.config.query,
+									nodePath: tab()?.path || "",
+								}}
+								style={{
+									height: "100%",
+									width: "100%",
+									background: "#1e1e1e",
+								}}
+							/>
+						);
+					})()}
 				</Match>
 
 				{/* Generic file editor - must come after slate-specific matches */}
@@ -2826,26 +2856,9 @@ const NodeSettings = () => {
 	let inputNameRef: HTMLInputElement | undefined;
 	let inputUrlRef: HTMLInputElement | undefined;
 	let browserProfileNameRef: HTMLInputElement | undefined;
-	let gitUrlRef: HTMLInputElement | undefined;
 
 	// Signal to track the current node type instead of DOM element
 	const [currentNodeType, setCurrentNodeType] = createSignal<string>("");
-
-	// Git URL validation state
-	const [gitUrlValidation, setGitUrlValidation] = createSignal<{
-		status: "idle" | "validating" | "valid" | "invalid";
-		error?: string;
-	}>({ status: "idle" });
-
-	// GitHub repo selector state
-	const [useGitHubSelector, setUseGitHubSelector] = createSignal(true); // Default to GitHub
-	const [selectedGitHubRepo, setSelectedGitHubRepo] =
-		createSignal<GitHubRepository | null>(null);
-	const [selectedGitHubBranch, setSelectedGitHubBranch] = createSignal<
-		string | null
-	>(null);
-	const [shouldCreateMainBranch, setShouldCreateMainBranch] =
-		createSignal(false);
 
 	// TODO: you can use electron.showOpenDialog to customize the file chooser rather than have an html file input
 
@@ -2960,11 +2973,6 @@ const NodeSettings = () => {
 				nodeType = "agent";
 			} else if (
 				"slate" in _previewNode &&
-				_previewNode.slate?.type === "repo"
-			) {
-				nodeType = "repo";
-			} else if (
-				"slate" in _previewNode &&
 				_previewNode.slate?.type === "devlink"
 			) {
 				nodeType = "devlink";
@@ -3012,13 +3020,6 @@ const NodeSettings = () => {
 		// For new projects being added with a slate, use the slate name
 		if (projectNameRef && "name" in previewSlate && previewSlate.type === "project") {
 			projectNameRef.value = previewSlate.name;
-		}
-
-		// Initialize git inputs for repo slate
-		if (previewSlate.type === "repo" && "config" in previewSlate) {
-			if (gitUrlRef && previewSlate.config?.gitUrl) {
-				gitUrlRef.value = previewSlate.config.gitUrl;
-			}
 		}
 	});
 
@@ -3206,95 +3207,6 @@ const NodeSettings = () => {
 						path: absolutePath,
 					});
 				}
-			} else if (getSlateForNode(_previewNode)?.type === "repo") {
-				const repoSlate = getSlateForNode(_previewNode) as any;
-				const gitUrl = repoSlate?.config?.gitUrl;
-
-				if (!gitUrl) {
-					console.error("Git URL is required for repo clone");
-					return;
-				}
-
-				// Create the folder first so it appears immediately in file tree
-				await electrobun.rpc?.request.mkdir({ path: _previewNode.path });
-
-				// Close settings immediately and expand parent folder
-				setNodeExpanded(parentNodePath(_previewNode), true);
-				setState("settingsPane", { type: "", data: {} });
-
-				// Start polling for the repo folder immediately
-				let pollAttempts = 0;
-				const maxAttempts = 20; // Stop after 10 seconds (20 * 500ms)
-
-				const expandWhenReady = () => {
-					pollAttempts++;
-					// Check if the node exists in the file tree
-					const node = getNode(_previewNode.path);
-					if (node) {
-						console.log("Found repo node, expanding:", _previewNode.path);
-						setNodeExpanded(_previewNode.path, true);
-
-						// Also check for the .git folder and open it in a new tab
-						const gitFolderPath = join(_previewNode.path, ".git");
-						console.log("Looking for git folder at:", gitFolderPath);
-
-						// Start checking for .git folder immediately
-						let gitPollAttempts = 0;
-						const maxGitAttempts = 20; // Wait up to 10 seconds for .git folder
-
-						const openGitSlateWhenReady = () => {
-							gitPollAttempts++;
-							const gitNode = getNode(gitFolderPath);
-							console.log(
-								`Git folder poll attempt ${gitPollAttempts}, found:`,
-								gitNode ? "yes" : "no",
-							);
-
-							if (gitNode) {
-								console.log("Opening git slate for:", gitFolderPath);
-								openNewTabForNode(gitFolderPath);
-							} else if (gitPollAttempts < maxGitAttempts) {
-								setTimeout(openGitSlateWhenReady, 500);
-							} else {
-								console.log("Timeout waiting for .git folder");
-							}
-						};
-
-						// Start polling for .git folder immediately, no initial delay
-						openGitSlateWhenReady();
-					} else if (pollAttempts < maxAttempts) {
-						// Node not ready yet, try again in 500ms
-						setTimeout(expandWhenReady, 500);
-					} else {
-						console.log(
-							"Timeout waiting for cloned repo to appear in file tree",
-						);
-					}
-				};
-
-				// Start polling immediately, no initial delay
-				expandWhenReady();
-
-				// Clone the repository in the background (don't await)
-				invokeGitCarrot("gitClone", {
-						repoPath: _previewNode.path,
-						gitUrl,
-						createMainBranch: shouldCreateMainBranch(),
-					})
-					.then(() => {
-						console.log("Repository cloned successfully");
-					})
-					.catch((error) => {
-						console.error("Failed to clone repository:", error);
-						// Clean up the empty folder if clone failed
-						electrobun.rpc?.request.safeDeleteFileOrFolder({
-							absolutePath: _previewNode.path,
-						});
-						// TODO: Could show a notification to user about failed clone
-					});
-
-				// Early return to avoid duplicate setNodeExpanded and setState calls below
-				return;
 			}
 
 			setNodeExpanded(parentNodePath(_previewNode), true);
@@ -3378,89 +3290,6 @@ const NodeSettings = () => {
 			const finalName =
 				browserProfileNameRef.value.trim() || suggestedBrowserProfileName();
 			setPreviewNodeSlateName(finalName);
-		}
-	};
-
-	// Debounced validation for git URL
-	let gitUrlValidationTimeout: number | undefined;
-
-	const validateGitUrl = async (url: string) => {
-		if (!url.trim()) {
-			setGitUrlValidation({ status: "idle" });
-			return;
-		}
-
-		setGitUrlValidation({ status: "validating" });
-
-		try {
-			const result = await invokeGitCarrot<any>("gitValidateUrl", {
-				gitUrl: url,
-			});
-			if (result?.valid) {
-				setGitUrlValidation({ status: "valid" });
-			} else {
-				setGitUrlValidation({
-					status: "invalid",
-					error: result?.error || "Invalid repository URL",
-				});
-			}
-		} catch (error) {
-			setGitUrlValidation({
-				status: "invalid",
-				error: "Failed to validate URL",
-			});
-		}
-	};
-
-	const onGitUrlInputChange = () => {
-		if (gitUrlRef) {
-			const url = gitUrlRef.value;
-			setPreviewNodeSlateConfig({ gitUrl: url });
-
-			// Clear previous timeout
-			if (gitUrlValidationTimeout) {
-				clearTimeout(gitUrlValidationTimeout);
-			}
-
-			// Debounce validation (wait 500ms after user stops typing)
-			gitUrlValidationTimeout = window.setTimeout(() => {
-				validateGitUrl(url);
-			}, 500);
-		}
-	};
-
-	// Handler for GitHub repository selection
-	const onGitHubRepoSelect = (
-		repo: GitHubRepository,
-		branch?: string,
-		isEmptyRepo?: boolean,
-	) => {
-		setSelectedGitHubRepo(repo);
-		setSelectedGitHubBranch(branch || null); // Don't auto-set branch, let user click
-		setShouldCreateMainBranch(isEmptyRepo || false);
-
-		// Update the folder name input with the repo name
-		if (inputNameRef) {
-			inputNameRef.value = repo.name;
-			// Trigger the onInput event to update validation and preview node name
-			onNameChange();
-		}
-
-		// Update the git URL in the preview node config only when branch is explicitly selected
-		if (branch) {
-			const gitUrl = repo.clone_url;
-			setPreviewNodeSlateConfig({
-				gitUrl,
-				branch: branch,
-			});
-
-			// Update the text input to show the selected URL
-			if (gitUrlRef) {
-				gitUrlRef.value = gitUrl;
-			}
-
-			// Validate the URL immediately since we know it's valid
-			setGitUrlValidation({ status: "valid" });
 		}
 	};
 
@@ -3549,31 +3378,6 @@ const NodeSettings = () => {
 						model: state.appSettings.llama.model,
 						temperature: 0.7,
 						conversationHistory: [],
-					},
-				},
-			});
-		} else if (type === "repo") {
-			const newName = await electrobun.rpc?.request.getUniqueNewName({
-				parentPath: parentNodePath(_previewNode),
-				baseName: "new-repo",
-			});
-
-			// Reset validation state when creating new repo
-			setGitUrlValidation({ status: "idle" });
-
-			setPreviewNode({
-				type: "dir",
-				name: newName,
-				path: join(parentNodePath(_previewNode), newName),
-				isExpanded: true,
-				children: [],
-				slate: {
-					v: 1,
-					name: newName,
-					icon: "🔀",
-					type: "repo",
-					config: {
-						gitUrl: "",
 					},
 				},
 			});
@@ -3758,7 +3562,6 @@ const NodeSettings = () => {
 		dir: "Folder",
 		web: "Browser Profile",
 		agent: "AI Agent",
-		repo: "Git Repository",
 		devlink: "DevLink",
 		// desktop: "Desktop App",
 	};
@@ -4229,156 +4032,6 @@ const NodeSettings = () => {
 													style="background: #2b2b2b;border-radius: #2b2b2b;border: 1px solid #212121;color: #d9d9d9;outline: none;cursor: text;display: block;font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen-Sans, Ubuntu, Cantarell, 'Helvetica Neue', Helvetica, Arial, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', sans-serif;font-size: 12px;padding-top: 8px;padding-right: 9px;padding-bottom: 8px;padding-left: 9px;line-height: 14px;"
 												/>
 											</SettingsPaneField>
-										</SettingsPaneFormSection>
-									</Show>
-
-									<Show when={getSlateForNode(previewNode())?.type === "repo"}>
-										<SettingsPaneFormSection
-											label={`${friendlyTypeName.repo} Settings`}
-										>
-											<SettingsPaneField label="Repository Source">
-												<div style="display: flex; gap: 8px; margin-bottom: 12px;">
-													<button
-														type="button"
-														onClick={() => setUseGitHubSelector(true)}
-														style={{
-															background: useGitHubSelector()
-																? "#0969da"
-																: "#2b2b2b",
-															color: useGitHubSelector() ? "white" : "#d9d9d9",
-															border: "1px solid #555",
-															padding: "6px 12px",
-															"border-radius": "4px",
-															cursor: "pointer",
-															"font-size": "11px",
-															flex: "1",
-														}}
-													>
-														Browse GitHub
-													</button>
-													<button
-														type="button"
-														onClick={() => setUseGitHubSelector(false)}
-														style={{
-															background: !useGitHubSelector()
-																? "#0969da"
-																: "#2b2b2b",
-															color: !useGitHubSelector() ? "white" : "#d9d9d9",
-															border: "1px solid #555",
-															padding: "6px 12px",
-															"border-radius": "4px",
-															cursor: "pointer",
-															"font-size": "11px",
-															flex: "1",
-														}}
-													>
-														Manual URL
-													</button>
-												</div>
-											</SettingsPaneField>
-
-											<Show when={!useGitHubSelector()}>
-												<SettingsPaneField label="Git Repository URL">
-													<style>{`
-                            @keyframes spin {
-                              from { transform: rotate(0deg); }
-                              to { transform: rotate(360deg); }
-                            }
-                          `}</style>
-													<div style="position: relative;">
-														<input
-															type="text"
-															ref={gitUrlRef}
-															name="gitUrl"
-															onInput={onGitUrlInputChange}
-															placeholder="https://github.com/user/repo.git"
-															style="background: #2b2b2b;border-radius: #2b2b2b;border: 1px solid #212121;color: #d9d9d9;outline: none;cursor: text;display: block;font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen-Sans, Ubuntu, Cantarell, 'Helvetica Neue', Helvetica, Arial, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', sans-serif;font-size: 12px;padding-top: 8px;padding-right: 32px;padding-bottom: 8px;padding-left: 9px;line-height: 14px;width: 100%;box-sizing: border-box;"
-														/>
-														<div
-															style={{
-																position: "absolute",
-																right: "8px",
-																top: "50%",
-																transform: "translateY(-50%)",
-																display:
-																	gitUrlValidation().status === "idle"
-																		? "none"
-																		: "block",
-																"font-size": "14px",
-															}}
-														>
-															{gitUrlValidation().status === "validating" && (
-																<div
-																	style={{
-																		color: "#858585",
-																		animation: "spin 1s linear infinite",
-																		display: "inline-block",
-																	}}
-																>
-																	⟳
-																</div>
-															)}
-															{gitUrlValidation().status === "valid" && (
-																<div style={{ color: "#44987e" }}>✓</div>
-															)}
-															{gitUrlValidation().status === "invalid" && (
-																<div
-																	style={{ color: "#e06c75", cursor: "help" }}
-																	title={gitUrlValidation().error}
-																>
-																	✗
-																</div>
-															)}
-														</div>
-													</div>
-												</SettingsPaneField>
-											</Show>
-
-											<Show
-												when={
-													useGitHubSelector() && githubService.isConnected()
-												}
-											>
-												<SettingsPaneField label="GitHub Repository">
-													<div style="border: 1px solid #555; border-radius: 4px; min-height: 500px; max-height: 1000px; height: 600px;">
-														<GitHubRepoSelector
-															onSelectRepository={onGitHubRepoSelect}
-															selectedRepo={selectedGitHubRepo()}
-															selectedBranch={selectedGitHubBranch()}
-														/>
-													</div>
-												</SettingsPaneField>
-											</Show>
-
-											<Show
-												when={
-													useGitHubSelector() && !githubService.isConnected()
-												}
-											>
-												<SettingsPaneField label="">
-													<div style="background: #2b2b2b; padding: 12px; border-radius: 4px; border: 1px solid #555;">
-														<div style="font-size: 11px; color: #ffa500; margin-bottom: 8px;">
-															GitHub Not Connected
-														</div>
-														<div style="font-size: 10px; color: #999; margin-bottom: 8px;">
-															Connect your GitHub account in workspace settings
-															to browse your repositories.
-														</div>
-														<button
-															type="button"
-															onClick={() => {
-																setState("settingsPane", {
-																	type: "github-settings",
-																	data: {},
-																});
-															}}
-															style="background: #0969da; color: white; border: none; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 10px;"
-														>
-															Connect GitHub
-														</button>
-													</div>
-												</SettingsPaneField>
-											</Show>
 										</SettingsPaneFormSection>
 									</Show>
 

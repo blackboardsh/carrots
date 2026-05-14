@@ -1,5 +1,6 @@
 import { For, Show, createEffect, on, onCleanup, onMount } from "solid-js";
 import * as monaco from "monaco-editor";
+import "./monacoSetup";
 import {
   state,
   setState,
@@ -12,14 +13,6 @@ import {
   openFileAt,
 } from "./store";
 
-// import "monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution";
-import "monaco-editor/esm/vs/language/typescript/monaco.contribution";
-import "monaco-editor/esm/vs/language/css/monaco.contribution";
-import "monaco-editor/esm/vs/language/html/monaco.contribution";
-import "monaco-editor/esm/vs/language/json/monaco.contribution";
-// note: there is no markdown worker, just use plaintext
-
-import "monaco-editor/min/vs/editor/editor.main.css";
 import { _getNode, createModel, getNode } from "./FileWatcher";
 import { MarkerSeverity } from "monaco-editor";
 import { getWindow } from "./store";
@@ -89,64 +82,6 @@ createEffect(
     }
   )
 );
-
-monaco.languages.register({
-  id: "typescript",
-  extensions: [".ts", ".tsx"],
-  aliases: ["TypeScript", "ts", "typescript"],
-  mimetypes: ["text/typescript"],
-});
-
-monaco.languages.register({
-  id: "javascript",
-  extensions: [".js"],
-  aliases: ["JavaScript", "javascript", "js"],
-  mimetypes: ["text/javascript"],
-});
-
-monaco.languages.register({
-  id: "css",
-  extensions: [".css"],
-  aliases: ["CSS", "css"],
-  mimetypes: ["text/css"],
-});
-
-monaco.languages.register({
-  id: "html",
-  extensions: [".html", ".htm"],
-  aliases: ["HTML", "html"],
-  mimetypes: ["text/html"],
-});
-
-monaco.languages.register({
-  id: "json",
-  extensions: [".json"],
-  aliases: ["JSON", "json"],
-  mimetypes: ["application/json"],
-});
-
-monaco.languages.register({
-  id: "markdown",
-  extensions: [".md", ".markdown"],
-  aliases: ["Markdown", "markdown", "md"],
-  mimetypes: ["text/markdown"],
-});
-
-// Disable built-in TypeScript diagnostics
-monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions({
-  noSemanticValidation: true,
-  noSyntaxValidation: true,
-  noSuggestionDiagnostics: true,
-});
-
-monaco.languages.typescript.typescriptDefaults.setModeConfiguration({
-  // disable hovers for typescript since we use tsserver quickinfo for that
-  hovers: false,
-  // disable go to definition for typescript since we use tsserver for that
-  definitions: false,
-  // disable TypeScript's built-in completions to reserve inline for AI only
-  completionItems: false,
-});
 
 // Register plugin completion provider for all languages
 const pluginCompletionLanguages = ['typescript', 'javascript', 'typescriptreact', 'javascriptreact'];
@@ -236,26 +171,6 @@ pluginCompletionLanguages.forEach(lang => {
 //   jsx: monaco.languages.typescript.JsxEmit.React,
 //   typeRoots: ["node_modules/@types"],
 // });
-
-self.MonacoEnvironment = {
-  baseUrl: "./",
-  getWorkerUrl: function (moduleId, label) {
-    if (label === "json") {
-      return "./vs/language/json/json.worker.js";
-    }
-    if (label === "css") {
-      return "./vs/language/css/css.worker.js";
-    }
-    if (label === "html") {
-      return "./vs/language/html/html.worker.js";
-    }
-    if (label === "typescript" || label === "javascript") {
-      return "./vs/language/typescript/ts.worker.js";
-    }
-
-    return "./vs/editor/editor.worker.js";
-  },
-};
 
 export const Editor = ({ currentTabId }: { currentTabId: string }) => {
   // Todo: currentTab sounds like activeTab. rename this to tabid or thisTabId

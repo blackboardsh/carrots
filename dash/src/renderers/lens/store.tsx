@@ -66,6 +66,11 @@ export type BunnyDashCarrotType = {
   mode: string;
   permissions: string[];
   status: string;
+  slateUIs?: Array<{
+    id: string;
+    name: string;
+    path: string;
+  }>;
   contributions?: {
     fileActivators?: Array<{
       baseName?: string;
@@ -308,6 +313,7 @@ export interface AppState {
   tokens: any[];
   // the current window id. This doesn't change for the life of the window
   windowId: string;
+  webBridgeOrigin: string;
   ui: {
     showSidebar: boolean;
     showWorkspaceMenu: boolean;
@@ -346,15 +352,32 @@ export interface AppState {
       }
     | {
         // todo (yoav): may separate these out if they need to store metadata later
-        type: "global-settings" | "workspace-settings" | "llama-settings" | "github-settings" | "bunny-cloud-settings" | "plugin-marketplace";
+        type:
+          | "global-settings"
+          | "workspace-settings"
+          | "llama-settings"
+          | "bunny-cloud-settings"
+          | "plugin-marketplace";
         data: {};
+      }
+    | {
+        type: "carrot-remote-ui";
+        data: {
+          title: string;
+          carrotId: string;
+          remoteUIId: string;
+          query?: Record<string, string>;
+        };
+      }
+    | {
+        type: "carrot-slate-ui";
+        data: {
+          title: string;
+          carrotId: string;
+          slateUIId: string;
+          query?: Record<string, string>;
+        };
       };
-
-  // authUrl: string | null;
-  githubAuth: {
-    authUrl: null | string;
-    resolver: null | (() => void);
-  };
   accessToken: string | null;
   // fileTrees: { [projectId: string]: FileTreeType };
   fileCache: { [absolutePath: string]: CachedFileType };
@@ -528,13 +551,6 @@ const initialState: AppState = {
     type: "",
     data: {},
   },
-
-  // oauth url to get access token, drives the oauth webview
-  // authUrl: null,
-  githubAuth: {
-    authUrl: null,
-    resolver: null,
-  },
   // temporarily store the generated access token. this works kind of like an 'engine' for effects
   accessToken: null,
   // directoryWatchers: {},
@@ -559,6 +575,7 @@ const initialState: AppState = {
     knownLocalProjects: [],
   },
   windowId: "",
+  webBridgeOrigin: "",
   editors: {},
   lastFileChange: "",
   findAllInFolder: {

@@ -2782,7 +2782,7 @@ const NodeName = ({
 				{
 					label: "Clone Repo",
 					hidden: !(node.type === "dir"),
-					...createContextMenuAction("clone_repo_to_folder", {
+					...createContextMenuAction("open_git_clone_ui", {
 						nodePath: _nodeToRender.path,
 					}),
 				},

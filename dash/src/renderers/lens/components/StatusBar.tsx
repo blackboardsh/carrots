@@ -16,8 +16,43 @@ interface PluginStatusBarItem {
   hasSettings: boolean;
 }
 
+type GitIntegrationState = {
+  github?: {
+    connected?: boolean;
+    user?: {
+      login?: string;
+    } | null;
+    username?: string;
+  };
+};
+
 export const StatusBar = () => {
   const [pluginItems, setPluginItems] = createSignal<PluginStatusBarItem[]>([]);
+  const [gitIntegration, setGitIntegration] = createSignal<GitIntegrationState | null>(null);
+
+  const openGitSettings = () => {
+    setState("settingsPane", {
+      type: "carrot-remote-ui",
+      data: {
+        title: "Git & GitHub",
+        carrotId: "bunny.git",
+        remoteUIId: "git-settings",
+      },
+    });
+  };
+
+  const fetchGitIntegration = async () => {
+    try {
+      const nextState = await electrobun.carrots.invoke<GitIntegrationState>(
+        "bunny.git",
+        "getGitIntegrationState",
+      );
+      setGitIntegration(nextState);
+    } catch (err) {
+      console.warn("Failed to fetch git integration state:", err);
+      setGitIntegration(null);
+    }
+  };
 
   // Fetch plugin status bar items periodically
   onMount(() => {
@@ -33,8 +68,15 @@ export const StatusBar = () => {
     };
 
     fetchPluginItems();
+    void fetchGitIntegration();
     const interval = setInterval(fetchPluginItems, 2000); // Refresh every 2 seconds
-    return () => clearInterval(interval);
+    const gitInterval = setInterval(() => {
+      void fetchGitIntegration();
+    }, 5000);
+    return () => {
+      clearInterval(interval);
+      clearInterval(gitInterval);
+    };
   });
 
   const leftPluginItems = () => pluginItems()
@@ -121,7 +163,7 @@ export const StatusBar = () => {
             </>
           )}
         </For>
-        <Git />
+        <Git onOpenSettings={openGitSettings} />
         <span>|</span>
         <Bun />
         <span>|</span>
@@ -131,7 +173,7 @@ export const StatusBar = () => {
         <span>|</span>
         <Llama />
         <span>|</span>
-        <GitHub />
+        <GitHub gitIntegration={gitIntegration()} onOpenSettings={openGitSettings} />
         <span>|</span>
         <BunnyCloud />
         <span>|</span>
@@ -178,9 +220,13 @@ const Biome = () => {
   );
 };
 
-const Git = () => {
+const Git = (props: { onOpenSettings: () => void }) => {
   return (
-    <div style={{ margin: "0 5px" }}>
+    <div
+      style={{ margin: "0 5px", cursor: "pointer" }}
+      title="Open Git settings"
+      onClick={props.onOpenSettings}
+    >
       Git v{state.peerDependencies.git.version}
     </div>
   );
@@ -359,28 +405,22 @@ const Llama = () => {
   );
 };
 
-const GitHub = () => {
-  const isConnected = () => {
-    return state.appSettings.github.accessToken && state.appSettings.github.username;
-  };
-
-  const handleGitHubClick = () => {
-    if (state.settingsPane.type === "github-settings") {
-      setState("settingsPane", { type: "", data: {} });
-    } else {
-      setState("settingsPane", { type: "github-settings", data: {} });
-    }
-  };
+const GitHub = (props: {
+  gitIntegration: GitIntegrationState | null;
+  onOpenSettings: () => void;
+}) => {
 
   const getStatusText = () => {
-    if (isConnected()) {
-      return `GitHub @${state.appSettings.github.username}`;
+    const username =
+      props.gitIntegration?.github?.user?.login || props.gitIntegration?.github?.username || "";
+    if (props.gitIntegration?.github?.connected && username) {
+      return `GitHub @${username}`;
     }
     return "GitHub";
   };
 
   const getStatusColor = () => {
-    return isConnected() ? "#51cf66" : "#666"; // Green if connected, gray if not
+    return props.gitIntegration?.github?.connected ? "#51cf66" : "#666";
   };
 
   return (
@@ -392,8 +432,8 @@ const GitHub = () => {
         "white-space": "nowrap", // Prevent wrapping
         "font-size": "11px"
       }}
-      onClick={handleGitHubClick}
-      title={isConnected() ? "GitHub connected - click to open settings" : "GitHub not connected - click to connect"}
+      onClick={props.onOpenSettings}
+      title="Open Git & GitHub settings"
     >
       {getStatusText()}
     </div>

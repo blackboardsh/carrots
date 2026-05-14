@@ -1,6 +1,7 @@
-import { createEffect, createSignal, onCleanup, Show } from "solid-js";
+import { For, createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { onMount, type Accessor } from "solid-js";
 import * as monaco from "monaco-editor";
+import { inferMonacoLanguageFromPath } from "./monacoSetup";
 
 declare global {
   interface Window {
@@ -48,6 +49,63 @@ export const DiffEditor = ({
     total: 0,
   });
   const [hasSelection, setHasSelection] = createSignal(false);
+  const [diffComputationReady, setDiffComputationReady] = createSignal(false);
+  const [lineChangeCount, setLineChangeCount] = createSignal(0);
+  const enableLineStaging = false;
+
+  const originalLines = () => originalText().split("\n");
+  const modifiedLines = () => modifiedText().split("\n");
+  const shouldShowFallback = () =>
+    diffComputationReady() &&
+    lineChangeCount() === 0 &&
+    originalText() !== modifiedText();
+
+  const syncEditorModels = () => {
+    if (!originalModel || !modifiedModel || !editor) {
+      return;
+    }
+
+    const newOriginal = originalText();
+    const newModified = modifiedText();
+
+    const oldOriginal = originalModel.getValue();
+    const oldModified = modifiedModel.getValue();
+
+    if (newOriginal === oldOriginal && newModified === oldModified) {
+      return;
+    }
+
+    editor.revealLine(1);
+    originalModel.setValue(newOriginal);
+    modifiedModel.setValue(newModified);
+    setDiffComputationReady(false);
+    setLineChangeCount(0);
+
+    const newLanguage = inferMonacoLanguageFromPath(filePath);
+    monaco.editor.setModelLanguage(originalModel, newLanguage);
+    monaco.editor.setModelLanguage(modifiedModel, newLanguage);
+    if (diffNavigator) {
+      diffNavigator.next();
+    }
+
+    requestAnimationFrame(() => {
+      const changes = editor?.getLineChanges() || [];
+      setLineChangeCount(changes.length);
+      setDiffComputationReady(true);
+      if (changes.length > 0) {
+        setDiffPosition({
+          current: 1,
+          total: changes.length,
+        });
+      } else {
+        setDiffPosition({
+          current: 0,
+          total: 0,
+        });
+      }
+      editor?.layout();
+    });
+  };
 
   onMount(() => {
     if (!editorRef) {
@@ -161,15 +219,13 @@ export const DiffEditor = ({
 
     monaco.editor.setTheme("myCustomTheme");
 
-    try {
-      // Try the newer API first
-      diffNavigator = (monaco.editor as any).createDiffNavigator(editor, {
+    const createDiffNavigator = (monaco.editor as any).createDiffNavigator;
+    if (typeof createDiffNavigator === "function") {
+      diffNavigator = createDiffNavigator(editor, {
         followsCaret: false,
         ignoreCharChanges: true,
       }) as ActualDiffEditorClassType;
-    } catch (error) {
-      console.warn('DiffNavigator not available:', error);
-      // Create a mock navigator if the real one fails
+    } else {
       diffNavigator = {
         nextIdx: 0,
         ranges: [],
@@ -184,8 +240,11 @@ export const DiffEditor = ({
       // Get line changes from the diff editor
       const lineChanges = editor.getLineChanges();
       console.log("Line changes:", lineChanges);
+      const changeCount = lineChanges?.length || 0;
+      setLineChangeCount(changeCount);
+      setDiffComputationReady(true);
       
-      if (lineChanges && lineChanges.length > 0) {
+      if (enableLineStaging && canStageLines && filePath && lineChanges && lineChanges.length > 0) {
         // Reset to first change
         currentDiffIndex = 0;
         
@@ -312,6 +371,10 @@ export const DiffEditor = ({
       modified: modifiedModel,
     });
 
+    // The initial text values may already be available before Monaco models exist.
+    // Replay them now that the diff editor is fully initialized.
+    syncEditorModels();
+
     // Track selection changes to show/hide selection buttons
     const modifiedEditor = editor.getModifiedEditor();
     modifiedEditor.onDidChangeCursorSelection((e) => {
@@ -320,7 +383,12 @@ export const DiffEditor = ({
     
     // Handle clicks on the glyph margin for staging
     modifiedEditor.onMouseDown((e) => {
-      if (e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) {
+      if (
+        enableLineStaging &&
+        canStageLines &&
+        filePath &&
+        e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN
+      ) {
         const lineNumber = e.target.position?.lineNumber;
         
         if (lineNumber) {
@@ -439,10 +507,13 @@ export const DiffEditor = ({
     if (window.stagingDecorationIds && window.stagingDecorationIds.length > 0) {
       window.stagingDecorationIds = modifiedEditor.deltaDecorations(window.stagingDecorationIds, []);
     }
+
+    if (!enableLineStaging || !canStageLines || !filePath) {
+      return;
+    }
     
     console.log("Line changes available:", !!lineChanges, "count:", lineChanges?.length);
-    
-    // TEMP: Force staging glyphs to appear for testing
+
     if (lineChanges && lineChanges.length > 0) {
       console.log("FORCING staging decorations for", lineChanges.length, "changes");
       
@@ -548,29 +619,14 @@ export const DiffEditor = ({
   };
   
   createEffect(() => {
-    if (originalModel && modifiedModel && editor) {
-      const newOriginal = originalText();
-      const newModified = modifiedText();
+    syncEditorModels();
+  });
 
-      // Skip re-render if contents haven't changed
-      const oldOriginal = originalModel.getValue();
-      const oldModified = modifiedModel.getValue();
-
-      if (newOriginal === oldOriginal && newModified === oldModified) {
-        return;
-      }
-
-      editor.revealLine(1);
-      originalModel.setValue(newOriginal);
-      modifiedModel.setValue(newModified);
-
-      const newLanguage = "typescript";
-      monaco.editor.setModelLanguage(originalModel, newLanguage);
-      monaco.editor.setModelLanguage(modifiedModel, newLanguage);
-      if (diffNavigator) {
-        diffNavigator.next();
-      }
-    }
+  createEffect(() => {
+    shouldShowFallback();
+    requestAnimationFrame(() => {
+      editor?.layout();
+    });
   });
   
   // Update staging decorations when props change
@@ -596,6 +652,10 @@ export const DiffEditor = ({
       console.log("No editor yet, waiting...");
       return;
     }
+
+    if (!enableLineStaging || !canStageLines || !filePath) {
+      return;
+    }
     
     const modifiedEditor = editor.getModifiedEditor();
     if (!modifiedEditor) {
@@ -607,7 +667,7 @@ export const DiffEditor = ({
     console.log("Will use glyph class:", isStaged ? 'staging-glyph-unstage' : 'staging-glyph-stage');
     
     // Only set up if staging is enabled
-    if (canStageLines && filePath) {
+    if (enableLineStaging && canStageLines && filePath) {
       // Add decorations for all changed lines
       const lineChanges = editor.getLineChanges();
       console.log("Adding decorations for all line changes:", lineChanges);
@@ -753,7 +813,16 @@ export const DiffEditor = ({
   });
 
   return (
-    <div style="width:100%;height:100%;">
+    <div
+      style={{
+        width: "100%",
+        height: "100%",
+        display: "flex",
+        "flex-direction": "column",
+        "min-height": "0",
+        overflow: "hidden",
+      }}
+    >
       <div style={{
         display: "flex",
         "justify-content": "space-between",
@@ -824,7 +893,89 @@ export const DiffEditor = ({
         </button>
       </div>
 
-      <div ref={editorRef} style="width:100%;height:calc(100% - 40px);" />
+      <div
+        style={{
+          position: "relative",
+          flex: "1 1 0",
+          "min-height": "0",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          ref={editorRef}
+          style={{
+            position: "absolute",
+            inset: "0",
+            overflow: "hidden",
+          }}
+        />
+        <Show when={shouldShowFallback()}>
+          <div
+            style={{
+              position: "absolute",
+              inset: "0",
+              display: "grid",
+              "grid-template-columns": "1fr 1fr",
+              gap: "1px",
+              background: "#2d2d2d",
+              overflow: "hidden",
+              "min-height": "0",
+              "z-index": "1",
+            }}
+          >
+            <div
+              style={{
+                background: "#1e1e1e",
+                overflow: "auto",
+                padding: "12px",
+                "font-family": "Menlo, Monaco, Consolas, monospace",
+                "font-size": "12px",
+                color: "#cccccc",
+                "white-space": "pre-wrap",
+              }}
+            >
+              <For each={originalLines()}>
+                {(line, index) => (
+                  <div
+                    style={{
+                      "min-height": "18px",
+                      "background-color":
+                        line !== (modifiedLines()[index()] ?? "") ? "rgba(180, 67, 42, 0.2)" : "transparent",
+                    }}
+                  >
+                    {line || " "}
+                  </div>
+                )}
+              </For>
+            </div>
+            <div
+              style={{
+                background: "#1e1e1e",
+                overflow: "auto",
+                padding: "12px",
+                "font-family": "Menlo, Monaco, Consolas, monospace",
+                "font-size": "12px",
+                color: "#cccccc",
+                "white-space": "pre-wrap",
+              }}
+            >
+              <For each={modifiedLines()}>
+                {(line, index) => (
+                  <div
+                    style={{
+                      "min-height": "18px",
+                      "background-color":
+                        line !== (originalLines()[index()] ?? "") ? "rgba(12, 69, 26, 0.28)" : "transparent",
+                    }}
+                  >
+                    {line || " "}
+                  </div>
+                )}
+              </For>
+            </div>
+          </div>
+        </Show>
+      </div>
     </div>
   );
 };
