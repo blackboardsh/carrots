@@ -111,20 +111,6 @@ export type WorkspaceRPC = {
         params: void;
         response: any;
       };
-      saveLens: {
-        params: {
-          name?: string;
-          description?: string;
-        };
-        response: any;
-      };
-      getUniqueLensName: {
-        params: {
-          workspaceId: string;
-          baseName?: string;
-        };
-        response: string;
-      };
       createLens: {
         params: {
           workspaceId: string;
@@ -153,32 +139,6 @@ export type WorkspaceRPC = {
           candidateName: string;
         };
         response: PreviewFileTreeType;
-      };
-      addProject: {
-        params: {
-          projectName: string;
-          path: string;
-        };
-        response: any;
-      };
-      addProjectMount: {
-        params: {
-          workspaceId?: string;
-          name?: string;
-          path: string;
-          instanceId?: string;
-          instanceLabel?: string;
-          kind?: string;
-        };
-        response: any;
-      };
-      removeProjectMount: {
-        params: {
-          workspaceId?: string;
-          projectId?: string;
-          mountId?: string;
-        };
-        response: any;
       };
       getFaviconForUrl: {
         params: {
@@ -219,6 +179,24 @@ export type WorkspaceRPC = {
       syncLocalDashGraph: {
         params: {
           graph: any;
+        };
+        response: void;
+      };
+      syncLocalCurrentWindow: {
+        params: {
+          workspaceId: string;
+          lensId: string;
+          windowId: string;
+          activeTreeNodeId: string;
+          window: {
+            id: string;
+            title: string;
+            workspaceId: string;
+            mainTabIds: string[];
+            sideTabIds: string[];
+            currentMainTabId: string;
+            currentSideTabId: string;
+          };
         };
         response: void;
       };
@@ -405,22 +383,23 @@ export type WorkspaceRPC = {
       closeProjectDirectoryWatcher: {
         projectId: string;
       };
-      formatFile: {
-        path: string;
+      createHostWindow: {
+        windowId: string;
+        title?: string;
+        frame?: {
+          x?: number;
+          y?: number;
+          width?: number;
+          height?: number;
+        };
       };
-      createWindow: {
-        offset?: { x: number; y: number };
+      closeWindow: {
+        windowId?: string;
       } | void;
-      closeWindow: void;
       openBunnyWindow: {
         screenX: number;
         screenY: number;
       };
-      createWorkspace: void;
-      updateWorkspace: {
-        [key: string]: any;
-      };
-      hideWorkspace: void;
       installUpdateNow: void;
       addToken: {
         name: string;
@@ -428,21 +407,8 @@ export type WorkspaceRPC = {
         endpoint: string;
         token: string;
       };
-      editProject: {
-        projectId: string;
-        projectName: string;
-        path: string;
-      };
       deleteToken: {
         tokenId: string;
-      };
-      deleteWorkspace: void;
-      deleteWorkspaceCompletely: void;
-      removeProjectFromBunnyDashOnly: {
-        projectId: string;
-      };
-      fullyDeleteProjectFromDiskAndBunnyDash: {
-        projectId: string;
       };
       fullyDeleteNodeFromDisk: {
         nodePath: string;

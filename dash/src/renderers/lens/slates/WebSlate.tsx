@@ -33,6 +33,7 @@ import {
 import { getWindow } from "../store";
 
 import { getSlateForNode, getProjectForNodePath } from "../files";
+import { addLocalProjectMount } from "../localGraphActions";
 
 import { type DomEventWithTarget } from "../../../shared/types/types";
 import { Show, createEffect, createSignal, createMemo } from "solid-js";
@@ -771,13 +772,7 @@ console.log('Preload script loaded for:', window.location.href);
 			if (!existingProject) {
 				// Add the selected folder as a new project
 				const projectName = selectedPath.split("/").pop() || "Browser Profiles";
-				await electrobun.rpc?.request.addProject({
-					projectName,
-					path: selectedPath,
-				});
-
-				// Wait a bit for the project to be created and file watcher to pick it up
-				await new Promise((resolve) => setTimeout(resolve, 500));
+				await addLocalProjectMount(selectedPath, projectName);
 			}
 
 			// Now create the browser profile in the selected folder

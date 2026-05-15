@@ -648,7 +648,7 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
           // Dispatch event to show close window confirmation dialog
           window.dispatchEvent(new CustomEvent('showCloseWindowDialog'));
         } else {
-          electrobun.rpc?.send.closeWindow();
+          hostCloseWindow();
         }
       },
       handleGlobalShortcut: ({ key, ctrl, shift, alt, meta }) => {
@@ -906,6 +906,14 @@ export function invokeLlamaCarrot<T = unknown>(
 	return invokeCarrot<T>("bunny.llama", method, params, options);
 }
 
+export function invokeBiomeCarrot<T = unknown>(
+	method: string,
+	params?: unknown,
+	options?: { windowId?: string },
+) {
+	return invokeCarrot<T>("bunny.biome", method, params, options);
+}
+
 export function fsGetNode(path: string) {
 	return invokeFsCarrot("getNode", { path });
 }
@@ -978,6 +986,23 @@ export function hostOpenFileDialog(options: {
 
 export function hostShowInFinder(path: string) {
 	return electrobun.rpc?.request.showInFinder({ path });
+}
+
+export function hostCreateWindow(options: {
+	windowId: string;
+	title?: string;
+	frame?: {
+		x?: number;
+		y?: number;
+		width?: number;
+		height?: number;
+	};
+}) {
+	electrobun.rpc?.send("createHostWindow", options);
+}
+
+export function hostCloseWindow(windowId?: string) {
+	electrobun.rpc?.send("closeWindow", windowId ? { windowId } : undefined);
 }
 
 function buildCurrentWorkspaceSearchTargets() {

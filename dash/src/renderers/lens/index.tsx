@@ -28,6 +28,7 @@ import {
 	fsMkdir,
 	fsWriteFile,
 	fsGetUniqueNewName,
+	hostCloseWindow,
 	hostOpenFileDialog,
 	fsSafeDeleteFileOrFolder,
 	fsTouchFile,
@@ -54,6 +55,15 @@ import {
 	persistWorkspaceState,
 } from "./localStateDb";
 import { getHydratedInitialState } from "./init";
+import {
+	addLocalProjectMount,
+	createOrRenameLocalLens,
+	deleteCurrentLocalWorkspace,
+	editLocalProjectMount,
+	refreshDashRendererStateFromWorker,
+	removeLocalProjectMount,
+	updateCurrentLocalWorkspaceName,
+} from "./localGraphActions";
 import {
 	type AppState,
 	type FileTabType,
@@ -207,7 +217,7 @@ const [closeWindowDialogOpen, setCloseWindowDialogOpen] = createSignal(false);
 
 const confirmCloseWindow = () => {
 	setCloseWindowDialogOpen(false);
-	electrobun.rpc?.send.closeWindow();
+	hostCloseWindow();
 };
 
 // Listen for close window dialog event from init.ts closeCurrentWindow handler
@@ -694,10 +704,7 @@ const App = () => {
 
 			// Add as a new project via RPC
 			try {
-				await electrobun.rpc?.request.addProject({
-					projectName: folderName,
-					path: folderPath,
-				});
+				await addLocalProjectMount(folderPath, folderName);
 			} catch (err) {
 				console.error('Failed to add project:', err);
 			}
@@ -1091,11 +1098,11 @@ const App = () => {
 
 const WorkspaceSettings = () => {
 	const onClickDeleteWorkspace = () => {
-		electrobun.rpc?.send.deleteWorkspace();
+		void deleteCurrentLocalWorkspace(false);
 	};
 
 	const onClickRemoveCompletely = () => {
-		electrobun.rpc?.send.deleteWorkspaceCompletely();
+		void deleteCurrentLocalWorkspace(true);
 	};
 
 	let inputNameRef: HTMLInputElement | undefined;
@@ -1105,11 +1112,12 @@ const WorkspaceSettings = () => {
 		e.preventDefault();
 
 		if (inputNameRef && state.workspace?.name !== inputNameRef.value) {
-			electrobun.rpc?.send.updateWorkspace({ name: inputNameRef.value });
+			void updateCurrentLocalWorkspaceName(inputNameRef.value);
 		}
 
 		if (inputColorRef && state.workspace?.color !== inputColorRef.value) {
-			electrobun.rpc?.send.updateWorkspace({ color: inputColorRef.value });
+			setState("workspace", "color", inputColorRef.value);
+			updateSyncedState();
 		}
 	};
 
@@ -1294,21 +1302,42 @@ const LensSettings = () => {
 			}
 
 			if (data.mode === "create") {
-				if (data.workspaceId === state.bunnyDash.currentWorkspaceId) {
-					await syncWorkspaceNow();
+				if (data.workspaceId.startsWith("__cloud_workspace__:")) {
+					if (data.workspaceId === state.bunnyDash.currentWorkspaceId) {
+						await syncWorkspaceNow();
+					}
+					await electrobun.rpc?.request.createLens({
+						workspaceId: data.workspaceId,
+						name: nextName,
+						description: nextDescription,
+						sourceLensId: data.sourceLensId,
+					});
+				} else {
+					if (data.workspaceId === state.bunnyDash.currentWorkspaceId) {
+						await syncWorkspaceNow();
+					}
+					await createOrRenameLocalLens({
+						workspaceId: data.workspaceId,
+						name: nextName,
+						description: nextDescription,
+						sourceLensId: data.sourceLensId,
+					});
 				}
-				await electrobun.rpc?.request.createLens({
-					workspaceId: data.workspaceId,
-					name: nextName,
-					description: nextDescription,
-					sourceLensId: data.sourceLensId,
-				});
 			} else if (data.lensId) {
-				await electrobun.rpc?.request.renameLens({
-					lensId: data.lensId,
-					name: nextName,
-					description: nextDescription,
-				});
+				if (data.lensId.startsWith("__cloud_lens__:")) {
+					await electrobun.rpc?.request.renameLens({
+						lensId: data.lensId,
+						name: nextName,
+						description: nextDescription,
+					});
+				} else {
+					await createOrRenameLocalLens({
+						workspaceId: data.workspaceId,
+						lensId: data.lensId,
+						name: nextName,
+						description: nextDescription,
+					});
+				}
 			}
 
 			await applyInitialState();
@@ -3166,19 +3195,12 @@ const NodeSettings = () => {
 					if (project) {
 						// Get project name from the input field (which may have been edited)
 						const projectName = projectNameRef?.value || project.name;
-						electrobun.rpc?.send.editProject({
-							projectId: project.id,
-							projectName,
-							path: absolutePath,
-						});
+						await editLocalProjectMount(project.id, projectName, absolutePath);
 					}
 				} else {
 					// For new projects, get name from the preview node's slate
 					const projectName = getSlateForNode(_previewNode)?.name;
-					electrobun.rpc?.request.addProject({
-						projectName,
-						path: absolutePath,
-					});
+					await addLocalProjectMount(absolutePath, projectName);
 				}
 			}
 
@@ -3572,9 +3594,10 @@ const NodeSettings = () => {
 
 			if (projectForRoot) {
 				// For project root nodes, use the project-specific deletion
-				electrobun.rpc?.send.fullyDeleteProjectFromDiskAndBunnyDash({
-					projectId: projectForRoot.id,
-				});
+				void (async () => {
+					await fsSafeDeleteFileOrFolder(projectForRoot.path);
+					await removeLocalProjectMount(projectForRoot.id);
+				})();
 			} else {
 				// For regular nodes or nested nodes within projects, use node deletion
 				electrobun.rpc?.send.fullyDeleteNodeFromDisk({
@@ -3591,9 +3614,7 @@ const NodeSettings = () => {
 			// (not just a project that contains this node)
 			const project = getProjectByRootPath(_node.path);
 			if (project) {
-				electrobun.rpc?.send.removeProjectFromBunnyDashOnly({
-					projectId: project.id,
-				});
+				void removeLocalProjectMount(project.id);
 			}
 			setState("settingsPane", { type: "", data: {} });
 		}

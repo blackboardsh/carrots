@@ -393,7 +393,18 @@ class CarrotInstance {
     runtime.notifyDashboardChanged();
   }
 
-  async openWindow(windowId = this.getPrimaryControllerWindowId(), options?: { title?: string }) {
+  async openWindow(
+    windowId = this.getPrimaryControllerWindowId(),
+    options?: {
+      title?: string;
+      frame?: {
+        x?: number;
+        y?: number;
+        width?: number;
+        height?: number;
+      };
+    },
+  ) {
     if (!hasHostPermission(this.carrot.install.permissionsGranted, "windows")) {
       return;
     }
@@ -415,8 +426,18 @@ class CarrotInstance {
     this.createControllerWindow(windowId, {
       hidden: false,
       title: options?.title,
+      frame: options?.frame,
     });
     this.controllerWindows.get(windowId)?.activate();
+  }
+
+  async requestCloseWindow(windowId?: string) {
+    const targetWindowId = windowId || this.getPrimaryControllerWindowId();
+    const win = this.controllerWindows.get(targetWindowId);
+    if (!win) {
+      return;
+    }
+    win.close();
   }
 
   async closeWindow(windowId = this.getPrimaryControllerWindowId()) {
@@ -575,6 +596,27 @@ class CarrotInstance {
         },
         messages: {
           "*": (messageName, payload) => {
+            if (this.carrot.manifest.id === "bunny-dash") {
+              void (async () => {
+                const direct = await (runtime as any).handleDirectDashSend(
+                  String(messageName),
+                  payload,
+                  windowId,
+                );
+                if (direct?.handled) {
+                  return;
+                }
+                this.invoke(`send:${String(messageName)}`, payload, windowId).catch((error) => {
+                  this.pushLog(
+                    `view message failed: ${String(messageName)} ${
+                      error instanceof Error ? error.message : String(error)
+                    }`,
+                  );
+                });
+              })();
+              return;
+            }
+
             this.invoke(`send:${String(messageName)}`, payload, windowId).catch((error) => {
               this.pushLog(
                 `view message failed: ${String(messageName)} ${
@@ -1566,7 +1608,7 @@ class BunnyEarsRuntime {
       });
 
       ws.addEventListener("message", (event) => {
-        this.handleHopMessage(event.data as string);
+        void this.handleHopMessage(event.data as string);
       });
 
       ws.addEventListener("close", (event) => {
@@ -1590,7 +1632,7 @@ class BunnyEarsRuntime {
     }
   }
 
-  private handleHopMessage(data: string) {
+  private async handleHopMessage(data: string) {
     try {
       const message = JSON.parse(data);
 
@@ -1626,13 +1668,25 @@ class BunnyEarsRuntime {
           const messagePayload = payload.payload;
           const carrot = this.carrots.get(carrotId);
           if (carrot && carrot.status === "running") {
-            // Forward as an event to the carrot worker
-            carrot.worker?.postMessage({
-              type: "request",
-              requestId: 0, // fire-and-forget, no response expected
-              method: `send:${messageName}`,
-              params: messagePayload,
-            });
+            const direct =
+              carrotId === "bunny-dash"
+                ? await this.handleDirectDashSend(
+                    String(messageName || ""),
+                    messagePayload,
+                    typeof (messagePayload as { windowId?: unknown } | undefined)?.windowId === "string"
+                      ? ((messagePayload as { windowId: string }).windowId)
+                      : undefined,
+                  )
+                : { handled: false as const };
+            if (!direct.handled) {
+              // Forward as an event to the carrot worker
+              carrot.worker?.postMessage({
+                type: "request",
+                requestId: 0, // fire-and-forget, no response expected
+                method: `send:${messageName}`,
+                params: messagePayload,
+              });
+            }
           }
           return;
         }
@@ -2408,7 +2462,14 @@ class BunnyEarsRuntime {
                 }
 
                 if (msg.type === "message") {
-                  dashCarrot.invoke(`send:${msg.name}`, msg.payload).catch(() => {});
+                  const direct = await self.handleDirectDashSend(
+                    String(msg.name || ""),
+                    msg.payload,
+                    typeof msg?.payload?.windowId === "string" ? msg.payload.windowId : undefined,
+                  );
+                  if (!direct.handled) {
+                    dashCarrot.invoke(`send:${msg.name}`, msg.payload).catch(() => {});
+                  }
                 }
               } catch (err) {
                 console.error("[web-bridge] Failed to handle message:", err);
@@ -2495,6 +2556,16 @@ class BunnyEarsRuntime {
         );
         return { handled: true, result: undefined };
       }
+      case "showContextMenu": {
+        const menuItems = Array.isArray((params as { menuItems?: unknown[] } | undefined)?.menuItems)
+          ? ((params as { menuItems?: any[] }).menuItems)
+          : [];
+        if (menuItems.length > 0) {
+          this.activeContextMenuOwnerId = "bunny-dash";
+          HostContextMenu.showContextMenu(menuItems);
+        }
+        return { handled: true, result: undefined };
+      }
       case "getNode":
       case "readSlateConfigFile":
       case "readFile":
@@ -2514,6 +2585,84 @@ class BunnyEarsRuntime {
           handled: true,
           result: await invokeFs(method),
         };
+      default:
+        return { handled: false };
+    }
+  }
+
+  private async handleDirectDashSend(
+    name: string,
+    payload: unknown,
+    sourceWindowId?: string,
+  ): Promise<{ handled: boolean }> {
+    switch (name) {
+      case "openBunnyWindow":
+        app.openBunnyWindow({
+          screenX: typeof (payload as { screenX?: unknown } | undefined)?.screenX === "number"
+            ? ((payload as { screenX: number }).screenX)
+            : undefined,
+          screenY: typeof (payload as { screenY?: unknown } | undefined)?.screenY === "number"
+            ? ((payload as { screenY: number }).screenY)
+            : undefined,
+        });
+        return { handled: true };
+      case "closeWindow": {
+        const dashCarrot = this.carrots.get("bunny-dash");
+        if (dashCarrot) {
+          const targetWindowId =
+            typeof (payload as { windowId?: unknown } | undefined)?.windowId === "string"
+              ? ((payload as { windowId: string }).windowId)
+              : sourceWindowId;
+          await dashCarrot.requestCloseWindow(targetWindowId);
+        }
+        return { handled: true };
+      }
+      case "createHostWindow": {
+        const dashCarrot = this.carrots.get("bunny-dash");
+        if (dashCarrot) {
+          const createPayload =
+            payload && typeof payload === "object"
+              ? (payload as {
+                  windowId?: string;
+                  title?: string;
+                  frame?: {
+                    x?: number;
+                    y?: number;
+                    width?: number;
+                    height?: number;
+                  };
+                })
+              : {};
+          await dashCarrot.openWindow(
+            String(createPayload.windowId || sourceWindowId || "main"),
+            {
+              title:
+                typeof createPayload.title === "string"
+                  ? createPayload.title
+                  : undefined,
+              frame: createPayload.frame,
+            },
+          );
+        }
+        return { handled: true };
+      }
+      case "fullyDeleteNodeFromDisk":
+        await this.invokeCarrotFrom(
+          "bunny-dash",
+          "bunny.fs",
+          "safeDeleteFileOrFolder",
+          { path: String((payload as { nodePath?: string } | undefined)?.nodePath || "") },
+          sourceWindowId,
+        );
+        return { handled: true };
+      case "installUpdateNow":
+        Updater.applyUpdate();
+        return { handled: true };
+      case "track":
+      case "addToken":
+      case "deleteToken":
+      case "syncDevlink":
+        return { handled: true };
       default:
         return { handled: false };
     }

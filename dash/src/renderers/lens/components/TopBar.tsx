@@ -7,7 +7,17 @@ import {
   electrobun,
   findFilesInCurrentWorkspace,
   getUniqueLensNameFromState,
+  hostCloseWindow,
+  invokeBiomeCarrot,
 } from "../init";
+import {
+  createAdditionalLocalWindow,
+  createLocalWorkspace,
+  openLocalLens,
+  openLocalLensInNewWindow,
+  openLocalWorkspace,
+  openLocalWorkspaceInNewWindow,
+} from "../localGraphActions";
 import {
   type BunnyDashCloudWorkspaceTreeType,
   type BunnyDashWorkspaceTreeType,
@@ -137,7 +147,7 @@ export const TopBar = () => {
             x: (pos?.x || 0) + 75,
             y: (pos?.y || 0) + 75,
           };
-          electrobun.rpc?.send.createWindow({ offset });
+          void createAdditionalLocalWindow(offset);
         }}
       >
         <img
@@ -362,19 +372,37 @@ const WorkspaceLensSwitcher = () => {
 
   const openWorkspace = async (workspaceId: string, inNewWindow: boolean) => {
     closeMenu();
+    const isCloudWorkspace = state.bunnyDash.cloudWorkspaces.some(
+      (workspace) => workspace.runtimeWorkspaceId === workspaceId,
+    );
     if (inNewWindow) {
-      await electrobun.rpc?.request.openWorkspaceInNewWindow({ workspaceId });
-    } else {
+      if (isCloudWorkspace) {
+        await electrobun.rpc?.request.openWorkspaceInNewWindow({ workspaceId });
+      } else {
+        await openLocalWorkspaceInNewWindow(workspaceId);
+      }
+    } else if (isCloudWorkspace) {
       await electrobun.rpc?.request.openWorkspace({ workspaceId });
+    } else {
+      await openLocalWorkspace(workspaceId);
     }
   };
 
   const openLens = async (lensId: string, inNewWindow: boolean) => {
     closeMenu();
+    const isCloudLens = state.bunnyDash.cloudWorkspaces.some((workspace) =>
+      workspace.lenses.some((lens) => lens.runtimeLensId === lensId),
+    );
     if (inNewWindow) {
-      await electrobun.rpc?.request.openLensInNewWindow({ lensId });
-    } else {
+      if (isCloudLens) {
+        await electrobun.rpc?.request.openLensInNewWindow({ lensId });
+      } else {
+        await openLocalLensInNewWindow(lensId);
+      }
+    } else if (isCloudLens) {
       await electrobun.rpc?.request.openLens({ lensId });
+    } else {
+      await openLocalLens(lensId);
     }
   };
 
@@ -900,12 +928,30 @@ const CommandPalette = ({ setOpen }: { setOpen: (value: boolean) => void }) => {
 
     // Define all workspace commands
     const allWorkspaceCommands = [
-      { name: "New Window", description: "Open a new window", action: () => electrobun.rpc?.send.createWindow() },
-      { name: "Hide Workspace", description: "Hide the current workspace", action: () => electrobun.rpc?.send.hideWorkspace() },
+      {
+        name: "New Window",
+        description: "Open a new window",
+        action: () => void createAdditionalLocalWindow(),
+      },
+      {
+        name: "Hide Workspace",
+        description: "Hide the current workspace",
+        action: () => {
+          for (const window of state.workspace.windows || []) {
+            hostCloseWindow(window.id);
+          }
+        },
+      },
       { name: "Llama Settings", description: "Configure local AI model", action: llamaSettingsClick },
       { name: "Bunny Dash Settings", description: "Configure global Bunny Dash settings", action: globalSettingsClick },
       { name: "Workspace Settings", description: "Configure workspace settings", action: workspaceSettingsClick },
-      { name: "New Workspace", description: "Create a new workspace", action: () => electrobun.rpc?.send.createWorkspace() },
+      {
+        name: "New Workspace",
+        description: "Create a new workspace",
+        action: () => {
+          void createLocalWorkspace(`Workspace ${state.bunnyDash.workspaces.length + 1}`);
+        },
+      },
       {
         name: "Format Document",
         description: "Format the current code editor",
@@ -913,7 +959,7 @@ const CommandPalette = ({ setOpen }: { setOpen: (value: boolean) => void }) => {
           const activeTab = getCurrentTab();
           if (!activeTab || activeTab.type !== 'file') return;
 
-          electrobun.rpc?.send("formatFile", { path: activeTab.path });
+          void invokeBiomeCarrot("formatFile", { path: activeTab.path });
         }
       },
     ];

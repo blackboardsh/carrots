@@ -55,6 +55,13 @@ import {
 	updateSyncedState,
 	removeOpenFile,
 } from "./store";
+import {
+	openLocalLens,
+	openLocalLensInNewWindow,
+	openLocalWorkspace,
+	openLocalWorkspaceInNewWindow,
+	overwriteCurrentLocalLens,
+} from "./localGraphActions";
 
 import {
 	electrobun,
@@ -1289,16 +1296,13 @@ export const WorkspaceLensesTree = () => {
 	) => {
 		const label = `${workspace.name} · ${lens.name}`;
 		await runInWindowTransition(label, async () => {
-			await syncWorkspaceNow();
-			await electrobun.rpc?.request.openLens({ lensId });
+			await openLocalLens(lensId);
 			await refreshDashStateFromWorker();
 		});
 	};
 
 	const openLensInNewWindow = async (lensId: string) => {
-		await syncWorkspaceNow();
-		await electrobun.rpc?.request.openLensInNewWindow({ lensId });
-		await refreshDashStateFromWorker();
+		await openLocalLensInNewWindow(lensId);
 	};
 
 	const openWorkspace = async (
@@ -1306,16 +1310,13 @@ export const WorkspaceLensesTree = () => {
 		workspace: BunnyDashWorkspaceTreeType,
 	) => {
 		await runInWindowTransition(workspace.name, async () => {
-			await syncWorkspaceNow();
-			await electrobun.rpc?.request.openWorkspace({ workspaceId });
+			await openLocalWorkspace(workspaceId);
 			await refreshDashStateFromWorker();
 		});
 	};
 
 	const openWorkspaceInNewWindow = async (workspaceId: string) => {
-		await syncWorkspaceNow();
-		await electrobun.rpc?.request.openWorkspaceInNewWindow({ workspaceId });
-		await refreshDashStateFromWorker();
+		await openLocalWorkspaceInNewWindow(workspaceId);
 	};
 
 	const openCreateLensSettings = async (workspaceId: string) => {
@@ -1337,16 +1338,14 @@ export const WorkspaceLensesTree = () => {
 		lens: BunnyDashWorkspaceTreeType["lenses"][number],
 	) => {
 		await runInWindowTransition(`${workspace.name} · ${lens.name}`, async () => {
-			await electrobun.rpc?.request.openLens({ lensId: lens.id });
+			await openLocalLens(lens.id);
 			await refreshDashStateFromWorker();
 		});
 	};
 
 	const overwriteCurrentLens = async () => {
 		console.log("[bunny-dash] overwriteCurrentLens click");
-		await syncWorkspaceNow();
-		console.log("[bunny-dash] overwriteCurrentLens synced");
-		await electrobun.rpc?.request.overwriteCurrentLens();
+		await overwriteCurrentLocalLens();
 		console.log("[bunny-dash] overwriteCurrentLens resolved");
 		await refreshDashStateFromWorker();
 	};

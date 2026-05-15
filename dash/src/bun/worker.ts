@@ -3890,13 +3890,13 @@ async function openDashWindow() {
   return snapshot();
 }
 
-async function activateLens(lensId: string) {
-  return restoreLensInCurrentWindow(lensId);
-}
-
 async function openLens(lensId: string) {
+  const lens = getLensByKey(lensId);
+  if (!isCloudShadowLensKey(lens.key)) {
+    throw new Error("Local lens switching is handled in the Dash frontend");
+  }
   log(`openLens request: ${lensId}`);
-  return activateLens(lensId);
+  return restoreLensInCurrentWindow(lensId);
 }
 
 async function restoreCurrentState() {
@@ -3964,18 +3964,7 @@ async function overwriteCurrentLens() {
     log(`cloud lens overwritten: ${lens.name}`);
     return;
   }
-  const db = ensureDb();
-  db.collection("layouts").update(lens.id, {
-    workspaceId: currentWindow.workspaceId,
-    windowStateJson: serializeBunnyWindow(currentBunnyWindow),
-    windows: [toLensTemplateWindow(currentWindow)],
-  });
-  flushDb();
-  await saveState();
-  syncTray();
-  emitSetProjectsForWindow(currentWindow.id);
-  emitSnapshot();
-  log(`lens overwritten: ${lens.name}`);
+  throw new Error("Local lens overwrite is handled in the Dash frontend");
 }
 
 async function createLens(
@@ -4044,191 +4033,7 @@ async function createLens(
     log(sourceLens ? `cloud lens forked: ${createdCloudLens.name}` : `cloud lens created: ${createdCloudLens.name}`);
     return snapshot();
   }
-
-  const key = uniqueKey(cleanName, lenses.map((lens) => lens.key));
-  const created = ensureDb().collection("layouts").insert({
-    key,
-    name: cleanName,
-    description: description.trim() || (sourceLens ? `Forked from ${sourceLens.name}` : `Saved from ${workspace.name}`),
-    workspaceId: workspace.key,
-    windowStateJson: serializeBunnyWindow(sourceBunnyWindow),
-    sortOrder: lenses.length,
-    windows: [toLensTemplateWindow(sourceRuntimeWindow)],
-  });
-
-  if (useCurrentWindowState) {
-    state.currentLayoutId = created.key;
-    currentWindow.lensId = created.key;
-    state.activeTreeNodeId = `lens-overview:${created.key}`;
-  }
-
-  flushDb();
-  await saveState();
-  syncTray();
-  if (useCurrentWindowState) {
-    emitSetProjectsForWindow(currentWindow.id);
-  } else {
-    emitSetProjects();
-  }
-  broadcastRuntimeEventToDashWindows("refreshBunnyDashState");
-  emitSnapshot();
-  log(sourceLens ? `lens forked: ${created.name}` : `lens created: ${created.name}`);
-  return snapshot();
-}
-
-async function createWorkspace(name: string, subtitle = "") {
-  const db = ensureDb();
-  const workspaces = listWorkspaces();
-  const key = uniqueKey(name, workspaces.map((workspace) => workspace.key));
-  const created = db.collection("workspaces").insert({
-    key,
-    name: name.trim(),
-    subtitle: subtitle.trim() || "New Bunny Dash workspace.",
-    sortOrder: workspaces.length,
-  });
-
-  const currentLens = ensureWorkspaceCurrentLens(created.key);
-  const starterBunnyWindow = parseStoredBunnyWindow(currentLens);
-  const starterRuntimeWindow = buildRuntimeWindowFromLens(currentLens, getCurrentWindow().id);
-
-  const currentWindow = getCurrentWindow();
-  await closeTsServerEditorsForWindow(currentWindow.id, currentWindow.workspaceId);
-  await killTerminalsForWindow(currentWindow.id);
-  currentWindow.workspaceId = created.key;
-  currentWindow.title = starterRuntimeWindow.title;
-  currentWindow.mainTabIds = [...starterRuntimeWindow.mainTabIds];
-  currentWindow.sideTabIds = [...starterRuntimeWindow.sideTabIds];
-  currentWindow.currentMainTabId = starterRuntimeWindow.currentMainTabId;
-  currentWindow.currentSideTabId = starterRuntimeWindow.currentSideTabId;
-  state.currentLayoutId = currentLens.key;
-  state.activeTreeNodeId = `workspace-overview:${created.key}`;
-  removeBunnyWindowFromAllWorkspaces(currentWindow.id);
-  upsertBunnyWindowForWorkspace(created.key, {
-    ...starterBunnyWindow,
-    id: currentWindow.id,
-  });
-  flushDb();
-  await saveState();
-  syncTray();
-  emitSetProjectsForWindow(currentWindow.id);
-  emitSnapshot();
-  log(`workspace created: ${created.name}`);
-  return snapshot();
-}
-
-async function addProjectMount(params: {
-  workspaceId?: string;
-  name?: string;
-  path: string;
-  instanceId?: string;
-  instanceLabel?: string;
-  kind?: string;
-}) {
-  const workspaceId = params.workspaceId || getCurrentWorkspace().key;
-  const workspace = getWorkspaceByKey(workspaceId);
-  const projectName = params.name?.trim() || basename(params.path) || "project";
-  const resolvedPath = params.path.trim();
-
-  if (!resolvedPath) {
-    throw new Error("Project path is required");
-  }
-
-  if (!existsSync(resolvedPath)) {
-    throw new Error(`Project path does not exist: ${resolvedPath}`);
-  }
-
-  if (!statSync(resolvedPath).isDirectory()) {
-    throw new Error(`Project path is not a directory: ${resolvedPath}`);
-  }
-
-  if (isCloudShadowWorkspaceKey(workspace.key)) {
-    if (!cloudApi) {
-      throw new Error("Not signed in to Bunny Cloud");
-    }
-
-    const cloudWorkspaceId = cloudWorkspaceIdFromShadowKey(workspace.key);
-    const cloudWorkspace = cloudWorkspaces.find((candidate) => candidate.id === cloudWorkspaceId);
-    const currentCloudInstanceId = cloudCurrentInstanceId;
-    if (!currentCloudInstanceId) {
-      throw new Error("This instance is not registered to Bunny Cloud");
-    }
-
-    const targetInstanceId =
-      params.instanceId && params.instanceId !== "host-machine"
-        ? params.instanceId
-        : currentCloudInstanceId;
-
-    if (
-      cloudWorkspace?.mounts?.some(
-        (mount) =>
-          mount.instance_id === targetInstanceId &&
-          (mount.path === resolvedPath || mount.name === projectName),
-      )
-    ) {
-      throw new Error(`Workspace ${workspace.name} already contains ${projectName}`);
-    }
-
-    await cloudApi.createProjectMount(
-      cloudWorkspaceId,
-      targetInstanceId,
-      resolvedPath,
-      projectName,
-    );
-    await refreshCloudData();
-    emitSetProjects();
-    await writePersistedDashState();
-    return snapshot();
-  }
-
-  const projects = listProjectMounts();
-  const existingWorkspaceProjects = getProjectMountsForWorkspace(workspace.key);
-
-  if (
-    existingWorkspaceProjects.some(
-      (project) => project.path === resolvedPath || project.name === projectName,
-    )
-  ) {
-    throw new Error(`Workspace ${workspace.name} already contains ${projectName}`);
-  }
-
-  const key = uniqueKey(`${workspace.key}-${projectName}`, projects.map((project) => project.key));
-  const created = ensureDb().collection("projectMounts").insert({
-    key,
-    workspaceId: workspace.key,
-    name: projectName,
-    instanceId: params.instanceId || "host-machine",
-    instanceLabel: params.instanceLabel || hostname() || "This Machine",
-    path: resolvedPath,
-    kind: params.kind || "code",
-    status: "ready",
-    sortOrder: projects.length,
-  });
-
-  if (existsSync(created.path)) {
-    expandedFsDirs.add(created.path);
-  }
-  syncProjectWatchers();
-  state.activeTreeNodeId = `project:${created.key}`;
-  flushDb();
-  await saveState();
-  syncTray();
-  emitSnapshot();
-  log(`project added: ${created.name}`);
-  return snapshot();
-}
-
-async function saveLens(name: string, description = "") {
-  const workspace = getCurrentWorkspace();
-  await syncRuntimeWindowFrameFromHost(getCurrentWindow().id);
-  const currentBunnyWindow = getCurrentBunnyWindow();
-  log(
-    `saveLens begin: workspace=${workspace.key} name=${name || "<auto>"} rootPane=${currentBunnyWindow.rootPane.type} currentPane=${currentBunnyWindow.currentPaneId}`,
-  );
-  return createLens(
-    workspace.key,
-    name || getUniqueLensNameForWorkspace(workspace.key, "Lens"),
-    description,
-  );
+  throw new Error("Local lens creation is handled in the Dash frontend");
 }
 
 async function renameLens(lensId: string, name: string, description = "") {
@@ -4260,19 +4065,7 @@ async function renameLens(lensId: string, name: string, description = "") {
     log(`cloud lens renamed: ${cleanName}`);
     return snapshot();
   }
-  ensureDb().collection("layouts").update(lens.id, {
-    name: cleanName,
-    description: description.trim(),
-  });
-
-  flushDb();
-  await saveState();
-  syncTray();
-  emitSetProjects();
-  broadcastRuntimeEventToDashWindows("refreshBunnyDashState");
-  emitSnapshot();
-  log(`lens renamed: ${cleanName}`);
-  return snapshot();
+  throw new Error("Local lens rename is handled in the Dash frontend");
 }
 
 async function openWorkspaceInNewWindow(workspaceId: string) {
@@ -4365,6 +4158,9 @@ async function deleteLens(lensId: string) {
 
 async function openWorkspace(workspaceId: string) {
   const workspace = getWorkspaceByKey(workspaceId);
+  if (!isCloudShadowWorkspaceKey(workspace.key)) {
+    throw new Error("Local workspace switching is handled in the Dash frontend");
+  }
   const currentLens = ensureWorkspaceCurrentLens(workspace.key);
   log(`openWorkspace request: ${workspace.key}`);
   await restoreLensInCurrentWindow(currentLens.key);
@@ -4400,14 +4196,23 @@ async function selectNode(nodeId: string) {
   state.activeTreeNodeId = nodeId;
 
   if (nodeId.startsWith("lens-overview:")) {
-    await activateLens(nodeId.replace("lens-overview:", ""));
+    const lensId = nodeId.replace("lens-overview:", "");
+    if (isCloudShadowLensKey(lensId)) {
+      await restoreLensInCurrentWindow(lensId);
+    }
     return;
   } else if (nodeId.startsWith("lens:")) {
-    await activateLens(nodeId.replace("lens:", ""));
+    const lensId = nodeId.replace("lens:", "");
+    if (isCloudShadowLensKey(lensId)) {
+      await restoreLensInCurrentWindow(lensId);
+    }
     return;
   } else if (nodeId.startsWith("workspace-overview:")) {
     const workspaceId = nodeId.replace("workspace-overview:", "");
-    if (workspaceId !== getCurrentWorkspace().key) {
+    if (
+      isCloudShadowWorkspaceKey(workspaceId) &&
+      workspaceId !== getCurrentWorkspace().key
+    ) {
       await openWorkspace(workspaceId);
       return;
     }
@@ -4450,53 +4255,81 @@ function syncTray() {
   // Dash no longer owns or extends the system tray.
 }
 
-async function createAdditionalWindow(offset?: { x?: number; y?: number }) {
-  const currentWindow = getCurrentWindow();
-  const currentLens = getCurrentLens();
-  const currentWorkspace = getCurrentWorkspace();
-  const currentBunnyWindow = getCurrentBunnyWindow();
-  const nextWindowId = makeLiveWindowId(currentLens.key, currentWindow.id.split(LIVE_WINDOW_ID_SEPARATOR)[1] || "main");
-  const nextRuntimeWindow = {
-    ...structuredClone(currentWindow),
-    id: nextWindowId,
-  };
-  const nextBunnyWindow = cloneBunnyWindow(currentBunnyWindow);
-  nextBunnyWindow.id = nextWindowId;
-  if (offset) {
-    nextBunnyWindow.position = {
-      ...nextBunnyWindow.position,
-      x: nextBunnyWindow.position.x + Number(offset.x || 0),
-      y: nextBunnyWindow.position.y + Number(offset.y || 0),
+async function syncLocalCurrentWindow(params: any) {
+  const workspaceId = String(params?.workspaceId || getCurrentWorkspace().key);
+  const lensId = String(params?.lensId || state.currentLayoutId);
+  const windowId = String(params?.windowId || state.currentWindowId);
+  const workspace = getWorkspaceByKey(workspaceId);
+  const lens = getLensByKey(lensId);
+  let runtimeWindow = runtimeWindows.find((window) => window.id === windowId);
+  const template =
+    params?.window && typeof params.window === "object"
+      ? params.window
+      : {};
+
+  if (!runtimeWindow) {
+    runtimeWindow = {
+      id: windowId,
+      lensId,
+      workspaceId,
+      title: "",
+      mainTabIds: ["workspace"],
+      sideTabIds: ["current-state"],
+      currentMainTabId: "workspace",
+      currentSideTabId: "current-state",
     };
+    runtimeWindows.push(runtimeWindow);
   }
 
-  runtimeWindows.push(nextRuntimeWindow);
-  upsertBunnyWindowForWorkspace(currentWorkspace.key, nextBunnyWindow);
-  state.currentWindowId = nextWindowId;
-  state.currentLayoutId = currentLens.key;
+  runtimeWindow.workspaceId = workspaceId;
+  runtimeWindow.lensId = lensId;
+  runtimeWindow.title = buildLiveWindowTitle(
+    workspace,
+    lens,
+    typeof template.title === "string" ? template.title : undefined,
+  );
+  runtimeWindow.mainTabIds = Array.isArray(template.mainTabIds)
+    ? [...template.mainTabIds]
+    : ["workspace"];
+  runtimeWindow.sideTabIds = Array.isArray(template.sideTabIds)
+    ? [...template.sideTabIds]
+    : ["current-state"];
+  runtimeWindow.currentMainTabId =
+    typeof template.currentMainTabId === "string"
+      ? template.currentMainTabId
+      : runtimeWindow.mainTabIds[0] || "workspace";
+  runtimeWindow.currentSideTabId =
+    typeof template.currentSideTabId === "string"
+      ? template.currentSideTabId
+      : runtimeWindow.sideTabIds[0] || "current-state";
+
+  const syncedBunnyWindow =
+    bunnyDashState.workspaces?.[workspaceId]?.windows?.find(
+      (window) => window.id === windowId,
+    ) || null;
+  if (syncedBunnyWindow) {
+    removeBunnyWindowFromAllWorkspaces(windowId);
+    upsertBunnyWindowForWorkspace(workspaceId, cloneBunnyWindow(syncedBunnyWindow));
+    syncHostDashWindowPresentation(windowId, runtimeWindow.title, {
+      x: syncedBunnyWindow.position.x,
+      y: syncedBunnyWindow.position.y,
+      width: syncedBunnyWindow.position.width,
+      height: syncedBunnyWindow.position.height,
+    });
+  }
+
+  state.currentWindowId = windowId;
+  state.currentLayoutId = lensId;
   state.commandPaletteOpen = false;
   state.commandQuery = "";
-  syncActiveTreeNode();
+  state.activeTreeNodeId =
+    typeof params?.activeTreeNodeId === "string" && params.activeTreeNodeId
+      ? params.activeTreeNodeId
+      : `lens-overview:${lensId}`;
+
   await saveState();
-  syncTray();
+  emitSetProjectsForWindow(windowId);
   emitSnapshot();
-  emitSetProjectsForWindow(nextWindowId);
-  focusWindow(nextWindowId, nextRuntimeWindow.title);
-  log(`window opened: ${nextWindowId}`);
-  return snapshot();
-}
-
-async function hideCurrentWorkspaceWindows() {
-  const workspaceId = getCurrentWorkspace().key;
-  const windowIds = runtimeWindows
-    .filter((window) => window.workspaceId === workspaceId)
-    .map((window) => window.id);
-
-  for (const windowId of windowIds) {
-    closeWindow(windowId);
-  }
-
-  log(`workspace hidden: ${workspaceId}`);
 }
 
 async function handleBunnyDashRequest(method: string, params: any) {
@@ -4608,15 +4441,6 @@ async function handleBunnyDashRequest(method: string, params: any) {
         },
       };
     }
-    case "addProject":
-      return addProjectMount({
-        workspaceId: getCurrentWorkspace().key,
-        name: params?.projectName,
-        path: String(params?.path || ""),
-      }).then((result) => {
-        emitSetProjects();
-        return result;
-      });
     case "syncWorkspace": {
       const workspaceId = String(params?.workspace?.id || getCurrentWorkspace().key);
       log(`syncWorkspace request: workspace=${workspaceId}`);
@@ -4638,8 +4462,8 @@ async function handleBunnyDashRequest(method: string, params: any) {
       emitSetProjects();
       emitSnapshot();
       return;
-    case "showContextMenu":
-      ContextMenu.showContextMenu(Array.isArray(params?.menuItems) ? params.menuItems : []);
+    case "syncLocalCurrentWindow":
+      await syncLocalCurrentWindow(params);
       return;
     case "getTokens":
       return bunnyDashState.tokens || [];
@@ -4652,133 +4476,6 @@ async function handleBunnyDashRequest(method: string, params: any) {
 
 async function handleBunnyDashSend(name: string, payload: any) {
   switch (name) {
-    case "openBunnyWindow":
-      app.openBunnyWindow({
-        screenX: typeof payload?.screenX === "number" ? payload.screenX : undefined,
-        screenY: typeof payload?.screenY === "number" ? payload.screenY : undefined,
-      });
-      return;
-    case "closeWindow":
-      closeWindow(getCurrentWindow().id);
-      return;
-    case "createWorkspace": {
-      const nextName = `Workspace ${listWorkspaces().length + 1}`;
-      await createWorkspace(nextName, "Workspace inside Bunny Dash.");
-      getOrCreateBunnyWorkspace(getCurrentWorkspace().key);
-      emitSetProjects();
-      return;
-    }
-    case "updateWorkspace": {
-      const workspace = getCurrentWorkspace();
-      const db = ensureDb();
-      const nextName = typeof payload?.name === "string" && payload.name.trim() ? payload.name.trim() : workspace.name;
-      db.collection("workspaces").update(workspace.id, {
-        name: nextName,
-        subtitle: workspace.subtitle,
-      });
-      const bunnyWorkspace = getOrCreateBunnyWorkspace(workspace.key);
-      bunnyWorkspace.name = nextName;
-      if (typeof payload?.color === "string" && payload.color) {
-        bunnyWorkspace.color = payload.color;
-      }
-      flushDb();
-      emitSetProjects();
-      await writePersistedDashState();
-      return;
-    }
-    case "removeProjectFromBunnyDashOnly": {
-      const projectId = String(payload?.projectId || "");
-      const db = ensureDb();
-      const project = findProjectMountByKey(projectId);
-      if (project) {
-        db.collection("projectMounts").remove(project.id);
-        flushDb();
-        syncProjectWatchers();
-        emitSetProjects();
-        await writePersistedDashState();
-      }
-      return;
-    }
-    case "fullyDeleteProjectFromDiskAndBunnyDash": {
-      const projectId = String(payload?.projectId || "");
-      const project = findProjectMountByKey(projectId);
-      if (project) {
-        await invokeFsCarrot("safeDeleteFileOrFolder", { path: project.path });
-        const db = ensureDb();
-        db.collection("projectMounts").remove(project.id);
-        flushDb();
-        syncProjectWatchers();
-        emitSetProjects();
-        await writePersistedDashState();
-      }
-      return;
-    }
-    case "fullyDeleteNodeFromDisk":
-      await invokeFsCarrot("safeDeleteFileOrFolder", { path: String(payload?.nodePath || "") });
-      return;
-    case "editProject": {
-      const project = findProjectMountByKey(String(payload?.projectId || ""));
-      if (!project) {
-        return;
-      }
-      ensureDb().collection("projectMounts").update(project.id, {
-        name: String(payload?.projectName || project.name),
-        path: String(payload?.path || project.path),
-      });
-      flushDb();
-      syncProjectWatchers();
-      emitSetProjects();
-      await writePersistedDashState();
-      return;
-    }
-    case "deleteWorkspace":
-    case "deleteWorkspaceCompletely": {
-      const workspaces = listWorkspaces();
-      if (workspaces.length <= 1) {
-        return;
-      }
-      const current = getCurrentWorkspace();
-      const db = ensureDb();
-      const projects = getProjectMountsForWorkspace(current.key);
-      for (const project of projects) {
-        if (name === "deleteWorkspaceCompletely") {
-          await invokeFsCarrot("safeDeleteFileOrFolder", { path: project.path });
-        }
-        db.collection("projectMounts").remove(project.id);
-      }
-      db.collection("workspaces").remove(current.id);
-      delete (bunnyDashState.workspaces || {})[current.key];
-      flushDb();
-      await openWorkspace(listWorkspaces()[0]!.key);
-      emitSetProjects();
-      await writePersistedDashState();
-      return;
-    }
-    case "track":
-    case "installUpdateNow":
-    case "addToken":
-    case "deleteToken":
-    case "syncDevlink":
-      return;
-    case "formatFile":
-      await invokeBiomeCarrot(
-        "formatFile",
-        {
-          path: String(payload?.path || ""),
-        },
-        { windowId: getCurrentWindow().id },
-      );
-      return;
-    case "createWindow":
-      await createAdditionalWindow(
-        payload && typeof payload === "object"
-          ? { x: Number(payload.offset?.x || 0), y: Number(payload.offset?.y || 0) }
-          : undefined,
-      );
-      return;
-    case "hideWorkspace":
-      await hideCurrentWorkspaceWindows();
-      return;
     default:
       return;
   }
@@ -4965,35 +4662,6 @@ self.onmessage = async (event) => {
         await overwriteCurrentLens();
         post({ type: "response", requestId: message.requestId, success: true, payload: snapshot() });
         break;
-      case "createWorkspace": {
-        const created = await createWorkspace(
-          String(message.params?.name || ""),
-          String(message.params?.subtitle || ""),
-        );
-        post({ type: "response", requestId: message.requestId, success: true, payload: created });
-        break;
-      }
-      case "addProjectMount": {
-        const created = await addProjectMount({
-          workspaceId: message.params?.workspaceId,
-          name: message.params?.name,
-          path: String(message.params?.path || ""),
-          instanceId: message.params?.instanceId,
-          instanceLabel: message.params?.instanceLabel,
-          kind: message.params?.kind,
-        });
-        post({ type: "response", requestId: message.requestId, success: true, payload: created });
-        break;
-      }
-      case "saveLens":
-      case "saveLayout": {
-        const created = await saveLens(
-          String(message.params?.name || ""),
-          String(message.params?.description || ""),
-        );
-        post({ type: "response", requestId: message.requestId, success: true, payload: created });
-        break;
-      }
       case "createLens": {
         const created = await createLens(
           String(message.params?.workspaceId || getCurrentWorkspace().key),

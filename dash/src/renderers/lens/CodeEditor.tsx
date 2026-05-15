@@ -23,7 +23,7 @@ import { produce } from "solid-js/store";
 import { relative, basename } from "../utils/pathUtils";
 import { aiCompletionService } from "./services/aiCompletionService";
 import { getProjectForNodePath } from "./files";
-import { electrobun, fsWriteFile, invokeTsServerCarrot } from "./init";
+import { fsWriteFile, invokeBiomeCarrot, invokeTsServerCarrot } from "./init";
 import type { ParsedResponseType } from "../../shared/types/types";
 
 let currentRequestId = 0;
@@ -453,7 +453,7 @@ export const Editor = ({ currentTabId }: { currentTabId: string }) => {
         
         const biomeExtensions = ['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs', '.mts', '.cts', '.json', '.jsonc', '.css', '.html', '.graphql', '.gql'];
         if (biomeExtensions.some(ext => model.uri.path.endsWith(ext))) {
-          electrobun.rpc?.send("formatFile", {
+          void invokeBiomeCarrot("formatFile", {
             path: model.uri.path,
           });
         }
