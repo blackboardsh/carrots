@@ -14,7 +14,6 @@ import {
 } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Carrots } from "electrobun/bun";
 
 type InvocationSource = {
   carrotId?: string;
@@ -69,6 +68,12 @@ type FileWatchTarget = {
   path: string;
 };
 
+type FileWatchSubscription = {
+  owner: SearchOwner;
+  targets: Map<string, FileWatchTarget>;
+  lastSyncedAt: number;
+};
+
 type ProjectDirectoryWatcher = {
   close: () => void;
 };
@@ -86,6 +91,8 @@ const RG_BINARY_NAME = process.platform === "win32" ? "rg.exe" : "rg";
 const SEARCH_BATCH_FLUSH_MS = 100;
 const MAX_FIND_ALL_RESULTS = 1_000;
 const MAX_FIND_FILES_RESULTS = 500;
+const WATCH_SUBSCRIPTION_TTL_MS = 45_000;
+const WATCH_SUBSCRIPTION_PRUNE_MS = 15_000;
 const workerDir = dirname(fileURLToPath(import.meta.url));
 const FD_BINARY_PATH = resolveBinary([
   process.env.BUNNY_FS_FD_PATH || "",
@@ -102,9 +109,9 @@ const GREP_BINARY_PATH = Bun.which("grep");
 
 const findAllSessions = new Map<string, SearchSession<FindAllResult>>();
 const findFilesSessions = new Map<string, SearchSession<string>>();
-const watchedProjects = new Map<string, FileWatchTarget>();
+const watchSubscriptions = new Map<string, FileWatchSubscription>();
 const directoryWatchers = new Map<string, ProjectDirectoryWatcher>();
-let watchOwnerCarrotId: string | null = null;
+let watchSubscriptionPruneTimer: ReturnType<typeof setInterval> | null = null;
 
 const WATCH_IGNORED_DIR_NAMES = new Set([
   ".cache",
@@ -191,6 +198,30 @@ function closeAllDirectoryWatchers() {
     }
   }
   directoryWatchers.clear();
+}
+
+function pruneExpiredWatchSubscriptions() {
+  const now = Date.now();
+  let removed = false;
+  for (const [key, subscription] of watchSubscriptions.entries()) {
+    if (now - subscription.lastSyncedAt <= WATCH_SUBSCRIPTION_TTL_MS) {
+      continue;
+    }
+    watchSubscriptions.delete(key);
+    removed = true;
+  }
+  if (removed) {
+    syncDirectoryWatchers();
+  }
+}
+
+function ensureWatchSubscriptionPruneLoop() {
+  if (watchSubscriptionPruneTimer) {
+    return;
+  }
+  watchSubscriptionPruneTimer = setInterval(() => {
+    pruneExpiredWatchSubscriptions();
+  }, WATCH_SUBSCRIPTION_PRUNE_MS);
 }
 
 function createSearchSession<T>(owner: SearchOwner) {
@@ -670,10 +701,6 @@ function isIgnoredWatchDirectory(path: string) {
 }
 
 function emitFileWatchPayload(absolutePath: string, workspaceId?: string | null) {
-  if (!watchOwnerCarrotId) {
-    return;
-  }
-
   const exists = existsSync(absolutePath);
   let isFile = false;
   let isDir = false;
@@ -688,7 +715,7 @@ function emitFileWatchPayload(absolutePath: string, workspaceId?: string | null)
     }
   }
 
-  Carrots.emit(watchOwnerCarrotId, "fs-file-watch-event", {
+  return {
     absolutePath,
     workspaceId: workspaceId || undefined,
     exists,
@@ -696,26 +723,59 @@ function emitFileWatchPayload(absolutePath: string, workspaceId?: string | null)
     isAdding: exists,
     isFile,
     isDir,
-  });
+  };
 }
 
 function emitFileWatchForPath(absolutePath: string) {
-  const workspaceIds = new Set<string>();
-  for (const target of watchedProjects.values()) {
-    if (pathStartsWithPath(absolutePath, target.path)) {
+  pruneExpiredWatchSubscriptions();
+  for (const subscription of watchSubscriptions.values()) {
+    const workspaceIds = new Set<string>();
+
+    for (const target of subscription.targets.values()) {
+      if (!pathStartsWithPath(absolutePath, target.path)) {
+        continue;
+      }
       if (target.workspaceId) {
         workspaceIds.add(target.workspaceId);
       }
     }
-  }
 
-  if (workspaceIds.size === 0) {
-    emitFileWatchPayload(absolutePath);
-    return;
-  }
+    if (workspaceIds.size === 0) {
+      const payload = emitFileWatchPayload(absolutePath);
+      if (!payload) {
+        continue;
+      }
+      post({
+        type: "action",
+        action: "emit-carrot-view-event",
+        payload: {
+          carrotId: subscription.owner.carrotId,
+          name: "fileWatchEvent",
+          payload,
+          raw: true,
+          windowId: subscription.owner.windowId ?? null,
+        },
+      });
+      continue;
+    }
 
-  for (const workspaceId of workspaceIds) {
-    emitFileWatchPayload(absolutePath, workspaceId);
+    for (const workspaceId of workspaceIds) {
+      const payload = emitFileWatchPayload(absolutePath, workspaceId);
+      if (!payload) {
+        continue;
+      }
+      post({
+        type: "action",
+        action: "emit-carrot-view-event",
+        payload: {
+          carrotId: subscription.owner.carrotId,
+          name: "fileWatchEvent",
+          payload,
+          raw: true,
+          windowId: subscription.owner.windowId ?? null,
+        },
+      });
+    }
   }
 }
 
@@ -832,7 +892,8 @@ function createProjectDirectoryWatcher(
 
 function syncDirectoryWatchers() {
   const nextRoots = new Set(
-    Array.from(watchedProjects.values())
+    Array.from(watchSubscriptions.values())
+      .flatMap((subscription) => Array.from(subscription.targets.values()))
       .map((project) => project.path)
       .filter((projectPath) => existsSync(projectPath)),
   );
@@ -861,20 +922,31 @@ function syncDirectoryWatchers() {
 }
 
 function syncProjectWatchTargets(owner: SearchOwner, targets: FileWatchTarget[]) {
-  watchOwnerCarrotId = owner.carrotId;
-  watchedProjects.clear();
+  if (targets.length === 0) {
+    watchSubscriptions.delete(owner.key);
+    syncDirectoryWatchers();
+    return;
+  }
+
+  const subscription: FileWatchSubscription = {
+    owner,
+    targets: new Map<string, FileWatchTarget>(),
+    lastSyncedAt: Date.now(),
+  };
 
   for (const target of targets) {
     if (!target.watchId || !target.path) {
       continue;
     }
-    watchedProjects.set(target.watchId, {
+    subscription.targets.set(target.watchId, {
       watchId: target.watchId,
       workspaceId: target.workspaceId ?? null,
       path: target.path,
     });
   }
 
+  watchSubscriptions.set(owner.key, subscription);
+  ensureWatchSubscriptionPruneLoop();
   syncDirectoryWatchers();
 }
 

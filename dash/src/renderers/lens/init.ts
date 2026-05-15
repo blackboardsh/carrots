@@ -49,6 +49,9 @@ import {
 registerBunnyTerminal();
 registerDashDiffEditor();
 
+const FS_WATCH_HEARTBEAT_MS = 20_000;
+let fsWatchHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
 export async function syncGitFolderNode(folderPath: string) {
   const gitFolderPath = join(folderPath, ".git");
   const gitNode = await fsGetNode(gitFolderPath);
@@ -1041,6 +1044,26 @@ export function syncProjectWatchersForCurrentState() {
 		{ projects },
 		{ windowId: state.windowId },
 	);
+}
+
+export function ensureFsWatchHeartbeatLoop() {
+	if (fsWatchHeartbeatTimer) {
+		return;
+	}
+
+	fsWatchHeartbeatTimer = setInterval(() => {
+		void syncProjectWatchersForCurrentState().catch((error) => {
+			console.warn("Failed to refresh project watcher lease from Dash frontend:", error);
+		});
+	}, FS_WATCH_HEARTBEAT_MS);
+}
+
+export function stopFsWatchHeartbeatLoop() {
+	if (!fsWatchHeartbeatTimer) {
+		return;
+	}
+	clearInterval(fsWatchHeartbeatTimer);
+	fsWatchHeartbeatTimer = null;
 }
 
 export function getFaviconForUrl(_url: string) {

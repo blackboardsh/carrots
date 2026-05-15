@@ -274,8 +274,8 @@ class CarrotInstance {
   applicationMenu: any[] | null = null;
   controllerWindows = new Map<string, BrowserWindow>();
   controllerWindow: BrowserWindow | null = null;
-  webClients = new Map<string, { send: (data: string) => void }>();
-  hopBrowserIds = new Set<string>();
+  webClients = new Map<string, { send: (data: string) => void; windowId: string | null }>();
+  hopBrowserIds = new Map<string, { windowId: string | null }>();
   bunnyWindow: BrowserWindow | null = null;
   bunnyPollTimeout: ReturnType<typeof setTimeout> | null = null;
   worker: Worker | null = null;
@@ -633,6 +633,9 @@ class CarrotInstance {
     }
 
     for (const client of this.webClients.values()) {
+      if (options?.windowId && client.windowId !== options.windowId) {
+        continue;
+      }
       try {
         client.send(JSON.stringify({
           type: "message",
@@ -643,7 +646,10 @@ class CarrotInstance {
     }
 
     if (runtime.hopWs && this.hopBrowserIds.size > 0) {
-      for (const browserId of this.hopBrowserIds) {
+      for (const [browserId, browserState] of this.hopBrowserIds.entries()) {
+        if (options?.windowId && browserState.windowId !== options.windowId) {
+          continue;
+        }
         try {
           runtime.hopWs.send(JSON.stringify({
             browserId,
@@ -661,6 +667,24 @@ class CarrotInstance {
         }
       }
     }
+  }
+
+  setWebClientWindowId(clientId: string, windowId?: string | null) {
+    const client = this.webClients.get(clientId);
+    if (!client) {
+      return;
+    }
+    client.windowId = typeof windowId === "string" && windowId ? windowId : null;
+  }
+
+  setHopBrowserWindowId(browserId: string, windowId?: string | null) {
+    const current = this.hopBrowserIds.get(browserId);
+    this.hopBrowserIds.set(browserId, {
+      windowId:
+        typeof windowId === "string" && windowId
+          ? windowId
+          : current?.windowId ?? null,
+    });
   }
 
   private createControllerWindow(
@@ -1758,7 +1782,7 @@ class BunnyEarsRuntime {
         console.log(`[hop] Browser connected: ${message.browserId} for ${message.carrotId}`);
         const carrot = this.carrots.get(message.carrotId);
         if (carrot) {
-          carrot.hopBrowserIds.add(message.browserId);
+          carrot.hopBrowserIds.set(message.browserId, { windowId: null });
         }
         return;
       }
@@ -1786,6 +1810,12 @@ class BunnyEarsRuntime {
           const messagePayload = payload.payload;
           const carrot = this.carrots.get(carrotId);
           if (carrot && carrot.status === "running") {
+            carrot.setHopBrowserWindowId(
+              browserId,
+              typeof (messagePayload as { windowId?: unknown } | undefined)?.windowId === "string"
+                ? ((messagePayload as { windowId: string }).windowId)
+                : undefined,
+            );
             const direct =
               carrotId === "bunny-dash"
                 ? await this.handleDirectDashSend(
@@ -1824,6 +1854,12 @@ class BunnyEarsRuntime {
 
         // Route to a specific carrot
         const carrot = this.carrots.get(carrotId)!;
+        carrot.setHopBrowserWindowId(
+          browserId,
+          typeof (params as { windowId?: unknown } | undefined)?.windowId === "string"
+            ? ((params as { windowId?: string }).windowId)
+            : undefined,
+        );
         if (carrot.status !== "running") {
           this.hopWs?.send(JSON.stringify({
             browserId,
@@ -3128,6 +3164,7 @@ class BunnyEarsRuntime {
                   send: (data: string) => {
                     try { ws.send(data); } catch {}
                   },
+                  windowId: null,
                 });
               } else {
                 console.warn("[web-bridge] bunny-dash carrot not found");
@@ -3151,6 +3188,10 @@ class BunnyEarsRuntime {
 
                 if (msg.type === "request") {
                   try {
+                    dashCarrot.setWebClientWindowId(
+                      id,
+                      typeof msg?.params?.windowId === "string" ? msg.params.windowId : undefined,
+                    );
                     const direct = await self.handleDirectDashRequest(
                       String(msg.method || ""),
                       msg.params,
@@ -3187,6 +3228,10 @@ class BunnyEarsRuntime {
                 }
 
                 if (msg.type === "message") {
+                  dashCarrot.setWebClientWindowId(
+                    id,
+                    typeof msg?.payload?.windowId === "string" ? msg.payload.windowId : undefined,
+                  );
                   const direct = await self.handleDirectDashSend(
                     String(msg.name || ""),
                     msg.payload,

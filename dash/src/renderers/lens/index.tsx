@@ -33,6 +33,8 @@ import {
 	scheduleDashHostCacheSync,
 	fsSafeDeleteFileOrFolder,
 	fsTouchFile,
+	ensureFsWatchHeartbeatLoop,
+	stopFsWatchHeartbeatLoop,
 	refreshPeerDependencies,
 	syncProjectWatchersForCurrentState,
 } from "./init";
@@ -505,6 +507,13 @@ window.addEventListener("refreshDashFrontendState", handleRefreshDashFrontendSta
 void bootDashFrontend();
 
 const App = () => {
+	onMount(() => {
+		ensureFsWatchHeartbeatLoop();
+		onCleanup(() => {
+			stopFsWatchHeartbeatLoop();
+		});
+	});
+
 	createEffect(() => {
 		const payload = buildDashHostCachePayloadFromState(state);
 		scheduleDashHostCacheSync(payload);

@@ -952,41 +952,6 @@ function emitViewMessage(name: string, payload?: unknown, windowId?: string) {
   post({ type: "action", action: "emit-view", payload: { name, payload, raw: true, windowId: targetWindowId } });
 }
 
-function handleFsFileWatchEvent(payload: unknown) {
-  const eventPayload =
-    payload && typeof payload === "object"
-      ? (payload as {
-          absolutePath?: string;
-          workspaceId?: string | null;
-          exists?: boolean;
-          isDelete?: boolean;
-          isAdding?: boolean;
-          isFile?: boolean;
-          isDir?: boolean;
-        })
-      : {};
-
-  const targetWindows =
-    typeof eventPayload.workspaceId === "string" && eventPayload.workspaceId
-      ? runtimeWindows.filter((window) => window.workspaceId === eventPayload.workspaceId)
-      : runtimeWindows;
-
-  for (const window of targetWindows) {
-    emitViewMessage(
-      "fileWatchEvent",
-      {
-        absolutePath: String(eventPayload.absolutePath || ""),
-        exists: Boolean(eventPayload.exists),
-        isDelete: Boolean(eventPayload.isDelete),
-        isAdding: Boolean(eventPayload.isAdding),
-        isFile: Boolean(eventPayload.isFile),
-        isDir: Boolean(eventPayload.isDir),
-      },
-      window.id,
-    );
-  }
-}
-
 function emitSetProjectsForWindow(windowId: string) {
   const runtimeWindow = runtimeWindows.find((window) => window.id === windowId);
   if (!runtimeWindow) {
@@ -1738,11 +1703,6 @@ self.onmessage = async (event) => {
 
   if (message.type === "event") {
     await ensureBootPromise();
-
-    if (message.name === "fs-file-watch-event") {
-      handleFsFileWatchEvent(message.payload);
-      return;
-    }
 
     if (message.name === "boot") {
       await ensureBootPromise();
