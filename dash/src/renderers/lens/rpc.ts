@@ -176,16 +176,6 @@ export type WorkspaceRPC = {
         };
         response: void;
       };
-      getLocalDashGraph: {
-        params: void;
-        response: any;
-      };
-      syncLocalDashGraph: {
-        params: {
-          graph: any;
-        };
-        response: void;
-      };
       syncLocalCurrentWindow: {
         params: {
           workspaceId: string;
@@ -600,6 +590,18 @@ export type WorkspaceRPC = {
       };
       initGitInFolder: {
         nodePath: string;
+      };
+      openLocalWorkspaceInNewWindow: {
+        workspaceId: string;
+      };
+      openLocalLensInNewWindow: {
+        lensId: string;
+      };
+      deleteLocalLens: {
+        lensId: string;
+      };
+      removeLocalProjectMount: {
+        projectId: string;
       };
       handleGlobalShortcut: {
         key: string;

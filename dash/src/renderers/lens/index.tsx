@@ -75,7 +75,6 @@ import {
 	createOrRenameLocalLens,
 	deleteCurrentLocalWorkspace,
 	editLocalProjectMount,
-	refreshDashRendererStateFromWorker,
 	removeLocalProjectMount,
 	updateCurrentLocalWorkspaceName,
 } from "./localGraphActions";
@@ -808,9 +807,6 @@ const getInitialState = () => {
 			nextWorkspace.windows[0];
 		if (currentWindow) {
 			try {
-				await electrobun.rpc?.request.syncLocalDashGraph({
-					graph: persistedGraph,
-				});
 				await electrobun.rpc?.request.syncWorkspace({
 					workspace: nextWorkspace,
 				});
@@ -1623,8 +1619,6 @@ const LensSettings = () => {
 
 			if (needsWorkerRefresh) {
 				await applyInitialState();
-			} else {
-				await refreshDashRendererStateFromWorker();
 			}
 			setState("settingsPane", { type: "", data: {} });
 		})();

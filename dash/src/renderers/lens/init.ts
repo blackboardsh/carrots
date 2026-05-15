@@ -33,16 +33,20 @@ import {
   mergeAppSettingsForBoot,
   mergeWorkspaceForBoot,
   loadPersistedAppSettings,
-  loadPersistedLocalDashGraph,
   loadPersistedWorkspaceState,
   persistAppSettings,
-  persistLocalDashGraph,
   persistWorkspaceState,
 } from "./localStateDb";
 import type {
   DashHostBootState,
   DashHostCacheSyncPayload,
 } from "./dashHostCache";
+import {
+  deleteLocalLens,
+  openLocalLensInNewWindow,
+  openLocalWorkspaceInNewWindow,
+  removeLocalProjectMount,
+} from "./localGraphActions";
 // import { readSlateConfigFile } from "./files";
 
 // Register web components for plugins to use
@@ -82,67 +86,8 @@ function openGitSettingsPane(query?: Record<string, string>) {
   });
 }
 
-export async function syncPersistedLocalGraphToWorker() {
-  let persistedGraph = null;
-
-  try {
-    persistedGraph = await loadPersistedLocalDashGraph();
-  } catch (error) {
-    console.warn("Failed to load local Dash graph from IndexedDB:", error);
-  }
-
-  if (!persistedGraph) {
-    return false;
-  }
-
-  await electrobun.rpc?.request.syncLocalDashGraph({
-    graph: persistedGraph,
-  });
-
-  return true;
-}
-
-export async function persistLocalDashGraphFromWorker() {
-  try {
-    const graph = await electrobun.rpc?.request.getLocalDashGraph();
-    if (graph) {
-      await persistLocalDashGraph(graph);
-    }
-  } catch (error) {
-    console.warn("Failed to persist local Dash graph from worker:", error);
-  }
-}
-
 export async function getHydratedInitialState() {
-  let response;
-  try {
-    response = await electrobun.rpc?.request.getInitialState();
-  } catch (error) {
-    console.error("[dash boot] initial getInitialState failed", error);
-    throw error;
-  }
-  if (!response) {
-    return response;
-  }
-
-  let hadPersistedGraph = false;
-  try {
-    hadPersistedGraph = await syncPersistedLocalGraphToWorker();
-  } catch (error) {
-    console.error("[dash boot] syncPersistedLocalGraphToWorker failed", error);
-    throw error;
-  }
-  if (hadPersistedGraph) {
-    try {
-      response = (await electrobun.rpc?.request.getInitialState()) || response;
-    } catch (error) {
-      console.error("[dash boot] second getInitialState failed", error);
-      throw error;
-    }
-  }
-
-  await persistLocalDashGraphFromWorker();
-  return response;
+  return electrobun.rpc?.request.getInitialState();
 }
 
 export function getDashHostBootState() {
@@ -255,7 +200,6 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
           persistWorkspaceState(workspace).catch((error) => {
             console.warn("Failed to persist workspace locally:", error);
           });
-          void persistLocalDashGraphFromWorker();
 
         console.log("projects", state.projects);
       },
@@ -735,6 +679,30 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
         }
         await invokeGitCarrot("initGit", { repoRoot });
         await syncGitFolderNode(repoRoot);
+      },
+      openLocalWorkspaceInNewWindow: ({ workspaceId }) => {
+        if (!workspaceId) {
+          return;
+        }
+        void openLocalWorkspaceInNewWindow(String(workspaceId));
+      },
+      openLocalLensInNewWindow: ({ lensId }) => {
+        if (!lensId) {
+          return;
+        }
+        void openLocalLensInNewWindow(String(lensId));
+      },
+      deleteLocalLens: ({ lensId }) => {
+        if (!lensId) {
+          return;
+        }
+        void deleteLocalLens(String(lensId));
+      },
+      removeLocalProjectMount: ({ projectId }) => {
+        if (!projectId) {
+          return;
+        }
+        void removeLocalProjectMount(String(projectId));
       },
       terminalOutput: (data: { terminalId: string; data: string }) => {
         // Notify all terminal components about new output
