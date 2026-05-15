@@ -1,13 +1,3 @@
-type InitMessage = {
-  type: "init";
-};
-
-type EventMessage = {
-  type: "event";
-  name?: string;
-  payload?: unknown;
-};
-
 type RequestMessage = {
   type: "request";
   requestId: number;
@@ -16,10 +6,6 @@ type RequestMessage = {
 
 function post(message: unknown) {
   self.postMessage(message);
-}
-
-function postReady() {
-  post({ type: "ready" });
 }
 
 function postError(requestId: number, error: string) {
@@ -32,16 +18,7 @@ function postError(requestId: number, error: string) {
 }
 
 self.onmessage = async (event) => {
-  const message = event.data as InitMessage | EventMessage | RequestMessage;
-
-  if (message?.type === "init") {
-    postReady();
-    return;
-  }
-
-  if (message?.type === "event") {
-    return;
-  }
+  const message = event.data as RequestMessage | { type?: string };
 
   if (message?.type === "request") {
     postError(message.requestId, `Unknown method: ${String(message.method || "")}`);
