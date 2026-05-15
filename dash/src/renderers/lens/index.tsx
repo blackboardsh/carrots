@@ -127,7 +127,6 @@ import type {
 	CachedFileType,
 	DomEventWithTarget,
 	FileNodeType,
-	PostMessageShowContextMenu,
 	PreviewFileTreeType,
 	ProjectType,
 	SlateType,
@@ -138,7 +137,6 @@ import {
 	OpenFilesTree,
 	ProjectsTree,
 	TemplateNodes,
-	createContextMenuAction,
 	getIconForNode,
 } from "./FileTree";
 import { getNode } from "./FileWatcher";
@@ -146,6 +144,7 @@ import { BlackboardAnimation } from "./components/BlackboardAnimation";
 import { StatusBar } from "./components/StatusBar";
 import { Dialog } from "./components/Dialog";
 import { TopBar } from "./components/TopBar";
+import { DashContextMenuHost, openDashContextMenu } from "./contextMenu";
 import { BunnyCloudSettings } from "./settings/BunnyCloudSettings";
 import { LlamaSettings } from "./settings/LlamaSettings";
 import {
@@ -1360,6 +1359,7 @@ const App = () => {
 						cancelText="Cancel"
 						type="danger"
 					/>
+					<DashContextMenuHost />
 				</div>
 			</div>
 		);
@@ -2128,18 +2128,12 @@ const PaneDivider = ({
 	// const percent = () => targetPercent
 	const onContextMenu = (e: DomEventWithTarget<MouseEvent>) => {
 		e.preventDefault();
-
-		electrobun.rpc?.request.showContextMenu({
-			menuItems: [
-				{
-					label: `Split ${isRow ? "Horizontally" : "Vertically"}`,
-					...createContextMenuAction("split_pane_container", {
-						pathToPane: pathToPane,
-						direction: isRow ? "row" : "column",
-					}),
-				},
-			],
-		});
+		openDashContextMenu(e, [
+			{
+				label: `Split ${isRow ? "Horizontally" : "Vertically"}`,
+				onSelect: () => splitPane(pathToPane, isRow ? "row" : "column", false, true),
+			},
+		]);
 	};
 
 	// const animationTime = 500;

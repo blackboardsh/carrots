@@ -41,6 +41,14 @@ import {
   requestCarrotUninstallConsent,
 } from "./carrotConsent";
 import { toBunWorkerPermissions } from "./workerPermissions";
+import {
+  CloudApi,
+  getApiBaseUrl,
+  type CloudDeviceToken,
+  type CloudInstance,
+  type CloudUserProfile,
+  type CloudWorkspace,
+} from "../../../../dash/src/bun/cloudApi";
 
 const DEBUG_BUNNY_EARS_BOOT = process.env.BUNNY_EARS_BOOT_DEBUG === "1";
 
@@ -54,6 +62,48 @@ function bootLog(message: string, details?: unknown) {
   }
   console.log(`[bunny-ears:boot] ${message}`, details);
 }
+
+const dashBuiltInShortcuts: Array<{
+  accelerator: string;
+  key: string;
+  ctrl: boolean;
+  shift: boolean;
+  alt: boolean;
+  meta: boolean;
+}> = [
+  {
+    accelerator: "cmd+shift+p",
+    key: "p",
+    ctrl: false,
+    shift: true,
+    alt: false,
+    meta: true,
+  },
+  {
+    accelerator: "cmd+shift+f",
+    key: "f",
+    ctrl: false,
+    shift: true,
+    alt: false,
+    meta: true,
+  },
+  {
+    accelerator: "ctrl+tab",
+    key: "Tab",
+    ctrl: true,
+    shift: false,
+    alt: false,
+    meta: false,
+  },
+  {
+    accelerator: "ctrl+shift+tab",
+    key: "Tab",
+    ctrl: true,
+    shift: true,
+    alt: false,
+    meta: false,
+  },
+];
 
 type CarrotStatus = "stopped" | "starting" | "running";
 
@@ -184,6 +234,35 @@ type DashboardRPC = {
     messages: {
       dashboardChanged: DashboardState;
     };
+  }>;
+};
+
+type BunnyCloudMachineInfo = {
+  machineId: string;
+  hostname: string;
+  platform: string;
+  instanceName: string;
+};
+
+type BunnyCloudOverview = {
+  connected: boolean;
+  currentMachine: BunnyCloudMachineInfo;
+  user: CloudUserProfile | null;
+  instances: CloudInstance[];
+  workspaces: CloudWorkspace[];
+  devices: CloudDeviceToken[];
+  currentInstanceId: string | null;
+  currentDeviceTokenId: string | null;
+  currentCarrots: Array<{
+    id: string;
+    name: string;
+    description: string;
+    version: string;
+    mode: string;
+    permissions: string[];
+    status: string;
+    slateUIs?: Array<{ id: string; name: string; path: string }>;
+    contributions?: CarrotContributions;
   }>;
 };
 
@@ -1325,7 +1404,15 @@ class BunnyEarsRuntime {
         return;
       }
 
-      if (!this.activeApplicationMenuOwnerId) {
+      if (!action) {
+        return;
+      }
+
+      if (
+        !this.activeApplicationMenuOwnerId ||
+        this.activeApplicationMenuOwnerId === "bunny-dash"
+      ) {
+        void this.handleDashApplicationMenuAction(action);
         return;
       }
 
@@ -2532,6 +2619,237 @@ class BunnyEarsRuntime {
     });
   }
 
+  private broadcastDashAuthTokenChanged(token: string) {
+    for (const carrot of this.carrots.values()) {
+      if (carrot.status === "running") {
+        carrot.sendEvent("auth-token-changed", { token });
+      }
+    }
+  }
+
+  private async getCurrentMachineInfoForDash(): Promise<BunnyCloudMachineInfo> {
+    const machineInfo = await app.getMachineInfo().catch(() => ({
+      machineId: "",
+      hostname: "",
+      platform: "",
+    }));
+    const os = require("node:os");
+    const machineId = machineInfo.machineId || this.getMachineId();
+    const hostname = machineInfo.hostname || os.hostname() || "Bunny Ears";
+    const platform = machineInfo.platform || process.platform;
+    return {
+      machineId,
+      hostname,
+      platform,
+      instanceName: platform ? `${hostname} (${platform})` : hostname,
+    };
+  }
+
+  private buildCurrentDashCarrotSummaries() {
+    return Array.from(this.carrots.values()).map((carrot) => ({
+      id: carrot.summary.id,
+      name: carrot.summary.name,
+      description: carrot.summary.description,
+      version: carrot.summary.version,
+      mode: carrot.summary.mode,
+      permissions: [...carrot.summary.permissions],
+      status: carrot.summary.status,
+      slateUIs: carrot.summary.slateUIs,
+      contributions: carrot.summary.contributions,
+    }));
+  }
+
+  private getDashCloudApiBaseUrl() {
+    return getApiBaseUrl(this.channel);
+  }
+
+  private async ensureDashCloudAccessToken() {
+    if (this.authToken) {
+      return this.authToken;
+    }
+    return (await this.refreshAccessTokenFromDevice()) || null;
+  }
+
+  private async getDashCloudApi() {
+    const accessToken = await this.ensureDashCloudAccessToken();
+    if (!accessToken) {
+      return null;
+    }
+
+    return new CloudApi(this.getDashCloudApiBaseUrl(), {
+      getAuth: () => ({
+        accessToken: this.authToken || accessToken,
+        refreshToken: "",
+      }),
+      onTokenRefresh: ({ accessToken: nextAccessToken }) => {
+        if (!nextAccessToken) {
+          return;
+        }
+        this.saveAuthToken(nextAccessToken);
+        this.broadcastDashAuthTokenChanged(nextAccessToken);
+      },
+    });
+  }
+
+  private async createDashDeviceToken(accessToken: string) {
+    const machine = await this.getCurrentMachineInfoForDash();
+    if (!machine.machineId) {
+      return null;
+    }
+
+    const api = new CloudApi(this.getDashCloudApiBaseUrl(), {
+      getAuth: () => ({
+        accessToken,
+        refreshToken: "",
+      }),
+      onTokenRefresh: () => {},
+    });
+
+    return api.createDeviceToken(machine.machineId, machine.instanceName);
+  }
+
+  private async buildDashBunnyCloudOverview(): Promise<BunnyCloudOverview> {
+    const currentMachine = await this.getCurrentMachineInfoForDash();
+    const api = await this.getDashCloudApi();
+
+    if (!api) {
+      return {
+        connected: false,
+        currentMachine,
+        user: null,
+        instances: [],
+        workspaces: [],
+        devices: [],
+        currentInstanceId: null,
+        currentDeviceTokenId: null,
+        currentCarrots: this.buildCurrentDashCarrotSummaries(),
+      };
+    }
+
+    const [user, instances, workspaces, devices] = await Promise.all([
+      api.getUserProfile().catch(() => null),
+      api.getInstances().catch(() => []),
+      api.listWorkspaces().catch(() => []),
+      api.getDeviceTokens().catch(() => []),
+    ]);
+
+    if (user) {
+      this.upsertDashHostCache({
+        account: {
+          signedIn: true,
+          email: user.email || "",
+          name: user.name || "",
+          userId: user.id || "",
+          emailVerified: Boolean(user.email_verified),
+        },
+      });
+    }
+
+    const currentInstanceId = currentMachine.machineId
+      ? instances.find((instance) => instance.machine_id === currentMachine.machineId)?.id ||
+        this.instanceId ||
+        null
+      : this.instanceId;
+
+    if (currentInstanceId) {
+      this.instanceId = currentInstanceId;
+    }
+
+    const currentDeviceTokenId = currentMachine.machineId
+      ? devices.find((device) => device.machine_id === currentMachine.machineId)?.id ||
+        this.deviceTokenId ||
+        null
+      : this.deviceTokenId;
+
+    return {
+      connected: true,
+      currentMachine,
+      user,
+      instances,
+      workspaces,
+      devices,
+      currentInstanceId,
+      currentDeviceTokenId,
+      currentCarrots: this.buildCurrentDashCarrotSummaries(),
+    };
+  }
+
+  private async loginDashBunnyCloud(params: {
+    mode: "login" | "register";
+    email: string;
+    password: string;
+    name?: string;
+  }) {
+    const endpoint = params.mode === "register" ? "/v1/auth/register" : "/v1/auth/login";
+    const body: Record<string, string> = {
+      email: params.email,
+      password: params.password,
+    };
+    if (params.mode === "register" && params.name?.trim()) {
+      body.name = params.name.trim();
+    }
+
+    const response = await fetch(`${this.getDashCloudApiBaseUrl()}${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json() as {
+      error?: string;
+      accessToken?: string;
+      refreshToken?: string;
+      user?: CloudUserProfile;
+    };
+
+    if (!response.ok || !data.accessToken || !data.user) {
+      throw new Error(data.error || `API ${response.status}`);
+    }
+
+    this.saveAuthToken(data.accessToken);
+    this.upsertDashHostCache({
+      account: {
+        signedIn: true,
+        email: data.user.email || "",
+        name: data.user.name || "",
+        userId: data.user.id || "",
+        emailVerified: Boolean(data.user.email_verified),
+      },
+    });
+    await this.registerInstanceWithToken(data.accessToken).catch(() => {});
+    this.broadcastDashAuthTokenChanged(data.accessToken);
+
+    const deviceToken = await this.createDashDeviceToken(data.accessToken).catch(() => null);
+    if (deviceToken?.token) {
+      this.saveDeviceToken(deviceToken.token, deviceToken.id);
+      try { this.hopWs?.close(); } catch {}
+      this.hopWs = null;
+      this.connectToHop();
+      this.refreshAccessTokenFromDevice().catch(() => {});
+    }
+
+    return this.buildDashBunnyCloudOverview();
+  }
+
+  private async registerDashCurrentInstance() {
+    const accessToken = await this.ensureDashCloudAccessToken();
+    if (!accessToken) {
+      throw new Error("Sign in to Bunny Cloud first");
+    }
+
+    const deviceToken = await this.createDashDeviceToken(accessToken).catch(() => null);
+    if (deviceToken?.token) {
+      this.saveDeviceToken(deviceToken.token, deviceToken.id);
+      try { this.hopWs?.close(); } catch {}
+      this.hopWs = null;
+      this.connectToHop();
+      this.refreshAccessTokenFromDevice().catch(() => {});
+    }
+
+    await this.registerInstanceWithToken(accessToken).catch(() => {});
+    this.broadcastDashAuthTokenChanged(accessToken);
+    return this.buildDashBunnyCloudOverview();
+  }
+
   // Get a fresh short-lived access token by exchanging the device token.
   // Used to populate `this.authToken` and notify dash carrots.
   private async refreshAccessTokenFromDevice(): Promise<string | null> {
@@ -2916,11 +3234,294 @@ class BunnyEarsRuntime {
     (this.managerWindow?.webview.rpc as any)?.send?.dashboardChanged(this.dashboardState());
   }
 
+  private getDashCarrot() {
+    return this.carrots.get("bunny-dash") || null;
+  }
+
+  private getPreferredDashWindowId() {
+    const cachedWindowId = this.loadDashHostCache()?.currentWindow?.windowId;
+    if (cachedWindowId) {
+      return cachedWindowId;
+    }
+
+    const dashCarrot = this.getDashCarrot();
+    if (!dashCarrot) {
+      return "main";
+    }
+
+    return dashCarrot.controllerWindows.keys().next().value ?? "main";
+  }
+
+  private async ensureDashWindowForMenuAction() {
+    const dashCarrot = this.getDashCarrot();
+    if (!dashCarrot) {
+      return null;
+    }
+
+    const windowId = this.getPreferredDashWindowId();
+    await dashCarrot.openWindow(windowId);
+    return {
+      dashCarrot,
+      windowId,
+    };
+  }
+
+  private async sendDashViewMessage(name: string, payload?: unknown) {
+    const target = await this.ensureDashWindowForMenuAction();
+    if (!target) {
+      return;
+    }
+
+    target.dashCarrot.emitViewMessage(name, payload, {
+      raw: true,
+      windowId: target.windowId,
+    });
+  }
+
+  private openDashAboutWindow(url: string) {
+    const id = `dash-about-${Date.now().toString(36)}`;
+    const win = new BrowserWindow({
+      id,
+      title: "About Dash",
+      url,
+      frame: {
+        width: 800,
+        height: 800,
+        x: 120,
+        y: 120,
+      },
+    });
+    win.on("close", () => {
+      try {
+        win.destroy();
+      } catch {}
+    });
+  }
+
+  private async handleDashApplicationMenuAction(action: string) {
+    if (action === "terms-of-service") {
+      this.openDashAboutWindow("https://blackboard.sh/terms");
+      return;
+    }
+    if (action === "privacy-statement") {
+      this.openDashAboutWindow("https://blackboard.sh/privacy");
+      return;
+    }
+    if (action === "acknowledgements") {
+      this.openDashAboutWindow("views://assets/licenses.html");
+      return;
+    }
+    if (action === "open-file") {
+      const files = await Utils.openFileDialog({
+        startingFolder: process.env.HOME || "",
+        allowedFileTypes: "",
+        canChooseFiles: true,
+        canChooseDirectory: false,
+        allowsMultipleSelection: true,
+      });
+      for (const filePath of files) {
+        await this.sendDashViewMessage("openFileInEditor", {
+          filePath,
+          createIfNotExists: false,
+        });
+      }
+      return;
+    }
+    if (action === "open-folder") {
+      const folders = await Utils.openFileDialog({
+        startingFolder: process.env.HOME || "",
+        allowedFileTypes: "",
+        canChooseFiles: false,
+        canChooseDirectory: true,
+        allowsMultipleSelection: false,
+      });
+      for (const folderPath of folders) {
+        await this.sendDashViewMessage("openFolderAsProject", { folderPath });
+      }
+      return;
+    }
+    if (action === "open-command-palette") {
+      await this.sendDashViewMessage("openCommandPalette", {});
+      return;
+    }
+    if (action === "new-browser-tab") {
+      await this.sendDashViewMessage("newBrowserTab", {});
+      return;
+    }
+    if (action === "close-tab") {
+      await this.sendDashViewMessage("closeCurrentTab", {});
+      return;
+    }
+    if (action === "close-window") {
+      await this.sendDashViewMessage("closeCurrentWindow", {});
+      return;
+    }
+    if (action === "llama-settings") {
+      await this.sendDashViewMessage("openSettings", { settingsType: "llama-settings" });
+      return;
+    }
+    if (action === "bunny-settings") {
+      await this.sendDashViewMessage("openSettings", { settingsType: "global-settings" });
+      return;
+    }
+    if (action === "workspace-settings") {
+      await this.sendDashViewMessage("openSettings", { settingsType: "workspace-settings" });
+      return;
+    }
+    if (action.startsWith("global-shortcut:")) {
+      const accelerator = action.replace("global-shortcut:", "");
+      const shortcut = dashBuiltInShortcuts.find(
+        (candidate) => candidate.accelerator === accelerator,
+      );
+      if (!shortcut) {
+        return;
+      }
+      await this.sendDashViewMessage("handleGlobalShortcut", {
+        key: shortcut.key,
+        ctrl: shortcut.ctrl,
+        shift: shortcut.shift,
+        alt: shortcut.alt,
+        meta: shortcut.meta,
+      });
+    }
+  }
+
   private defaultApplicationMenu() {
     return [
       {
-        label: "Bunny Ears",
+        label: "Dash",
         submenu: [{ role: "quit", accelerator: "cmd+q" }],
+      },
+      {
+        label: "File",
+        submenu: [
+          {
+            type: "normal",
+            label: "Open File...",
+            action: "open-file",
+            accelerator: "cmd+o",
+          },
+          {
+            type: "normal",
+            label: "Open Folder...",
+            action: "open-folder",
+            accelerator: "cmd+shift+o",
+          },
+          { type: "separator" },
+          {
+            type: "normal",
+            label: "New Browser Tab",
+            action: "new-browser-tab",
+            accelerator: "cmd+t",
+          },
+          {
+            type: "normal",
+            label: "Close Tab",
+            action: "close-tab",
+            accelerator: "cmd+w",
+          },
+          {
+            type: "normal",
+            label: "Close Window",
+            action: "close-window",
+            accelerator: "cmd+shift+w",
+          },
+        ],
+      },
+      {
+        label: "Edit",
+        submenu: [
+          { role: "undo" },
+          { role: "redo" },
+          { type: "separator" },
+          { role: "cut" },
+          { role: "copy" },
+          { role: "paste" },
+          { role: "pasteAndMatchStyle" },
+          { role: "delete" },
+          { role: "selectAll" },
+        ],
+      },
+      {
+        label: "View",
+        submenu: [
+          {
+            type: "normal",
+            label: "Next Tab",
+            action: "global-shortcut:ctrl+tab",
+            accelerator: "ctrl+tab",
+          },
+          {
+            type: "normal",
+            label: "Previous Tab",
+            action: "global-shortcut:ctrl+shift+tab",
+            accelerator: "ctrl+shift+tab",
+          },
+        ],
+      },
+      {
+        label: "Tools",
+        submenu: [
+          {
+            type: "normal",
+            label: "Command Palette",
+            action: "open-command-palette",
+            accelerator: "cmd+p",
+          },
+          {
+            type: "normal",
+            label: "Command Palette (Commands)",
+            action: "global-shortcut:cmd+shift+p",
+            accelerator: "cmd+shift+p",
+          },
+          {
+            type: "normal",
+            label: "Find in Files",
+            action: "global-shortcut:cmd+shift+f",
+            accelerator: "cmd+shift+f",
+          },
+        ],
+      },
+      {
+        label: "Settings",
+        submenu: [
+          {
+            type: "normal",
+            label: "Llama Settings",
+            action: "llama-settings",
+          },
+          {
+            type: "normal",
+            label: "Dash Settings",
+            action: "bunny-settings",
+          },
+          {
+            type: "normal",
+            label: "Workspace Settings",
+            action: "workspace-settings",
+          },
+        ],
+      },
+      {
+        role: "help",
+        label: "Help",
+        submenu: [
+          {
+            type: "normal",
+            label: "Terms of Service",
+            action: "terms-of-service",
+          },
+          {
+            type: "normal",
+            label: "Privacy Statement",
+            action: "privacy-statement",
+          },
+          {
+            type: "normal",
+            label: "Acknowledgements",
+            action: "acknowledgements",
+          },
+        ],
       },
     ];
   }
@@ -2938,6 +3539,136 @@ class BunnyEarsRuntime {
       this.invokeCarrotFrom("bunny-dash", "bunny.fs", fsMethod, params, sourceWindowId);
 
     switch (method) {
+      case "logoutBunnyCloud":
+        this.signOutFromCloud();
+        return { handled: true, result: { ok: true } };
+      case "getBunnyCloudOverview":
+        return {
+          handled: true,
+          result: await this.buildDashBunnyCloudOverview(),
+        };
+      case "loginBunnyCloud": {
+        try {
+          const request = (params || {}) as {
+            mode?: "login" | "register";
+            email?: string;
+            password?: string;
+            name?: string;
+          };
+          return {
+            handled: true,
+            result: {
+              ok: true,
+              overview: await this.loginDashBunnyCloud({
+                mode: request.mode === "register" ? "register" : "login",
+                email: String(request.email || "").trim(),
+                password: String(request.password || ""),
+                name: typeof request.name === "string" ? request.name : undefined,
+              }),
+            },
+          };
+        } catch (error) {
+          return {
+            handled: true,
+            result: {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          };
+        }
+      }
+      case "registerCurrentBunnyCloudInstance": {
+        try {
+          return {
+            handled: true,
+            result: {
+              ok: true,
+              overview: await this.registerDashCurrentInstance(),
+            },
+          };
+        } catch (error) {
+          return {
+            handled: true,
+            result: {
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          };
+        }
+      }
+      case "updateCurrentBunnyCloudCarrots": {
+        await app.updateCarrots();
+        if (this.authToken) {
+          this.broadcastDashAuthTokenChanged(this.authToken);
+        }
+        return {
+          handled: true,
+          result: {
+            ok: true,
+            overview: await this.buildDashBunnyCloudOverview(),
+          },
+        };
+      }
+      case "createBunnyCloudWorkspace": {
+        const api = await this.getDashCloudApi();
+        if (!api) {
+          throw new Error("Not signed in to Bunny Cloud");
+        }
+        await api.createWorkspace(
+          String((params as { name?: string } | undefined)?.name || "").trim(),
+          typeof (params as { description?: unknown } | undefined)?.description === "string"
+            ? ((params as { description: string }).description)
+            : undefined,
+        );
+        if (this.authToken) {
+          this.broadcastDashAuthTokenChanged(this.authToken);
+        }
+        return {
+          handled: true,
+          result: {
+            ok: true,
+            overview: await this.buildDashBunnyCloudOverview(),
+          },
+        };
+      }
+      case "removeBunnyCloudInstance": {
+        const api = await this.getDashCloudApi();
+        if (!api) {
+          throw new Error("Not signed in to Bunny Cloud");
+        }
+        await api.deleteInstance(
+          String((params as { instanceId?: string } | undefined)?.instanceId || ""),
+        );
+        if (this.authToken) {
+          this.broadcastDashAuthTokenChanged(this.authToken);
+        }
+        return {
+          handled: true,
+          result: {
+            ok: true,
+            overview: await this.buildDashBunnyCloudOverview(),
+          },
+        };
+      }
+      case "revokeBunnyCloudDevice": {
+        const api = await this.getDashCloudApi();
+        if (!api) {
+          throw new Error("Not signed in to Bunny Cloud");
+        }
+        await api.deleteDeviceToken(
+          String((params as { deviceTokenId?: string } | undefined)?.deviceTokenId || ""),
+        );
+        if (this.authToken) {
+          this.broadcastDashAuthTokenChanged(this.authToken);
+        }
+        return {
+          handled: true,
+          result: {
+            ok: true,
+            overview: await this.buildDashBunnyCloudOverview(),
+          },
+        };
+      }
       case "getDashHostBootState":
         return {
           handled: true,
@@ -2966,16 +3697,6 @@ class BunnyEarsRuntime {
         await Utils.showItemInFolder(
           String((params as { path?: string } | undefined)?.path || ""),
         );
-        return { handled: true, result: undefined };
-      }
-      case "showContextMenu": {
-        const menuItems = Array.isArray((params as { menuItems?: unknown[] } | undefined)?.menuItems)
-          ? ((params as { menuItems?: any[] }).menuItems)
-          : [];
-        if (menuItems.length > 0) {
-          this.activeContextMenuOwnerId = "bunny-dash";
-          HostContextMenu.showContextMenu(menuItems);
-        }
         return { handled: true, result: undefined };
       }
       case "getNode":
@@ -3256,8 +3977,7 @@ class BunnyEarsRuntime {
         await dashCarrot.start();
         dashCarrot.sendEvent("boot");
       }
-      // Set dash as active menu owner so menu clicks route to it
-      this.activeApplicationMenuOwnerId = dashCarrot.carrot.manifest.id;
+      this.restoreDefaultApplicationMenu();
       const dashCache = this.loadDashHostCache();
       const cachedWindows =
         Array.isArray(dashCache?.windows) && dashCache.windows.length > 0

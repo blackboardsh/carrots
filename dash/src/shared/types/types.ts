@@ -1,25 +1,5 @@
 import type ts from "typescript";
 
-export type PostMessageShowContextMenu = {
-  type: "show_context_menu";
-  data: {
-    menuItems: Array<
-      | {
-          label: string;
-          visible?: boolean;
-          portalMessage: {
-            type: string;
-            data: {};
-          };
-        }
-      | {
-          type: "separator";
-          visible?: boolean;
-        }
-    >;
-  };
-};
-
 // Note: React provides a React.ChangeEvent<T> similar to this
 // We need it for things like MouseEvents and InputEvents that for some reason
 // don't define target or currentTarget directly

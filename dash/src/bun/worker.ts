@@ -10,17 +10,11 @@ import { hostname } from "node:os";
 import {
   CloudApi,
   getApiBaseUrl,
-  type CloudDeviceToken,
   type CloudInstance,
-  type CloudUserProfile,
   type CloudWorkspace,
 } from "./cloudApi";
 import {
-  ApplicationMenu,
-  BrowserWindow,
   Carrots,
-  ContextMenu,
-  Utils,
   app,
 } from "electrobun/bun";
 import {
@@ -109,18 +103,6 @@ type BunnyCloudMachineInfo = {
   hostname: string;
   platform: string;
   instanceName: string;
-};
-
-type BunnyCloudOverview = {
-  connected: boolean;
-  currentMachine: BunnyCloudMachineInfo;
-  user: CloudUserProfile | null;
-  instances: CloudInstance[];
-  workspaces: CloudWorkspace[];
-  devices: CloudDeviceToken[];
-  currentInstanceId: string | null;
-  currentDeviceTokenId: string | null;
-  currentCarrots: CachedCarrotSummary[];
 };
 
 type CachedCarrotSummary = {
@@ -330,7 +312,6 @@ let runtimeChannel = "dev";
 let runtimeAuthToken: string | null = null;
 let runtimeWindows: LensWindow[] = [];
 const hostWindowIds = new Set<string>();
-const auxiliaryWindows = new Map<string, BrowserWindow>();
 const terminalWindowOwners = new Map<string, string>();
 const expandedFsDirs = new Set<string>();
 const framePersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -413,80 +394,6 @@ const defaultBunnyAppSettings: BunnyAppSettings = {
     connectedAt: undefined,
   },
 };
-
-const builtInShortcuts: Array<{
-  accelerator: string;
-  key: string;
-  ctrl: boolean;
-  shift: boolean;
-  alt: boolean;
-  meta: boolean;
-}> = [
-  {
-    accelerator: "t",
-    key: "t",
-    ctrl: false,
-    shift: false,
-    alt: false,
-    meta: true,
-  },
-  {
-    accelerator: "p",
-    key: "p",
-    ctrl: false,
-    shift: false,
-    alt: false,
-    meta: true,
-  },
-  {
-    accelerator: "cmd+shift+p",
-    key: "p",
-    ctrl: false,
-    shift: true,
-    alt: false,
-    meta: true,
-  },
-  {
-    accelerator: "cmd+shift+f",
-    key: "f",
-    ctrl: false,
-    shift: true,
-    alt: false,
-    meta: true,
-  },
-  {
-    accelerator: "w",
-    key: "w",
-    ctrl: false,
-    shift: false,
-    alt: false,
-    meta: true,
-  },
-  {
-    accelerator: "cmd+shift+w",
-    key: "w",
-    ctrl: false,
-    shift: true,
-    alt: false,
-    meta: true,
-  },
-  {
-    accelerator: "ctrl+tab",
-    key: "Tab",
-    ctrl: true,
-    shift: false,
-    alt: false,
-    meta: false,
-  },
-  {
-    accelerator: "ctrl+shift+tab",
-    key: "Tab",
-    ctrl: true,
-    shift: true,
-    alt: false,
-    meta: false,
-  },
-];
 
 let bunnyDashState: PersistedBunnyDashState = {
   workspaces: {},
@@ -589,14 +496,6 @@ function getCloudChannel() {
   return runtimeChannel || app.channel || (manifestVersion === "0.0.1" ? "dev" : undefined);
 }
 
-function getCloudBaseUrl() {
-  return getApiBaseUrl(getCloudChannel());
-}
-
-function getCurrentCloudAccessToken() {
-  return runtimeAuthToken || app.authToken || bunnyDashState.appSettings?.bunnyCloud?.accessToken || "";
-}
-
 async function getCurrentMachineInfo(): Promise<BunnyCloudMachineInfo> {
   const info = await app.getMachineInfo().catch(() => ({
     machineId: "",
@@ -610,136 +509,6 @@ async function getCurrentMachineInfo(): Promise<BunnyCloudMachineInfo> {
     hostname: hostnameValue,
     platform: platformValue,
     instanceName: platformValue ? `${hostnameValue} (${platformValue})` : hostnameValue,
-  };
-}
-
-async function cloudFetch<T>(
-  path: string,
-  options: RequestInit & { accessToken?: string } = {},
-): Promise<T> {
-  const accessToken = options.accessToken ?? getCurrentCloudAccessToken();
-  if (!accessToken) {
-    throw new Error("Not signed in to Bunny Cloud");
-  }
-  const headers: Record<string, string> = {
-    ...((options.headers as Record<string, string>) || {}),
-    Authorization: `Bearer ${accessToken}`,
-  };
-  if (options.body) {
-    headers["Content-Type"] = "application/json";
-  }
-  const response = await fetch(`${getCloudBaseUrl()}${path}`, {
-    ...options,
-    headers,
-  });
-  if (!response.ok) {
-    throw new Error(`API ${response.status}: ${await response.text()}`);
-  }
-  return response.json() as Promise<T>;
-}
-
-function persistBunnyCloudUser(user: CloudUserProfile | null, auth?: { accessToken?: string; refreshToken?: string }) {
-  if (!bunnyDashState.appSettings) {
-    bunnyDashState.appSettings = structuredClone(defaultBunnyAppSettings);
-  }
-  const bunnyCloud = bunnyDashState.appSettings.bunnyCloud;
-  if (auth?.accessToken !== undefined) {
-    bunnyCloud.accessToken = auth.accessToken;
-  }
-  if (auth?.refreshToken !== undefined) {
-    bunnyCloud.refreshToken = auth.refreshToken;
-  }
-  if (user) {
-    bunnyCloud.userId = user.id || "";
-    bunnyCloud.email = user.email || "";
-    bunnyCloud.name = user.name || "";
-    bunnyCloud.emailVerified = !!user.email_verified;
-    bunnyCloud.connectedAt = Date.now();
-  }
-}
-
-async function createDeviceTokenForCurrentMachine(accessToken?: string) {
-  const machine = await getCurrentMachineInfo();
-  if (!machine.machineId) {
-    return null;
-  }
-  return cloudFetch<{ id: string; token: string }>("/v1/auth/device-tokens", {
-    method: "POST",
-    accessToken,
-    body: JSON.stringify({
-      machine_id: machine.machineId,
-      name: machine.instanceName,
-    }),
-  });
-}
-
-async function getBunnyCloudOverview(): Promise<BunnyCloudOverview> {
-  const currentMachine = await getCurrentMachineInfo();
-  const accessToken = getCurrentCloudAccessToken();
-  if (!accessToken) {
-    return {
-      connected: false,
-      currentMachine,
-      user: null,
-      instances: [],
-      workspaces: [],
-      devices: [],
-      currentInstanceId: null,
-      currentDeviceTokenId: null,
-      currentCarrots: cachedCarrotList,
-    };
-  }
-
-  cloudApi = initCloudApi();
-  if (!cloudApi) {
-    return {
-      connected: false,
-      currentMachine,
-      user: null,
-      instances: [],
-      workspaces: [],
-      devices: [],
-      currentInstanceId: null,
-      currentDeviceTokenId: null,
-      currentCarrots: cachedCarrotList,
-    };
-  }
-
-  const [user, instances, workspaces, devices] = await Promise.all([
-    cloudApi.getUserProfile().catch(() => null),
-    cloudApi.getInstances().catch(() => []),
-    cloudApi.listWorkspaces().catch(() => []),
-    cloudApi.getDeviceTokens().catch(() => []),
-  ]);
-
-  cloudInstances = instances;
-  cloudWorkspaces = workspaces;
-
-  if (user) {
-    persistBunnyCloudUser(user);
-    await writePersistedDashState().catch(() => {});
-    broadcastAppSettings();
-  }
-
-  const currentInstanceId = currentMachine.machineId
-    ? instances.find((instance) => instance.machine_id === currentMachine.machineId)?.id || null
-    : null;
-  cloudCurrentInstanceId = currentInstanceId;
-  syncCloudShadowState();
-  const currentDeviceTokenId = currentMachine.machineId
-    ? devices.find((device) => device.machine_id === currentMachine.machineId)?.id || null
-    : null;
-
-  return {
-    connected: true,
-    currentMachine,
-    user,
-    instances,
-    workspaces,
-    devices,
-    currentInstanceId,
-    currentDeviceTokenId,
-    currentCarrots: cachedCarrotList,
   };
 }
 
@@ -825,72 +594,6 @@ function buildCloudWorkspacePayload(): BunnyDashWorkspaceLensPayload["cloudWorks
         linkedInstances,
       };
     });
-}
-
-async function loginToBunnyCloud(params: {
-  mode: "login" | "register";
-  email: string;
-  password: string;
-  name?: string;
-}) {
-  const endpoint = params.mode === "register" ? "/v1/auth/register" : "/v1/auth/login";
-  const body: Record<string, string> = {
-    email: params.email,
-    password: params.password,
-  };
-  if (params.mode === "register" && params.name?.trim()) {
-    body.name = params.name.trim();
-  }
-
-  const response = await fetch(`${getCloudBaseUrl()}${endpoint}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await response.json() as {
-    error?: string;
-    accessToken?: string;
-    refreshToken?: string;
-    user?: CloudUserProfile;
-  };
-
-  if (!response.ok || !data.accessToken || !data.refreshToken || !data.user) {
-    throw new Error(data.error || `API ${response.status}`);
-  }
-
-  persistBunnyCloudUser(data.user, {
-    accessToken: data.accessToken,
-    refreshToken: data.refreshToken,
-  });
-  await app.setAuthToken(data.accessToken);
-
-  const deviceToken = await createDeviceTokenForCurrentMachine(data.accessToken).catch(() => null);
-  if (deviceToken?.token) {
-    await app.setDeviceToken(deviceToken.token, deviceToken.id);
-  }
-
-  cloudApi = initCloudApi();
-  await refreshCloudData();
-  await writePersistedDashState().catch(() => {});
-  broadcastAppSettings();
-  return getBunnyCloudOverview();
-}
-
-async function registerCurrentCloudInstance() {
-  const accessToken = getCurrentCloudAccessToken();
-  if (!accessToken) {
-    throw new Error("Sign in to Bunny Cloud first");
-  }
-
-  await app.setAuthToken(accessToken);
-  const deviceToken = await createDeviceTokenForCurrentMachine(accessToken).catch(() => null);
-  if (deviceToken?.token) {
-    await app.setDeviceToken(deviceToken.token, deviceToken.id);
-  }
-
-  cloudApi = initCloudApi();
-  await refreshCloudData();
-  return getBunnyCloudOverview();
 }
 
 const ACTIVE_INTERNAL_PREFIX = "__BUNNY_INTERNAL__";
@@ -1023,37 +726,6 @@ function closeWindow(windowId?: string) {
   });
 }
 
-function getMenuStartingFolder() {
-  return process.env.HOME || getDashHomeDir();
-}
-
-function openAboutWindow(url: string) {
-  const id = `about-${Date.now().toString(36)}`;
-  const win = new BrowserWindow({
-    id,
-    title: "About",
-    url,
-    frame: {
-      width: 800,
-      height: 800,
-      x: 120,
-      y: 120,
-    },
-  });
-  auxiliaryWindows.set(id, win);
-  win.on("close", () => {
-    auxiliaryWindows.delete(id);
-  });
-}
-
-function sendToFocusedDashWindow(name: string, payload?: unknown) {
-  emitViewMessage(name, payload, state.currentWindowId);
-}
-
-function sendToDashWindow(windowId: string | undefined, name: string, payload?: unknown) {
-  emitViewMessage(name, payload, windowId || state.currentWindowId);
-}
-
 function sendRuntimeEventToDashWindow(windowId: string | undefined, name: string, payload?: unknown) {
   const targetWindowId = windowId || state.currentWindowId;
   post({ type: "action", action: "emit-view", payload: { name, payload, raw: true, windowId: targetWindowId } });
@@ -1105,420 +777,6 @@ function getUniqueLensDisplayName(workspaceId: string, rawName: string, excludeL
     candidate = `${trimmed} ${index}`;
   }
   return candidate;
-}
-
-async function handleContextMenuAction(action: string, data: any) {
-  const windowId = typeof data?.windowId === "string" ? data.windowId : state.currentWindowId;
-  if (windowId) {
-    setActiveWindow(windowId);
-  }
-
-  switch (action) {
-    case "workspace_new_lens":
-      sendRuntimeEventToDashWindow(windowId, "showLensSettings", {
-        mode: "create",
-        workspaceId: String(data?.workspaceId || getCurrentWorkspace().key),
-        name: getUniqueLensNameForWorkspace(
-          String(data?.workspaceId || getCurrentWorkspace().key),
-          "Lens",
-        ),
-        description: "",
-      });
-      return;
-    case "workspace_open_in_new_window":
-      if (
-        isCloudShadowWorkspaceKey(
-          String(data?.workspaceId || getCurrentWorkspace().key),
-        )
-      ) {
-        await openWorkspaceInNewWindow(
-          String(data?.workspaceId || getCurrentWorkspace().key),
-        );
-      } else {
-        sendToDashWindow(windowId, "openLocalWorkspaceInNewWindow", {
-          workspaceId: String(data?.workspaceId || getCurrentWorkspace().key),
-        });
-      }
-      return;
-    case "lens_open_in_new_window":
-      if (isCloudShadowLensKey(String(data?.lensId || state.currentLayoutId))) {
-        await openLensInNewWindow(String(data?.lensId || state.currentLayoutId));
-      } else {
-        sendToDashWindow(windowId, "openLocalLensInNewWindow", {
-          lensId: String(data?.lensId || state.currentLayoutId),
-        });
-      }
-      return;
-    case "lens_rename": {
-      const lens = getLensByKey(String(data?.lensId || state.currentLayoutId));
-      sendRuntimeEventToDashWindow(windowId, "showLensSettings", {
-        mode: "rename",
-        workspaceId: getLensWorkspaceId(lens),
-        lensId: lens.key,
-        name: lens.name,
-        description: lens.description || "",
-      });
-      return;
-    }
-    case "lens_fork": {
-      const lens = getLensByKey(String(data?.lensId || state.currentLayoutId));
-      sendRuntimeEventToDashWindow(windowId, "showLensSettings", {
-        mode: "create",
-        workspaceId: getLensWorkspaceId(lens),
-        sourceLensId: lens.key,
-        name: getUniqueLensDisplayName(
-          getLensWorkspaceId(lens),
-          `${lens.name} Copy`,
-        ),
-        description: lens.description?.trim() || `Forked from ${lens.name}`,
-      });
-      return;
-    }
-    case "lens_delete":
-      if (isCloudShadowLensKey(String(data?.lensId || state.currentLayoutId))) {
-        await deleteLens(String(data?.lensId || state.currentLayoutId));
-      } else {
-        sendToDashWindow(windowId, "deleteLocalLens", {
-          lensId: String(data?.lensId || state.currentLayoutId),
-        });
-      }
-      return;
-    case "focus_tab":
-      sendToDashWindow(windowId, "focusTab", { tabId: data?.tabId });
-      return;
-    case "open_new_tab":
-      sendToDashWindow(windowId, "openNewTab", { nodePath: data?.nodePath });
-      return;
-    case "open_as_text":
-      sendToDashWindow(windowId, "openAsText", { nodePath: data?.nodePath });
-      return;
-    case "show_node_settings":
-      sendToDashWindow(windowId, "showNodeSettings", { nodePath: data?.nodePath });
-      return;
-    case "add_child_node":
-      sendToDashWindow(windowId, "addChildNode", { nodePath: data?.nodePath });
-      return;
-    case "add_child_file":
-      sendToDashWindow(windowId, "addChildNode", {
-        nodePath: data?.nodePath,
-        nodeType: "file",
-      });
-      return;
-    case "add_child_folder":
-      sendToDashWindow(windowId, "addChildNode", {
-        nodePath: data?.nodePath,
-        nodeType: "dir",
-      });
-      return;
-    case "add_child_web":
-      sendToDashWindow(windowId, "addChildNode", {
-        nodePath: data?.nodePath,
-        nodeType: "web",
-      });
-      return;
-    case "add_child_agent":
-      sendToDashWindow(windowId, "addChildNode", {
-        nodePath: data?.nodePath,
-        nodeType: "agent",
-      });
-      return;
-    case "create_preload_file":
-      sendToDashWindow(windowId, "createSpecialFile", {
-        nodePath: data?.nodePath,
-        fileType: "preload",
-      });
-      return;
-    case "create_context_file":
-      sendToDashWindow(windowId, "createSpecialFile", {
-        nodePath: data?.nodePath,
-        fileType: "context",
-      });
-      return;
-    case "new_terminal":
-      sendToDashWindow(windowId, "newTerminal", { nodePath: data?.nodePath });
-      return;
-    case "open_git_clone_ui":
-      sendToDashWindow(windowId, "openGitCloneUI", {
-        nodePath: data?.nodePath,
-      });
-      return;
-    case "init_git_in_folder":
-      sendToDashWindow(windowId, "initGitInFolder", {
-        nodePath: data?.nodePath,
-      });
-      return;
-    case "copy_path_to_clipboard":
-      await Utils.clipboardWriteText(String(data?.nodePath || ""));
-      return;
-    case "open_node_in_finder":
-      await Utils.showItemInFolder(String(data?.nodePath || ""));
-      return;
-    case "remove_project_from_bunny_dash": {
-      sendToDashWindow(windowId, "removeLocalProjectMount", {
-        projectId: String(data?.projectId || ""),
-      });
-      return;
-    }
-    case "fully_delete_node_from_disk": {
-      const nodePath = String(data?.nodePath || "");
-      const projectId = typeof data?.projectId === "string" ? data.projectId : "";
-      if (projectId) {
-        const project = findProjectMountByKey(projectId);
-        if (project) {
-          ensureDb().collection("projectMounts").remove(project.id);
-          flushDb();
-        }
-      }
-      await invokeFsCarrot("safeDeleteFileOrFolder", { path: nodePath });
-      emitSetProjects();
-      return;
-    }
-    case "split_pane_container":
-      sendToDashWindow(windowId, "splitPaneContainer", {
-        pathToPane: data?.pathToPane,
-        direction: data?.direction,
-      });
-      return;
-    case "remove_open_file":
-      sendToDashWindow(windowId, "removeOpenFile", { filePath: data?.filePath });
-      return;
-    case "open_open_file":
-      sendToDashWindow(windowId, "openFileInEditor", {
-        filePath: data?.filePath,
-        createIfNotExists: false,
-      });
-      return;
-    default:
-      return;
-  }
-}
-
-async function handleApplicationMenuAction(action: string) {
-  if (action === "terms-of-service") {
-    openAboutWindow("https://blackboard.sh/terms");
-    return;
-  }
-  if (action === "privacy-statement") {
-    openAboutWindow("https://blackboard.sh/privacy");
-    return;
-  }
-  if (action === "acknowledgements") {
-    openAboutWindow("views://assets/licenses.html");
-    return;
-  }
-  if (action === "open-file") {
-    const files = await Utils.openFileDialog({
-      startingFolder: getMenuStartingFolder(),
-      allowedFileTypes: "",
-      canChooseFiles: true,
-      canChooseDirectory: false,
-      allowsMultipleSelection: true,
-    });
-    for (const filePath of files) {
-      sendToFocusedDashWindow("openFileInEditor", {
-        filePath,
-        createIfNotExists: false,
-      });
-    }
-    return;
-  }
-  if (action === "open-folder") {
-    const folders = await Utils.openFileDialog({
-      startingFolder: getMenuStartingFolder(),
-      allowedFileTypes: "",
-      canChooseFiles: false,
-      canChooseDirectory: true,
-      allowsMultipleSelection: false,
-    });
-    for (const folderPath of folders) {
-      sendToFocusedDashWindow("openFolderAsProject", {
-        folderPath,
-      });
-    }
-    return;
-  }
-  if (action === "open-command-palette") {
-    sendToFocusedDashWindow("openCommandPalette", {});
-    return;
-  }
-  if (action === "new-browser-tab") {
-    sendToFocusedDashWindow("newBrowserTab", {});
-    return;
-  }
-  if (action === "close-tab") {
-    sendToFocusedDashWindow("closeCurrentTab", {});
-    return;
-  }
-  if (action === "close-window") {
-    sendToFocusedDashWindow("closeCurrentWindow", {});
-    return;
-  }
-  if (action === "llama-settings") {
-    sendToFocusedDashWindow("openSettings", { settingsType: "llama-settings" });
-    return;
-  }
-  if (action === "bunny-settings") {
-    sendToFocusedDashWindow("openSettings", { settingsType: "global-settings" });
-    return;
-  }
-  if (action === "workspace-settings") {
-    sendToFocusedDashWindow("openSettings", { settingsType: "workspace-settings" });
-    return;
-  }
-  if (action.startsWith("global-shortcut:")) {
-    const accelerator = action.replace("global-shortcut:", "");
-    const shortcut = builtInShortcuts.find((candidate) => candidate.accelerator === accelerator);
-    if (!shortcut) {
-      return;
-    }
-    sendToFocusedDashWindow("handleGlobalShortcut", {
-      key: shortcut.key,
-      ctrl: shortcut.ctrl,
-      shift: shortcut.shift,
-      alt: shortcut.alt,
-      meta: shortcut.meta,
-    });
-  }
-}
-
-function syncApplicationMenu() {
-  ApplicationMenu.setApplicationMenu([
-    {
-      label: "Bunny Dash",
-      submenu: [{ role: "quit", accelerator: "cmd+q" }],
-    },
-    {
-      label: "File",
-      submenu: [
-        {
-          type: "normal",
-          label: "Open File...",
-          action: "open-file",
-          accelerator: "cmd+o",
-        },
-        {
-          type: "normal",
-          label: "Open Folder...",
-          action: "open-folder",
-          accelerator: "cmd+shift+o",
-        },
-        { type: "separator" },
-        {
-          type: "normal",
-          label: "New Browser Tab",
-          action: "new-browser-tab",
-          accelerator: "cmd+t",
-        },
-        {
-          type: "normal",
-          label: "Close Tab",
-          action: "close-tab",
-          accelerator: "cmd+w",
-        },
-        {
-          type: "normal",
-          label: "Close Window",
-          action: "close-window",
-          accelerator: "cmd+shift+w",
-        },
-      ],
-    },
-    {
-      label: "Edit",
-      submenu: [
-        { role: "undo" },
-        { role: "redo" },
-        { type: "separator" },
-        { role: "cut" },
-        { role: "copy" },
-        { role: "paste" },
-        { role: "pasteAndMatchStyle" },
-        { role: "delete" },
-        { role: "selectAll" },
-      ],
-    },
-    {
-      label: "View",
-      submenu: [
-        {
-          type: "normal",
-          label: "Next Tab",
-          action: "global-shortcut:ctrl+tab",
-          accelerator: "ctrl+tab",
-        },
-        {
-          type: "normal",
-          label: "Previous Tab",
-          action: "global-shortcut:ctrl+shift+tab",
-          accelerator: "ctrl+shift+tab",
-        },
-      ],
-    },
-    {
-      label: "Tools",
-      submenu: [
-        {
-          type: "normal",
-          label: "Command Palette",
-          action: "open-command-palette",
-          accelerator: "cmd+p",
-        },
-        {
-          type: "normal",
-          label: "Command Palette (Commands)",
-          action: "global-shortcut:cmd+shift+p",
-          accelerator: "cmd+shift+p",
-        },
-        {
-          type: "normal",
-          label: "Find in Files",
-          action: "global-shortcut:cmd+shift+f",
-          accelerator: "cmd+shift+f",
-        },
-      ],
-    },
-    {
-      label: "Settings",
-      submenu: [
-        {
-          type: "normal",
-          label: "Llama Settings",
-          action: "llama-settings",
-        },
-        {
-          type: "normal",
-          label: "Bunny Dash Settings",
-          action: "bunny-settings",
-        },
-        {
-          type: "normal",
-          label: "Workspace Settings",
-          action: "workspace-settings",
-        },
-      ],
-    },
-    {
-      role: "help",
-      label: "Help",
-      submenu: [
-        {
-          type: "normal",
-          label: "Terms of Service",
-          action: "terms-of-service",
-        },
-        {
-          type: "normal",
-          label: "Privacy Statement",
-          action: "privacy-statement",
-        },
-        {
-          type: "normal",
-          label: "Acknowledgements",
-          action: "acknowledgements",
-        },
-      ],
-    },
-  ]);
 }
 
 function ensureDb() {
@@ -1580,9 +838,7 @@ function ensureBootPromise() {
       await refreshTypeScriptPeerDependencyStatus();
       await refreshBiomePeerDependencyStatus();
       await refreshGitPeerDependencyStatus();
-      syncApplicationMenu();
       post({ type: "ready" });
-      syncTray();
       emitSnapshot();
       log("bunny dash worker initialized");
     })();
@@ -1667,24 +923,6 @@ async function syncAuthFromEars() {
   broadcastAppSettings();
   emitSetProjects();
 }
-
-ApplicationMenu.on("application-menu-clicked", (event: any) => {
-  const action = String(event?.data?.action || event?.action || "");
-  if (!action) {
-    return;
-  }
-  void handleApplicationMenuAction(action);
-});
-
-ContextMenu.on("context-menu-clicked", (event: any) => {
-  const action = String(event?.data?.action || event?.action || "");
-  if (!action) {
-    return;
-  }
-
-  const data = event?.data?.data ?? {};
-  void handleContextMenuAction(action, data);
-});
 
 process.on("exit", () => {
   if (ptyHeartbeatTimer) {
@@ -3473,7 +2711,6 @@ async function handleHostWindowClosed(closedWindowId: string) {
   }
   syncActiveTreeNode();
   await saveState();
-  syncTray();
   emitSetProjects();
   emitSnapshot();
 }
@@ -3737,7 +2974,6 @@ async function restoreLensInCurrentWindow(lensId: string) {
   state.commandQuery = "";
   state.activeTreeNodeId = `lens-overview:${lens.key}`;
   await saveState();
-  syncTray();
   emitSetProjectsForWindow(currentWindow.id);
   emitSnapshot();
   log(`lens restored: ${lens.name}`);
@@ -3765,7 +3001,6 @@ async function openLensInNewWindow(lensId: string) {
   state.commandQuery = "";
   state.activeTreeNodeId = `lens-overview:${lens.key}`;
   await saveState();
-  syncTray();
   emitSnapshot();
   emitSetProjectsForWindow(liveWindowId);
   focusWindow(liveWindowId, runtimeWindow.title);
@@ -3803,7 +3038,6 @@ async function overwriteCurrentLens() {
     });
     await refreshCloudData();
     await saveState();
-    syncTray();
     emitSetProjectsForWindow(currentWindow.id);
     broadcastRuntimeEventToDashWindows("refreshBunnyDashState");
     emitSnapshot();
@@ -3904,7 +3138,6 @@ async function renameLens(lensId: string, name: string, description = "") {
     );
     await refreshCloudData();
     await saveState();
-    syncTray();
     emitSetProjects();
     broadcastRuntimeEventToDashWindows("refreshBunnyDashState");
     emitSnapshot();
@@ -3936,7 +3169,6 @@ async function openWorkspaceInNewWindow(workspaceId: string) {
   state.commandQuery = "";
   state.activeTreeNodeId = `workspace-overview:${workspace.key}`;
   await saveState();
-  syncTray();
   emitSnapshot();
   emitSetProjectsForWindow(liveWindowId);
   focusWindow(liveWindowId, runtimeWindow.title);
@@ -4000,7 +3232,6 @@ async function deleteLens(lensId: string) {
   }
   flushDb();
   await saveState();
-  syncTray();
   emitSetProjects();
   broadcastRuntimeEventToDashWindows("refreshBunnyDashState");
   emitSnapshot();
@@ -4027,7 +3258,6 @@ async function openQuickAccess(tabId: "browser" | "terminal" | "agent") {
   ensureMainTab(tabId);
   syncActiveTreeNode();
   await saveState();
-  syncTray();
   emitSnapshot();
   log(`quick access opened: ${tabId}`);
   return snapshot();
@@ -4040,7 +3270,6 @@ async function selectWindow(windowId: string) {
   setActiveWindow(windowId);
   syncActiveTreeNode();
   await saveState();
-  syncTray();
   emitSnapshot();
 }
 
@@ -4101,10 +3330,6 @@ async function selectNode(nodeId: string) {
 
   await saveState();
   emitSnapshot();
-}
-
-function syncTray() {
-  // Dash no longer owns or extends the system tray.
 }
 
 async function syncLocalCurrentWindow(params: any) {
@@ -4183,78 +3408,6 @@ async function syncLocalCurrentWindow(params: any) {
 
 async function handleBunnyDashRequest(method: string, params: any) {
   switch (method) {
-    case "logoutBunnyCloud": {
-      await app.setAuthToken("");
-      emitSetProjects();
-      return { ok: true };
-    }
-    case "getBunnyCloudOverview": {
-      return getBunnyCloudOverview();
-    }
-    case "loginBunnyCloud": {
-      try {
-        const overview = await loginToBunnyCloud({
-          mode: params?.mode === "register" ? "register" : "login",
-          email: String(params?.email || "").trim(),
-          password: String(params?.password || ""),
-          name: typeof params?.name === "string" ? params.name : undefined,
-        });
-        emitSetProjects();
-        return { ok: true, overview };
-      } catch (error) {
-        return {
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
-    }
-    case "registerCurrentBunnyCloudInstance": {
-      try {
-        const overview = await registerCurrentCloudInstance();
-        emitSetProjects();
-        return { ok: true, overview };
-      } catch (error) {
-        return {
-          ok: false,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
-    }
-    case "updateCurrentBunnyCloudCarrots": {
-      await app.updateCarrots();
-      await refreshCarrotList();
-      emitSetProjects();
-      return { ok: true, overview: await getBunnyCloudOverview() };
-    }
-    case "createBunnyCloudWorkspace": {
-      if (!cloudApi) {
-        throw new Error("Not signed in to Bunny Cloud");
-      }
-      await cloudApi.createWorkspace(
-        String(params?.name || "").trim(),
-        typeof params?.description === "string" ? params.description : undefined,
-      );
-      await refreshCloudData();
-      emitSetProjects();
-      return { ok: true, overview: await getBunnyCloudOverview() };
-    }
-    case "removeBunnyCloudInstance": {
-      if (!cloudApi) {
-        throw new Error("Not signed in to Bunny Cloud");
-      }
-      await cloudApi.deleteInstance(String(params?.instanceId || ""));
-      await refreshCloudData();
-      emitSetProjects();
-      return { ok: true, overview: await getBunnyCloudOverview() };
-    }
-    case "revokeBunnyCloudDevice": {
-      if (!cloudApi) {
-        throw new Error("Not signed in to Bunny Cloud");
-      }
-      await cloudApi.deleteDeviceToken(String(params?.deviceTokenId || ""));
-      emitSetProjects();
-      return { ok: true, overview: await getBunnyCloudOverview() };
-    }
     case "getInitialState": {
       const requestedWindowId =
         typeof params?.__hostWindowId === "string" && params.__hostWindowId
@@ -4352,7 +3505,6 @@ self.onmessage = async (event) => {
 
     if (message.name === "boot") {
       await ensureBootPromise();
-      syncTray();
       emitSnapshot();
       return;
     }
@@ -4379,7 +3531,6 @@ self.onmessage = async (event) => {
         hostWindowIds.add(windowId);
       }
       setActiveWindow(windowId);
-      syncTray();
       emitSnapshot();
       return;
     }

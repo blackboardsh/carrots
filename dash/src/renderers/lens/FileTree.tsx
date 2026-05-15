@@ -21,7 +21,6 @@ import {
 import { produce, unwrap } from "solid-js/store";
 import type {
 	DomEventWithTarget,
-	PostMessageShowContextMenu,
 	CachedFileType,
 	PreviewFileTreeType,
 	PreviewFileNodeType,
@@ -51,11 +50,13 @@ import {
 	setNodeExpanded,
 	setState,
 	state,
-	syncWorkspaceNow,
 	updateSyncedState,
 	removeOpenFile,
+	openNewTab,
 } from "./store";
 import {
+	deleteLocalLens,
+	removeLocalProjectMount,
 	openLocalLens,
 	openLocalLensInNewWindow,
 	openLocalWorkspace,
@@ -65,6 +66,11 @@ import {
 
 import {
 	electrobun,
+	copyTextToClipboard,
+	createSpecialFileForNode,
+	fsSafeDeleteFileOrFolder,
+	hostShowInFinder,
+	invokeGitCarrot,
 	getUniqueLensNameFromState,
 	getHydratedInitialState,
 	fsGetUniqueNewName,
@@ -73,7 +79,11 @@ import {
 	fsGetNode,
 	fsFindFirstNestedGitRepo,
 	fsRename,
+	openAddChildNodeSettings,
+	openGitSettingsPane,
+	syncGitFolderNode,
 } from "./init";
+import { openDashContextMenu } from "./contextMenu";
 import { parentNodePath } from "../utils/fileUtils";
 
 import { join, basename, dirname } from "../utils/pathUtils";
@@ -228,16 +238,66 @@ async function runInWindowTransition<T>(label: string, work: () => Promise<T>) {
 	}
 }
 
-export const createContextMenuAction = (action: string, data: any) => {
-	return {
-		action,
+function openLocalLensSettingsPane(params: {
+	mode: "create" | "rename";
+	workspaceId: string;
+	lensId?: string;
+	sourceLensId?: string;
+	name: string;
+	description?: string;
+}) {
+	setState("settingsPane", {
+		type: "lens-settings",
 		data: {
-			...data,
-			windowId: state.windowId,
-			workspaceId: state.workspace.id,
+			mode: params.mode,
+			workspaceId: params.workspaceId,
+			lensId: params.lensId,
+			sourceLensId: params.sourceLensId,
+			name: params.name,
+			description: params.description || "",
 		},
-	};
-};
+	});
+}
+
+function getUniqueLocalLensDisplayName(workspaceId: string, rawName: string) {
+	const trimmed = rawName.trim();
+	if (!trimmed) {
+		return getUniqueLensNameFromState(workspaceId, "Lens");
+	}
+
+	const existingNames = new Set(
+		(state.bunnyDash.workspaces.find((workspace) => workspace.id === workspaceId)?.lenses ||
+			[])
+			.map((lens) => String(lens.name || "").trim().toLowerCase()),
+	);
+
+	if (!existingNames.has(trimmed.toLowerCase())) {
+		return trimmed;
+	}
+
+	let index = 2;
+	let candidate = `${trimmed} ${index}`;
+	while (existingNames.has(candidate.toLowerCase())) {
+		index += 1;
+		candidate = `${trimmed} ${index}`;
+	}
+	return candidate;
+}
+
+async function deleteNodeFromDisk(nodePath: string) {
+	if (!nodePath) {
+		return;
+	}
+
+	if (
+		"node" in state.settingsPane.data &&
+		state.settingsPane.data.node.path === nodePath
+	) {
+		setState("settingsPane", { type: "", data: {} });
+	}
+
+	await fsSafeDeleteFileOrFolder(nodePath);
+}
 
 /**
  * Note: The UL/LI structure of the file tree is important for the folder lines
@@ -1352,26 +1412,19 @@ export const WorkspaceLensesTree = () => {
 	) => {
 		event.preventDefault();
 		event.stopPropagation();
-		await syncWorkspaceNow();
-		await electrobun.rpc?.request.showContextMenu({
-			menuItems: [
-				{
-					label: "New Lens...",
-					...createContextMenuAction("workspace_new_lens", {
-						workspaceId: workspace.id,
-					}),
-				},
-				{
-					type: "separator",
-				},
-				{
-					label: "Open in New Window",
-					...createContextMenuAction("workspace_open_in_new_window", {
-						workspaceId: workspace.id,
-					}),
-				},
-			],
-		});
+		openDashContextMenu(event, [
+			{
+				label: "New Lens...",
+				onSelect: () => openCreateLensSettings(workspace.id),
+			},
+			{
+				type: "separator",
+			},
+			{
+				label: "Open in New Window",
+				onSelect: () => openLocalWorkspaceInNewWindow(workspace.id),
+			},
+		]);
 	};
 
 	const showLensContextMenu = async (
@@ -1381,42 +1434,45 @@ export const WorkspaceLensesTree = () => {
 	) => {
 		event.preventDefault();
 		event.stopPropagation();
-		await syncWorkspaceNow();
-		await electrobun.rpc?.request.showContextMenu({
-			menuItems: [
-				{
-					label: "Open in New Window",
-					...createContextMenuAction("lens_open_in_new_window", {
+		openDashContextMenu(event, [
+			{
+				label: "Open in New Window",
+				onSelect: () => openLocalLensInNewWindow(lens.id),
+			},
+			{
+				label: "Rename Lens...",
+				onSelect: () =>
+					openLocalLensSettingsPane({
+						mode: "rename",
 						workspaceId: workspace.id,
 						lensId: lens.id,
+						name: lens.name,
+						description: lens.description || "",
 					}),
-				},
-				{
-					label: "Rename Lens...",
-					...createContextMenuAction("lens_rename", {
+			},
+			{
+				label: "Fork",
+				onSelect: () =>
+					openLocalLensSettingsPane({
+						mode: "create",
 						workspaceId: workspace.id,
-						lensId: lens.id,
+						sourceLensId: lens.id,
+						name: getUniqueLocalLensDisplayName(
+							workspace.id,
+							`${lens.name} Copy`,
+						),
+						description: lens.description?.trim() || `Forked from ${lens.name}`,
 					}),
-				},
-				{
-					label: "Fork",
-					...createContextMenuAction("lens_fork", {
-						workspaceId: workspace.id,
-						lensId: lens.id,
-					}),
-				},
-				{
-					type: "separator",
-				},
-				{
-					label: "Delete Lens",
-					...createContextMenuAction("lens_delete", {
-						workspaceId: workspace.id,
-						lensId: lens.id,
-					}),
-				},
-			],
-		});
+			},
+			{
+				type: "separator",
+			},
+			{
+				label: "Delete Lens",
+				danger: true,
+				onSelect: () => deleteLocalLens(lens.id),
+			},
+		]);
 	};
 
 	return (
@@ -1823,30 +1879,25 @@ const OpenFileItem = ({
 	const handleContextMenu = (e: MouseEvent) => {
 		e.preventDefault();
 		e.stopPropagation();
-
-		electrobun.rpc?.request.showContextMenu({
-			menuItems: [
-				{
-					label: "Open",
-					...createContextMenuAction("open_open_file", { filePath: path }),
-				},
-				{
-					label: "Copy Path to Clipboard",
-					...createContextMenuAction("copy_path_to_clipboard", {
-						nodePath: path,
-					}),
-				},
-				{ type: "separator" },
-				{
-					label: "Remove from List",
-					...createContextMenuAction("remove_open_file", { filePath: path }),
-				},
-				{
-					label: "Open in Finder",
-					...createContextMenuAction("open_node_in_finder", { nodePath: path }),
-				},
-			],
-		});
+		openDashContextMenu(e, [
+			{
+				label: "Open",
+				onSelect: handleClick,
+			},
+			{
+				label: "Copy Path to Clipboard",
+				onSelect: () => copyTextToClipboard(path),
+			},
+			{ type: "separator" },
+			{
+				label: "Remove from List",
+				onSelect: () => removeOpenFile(path),
+			},
+			{
+				label: "Open in Finder",
+				onSelect: () => hostShowInFinder(path),
+			},
+		]);
 	};
 
 	const getIcon = () => {
@@ -2560,50 +2611,43 @@ const NodeName = ({
 			});
 
 			const nearestParentGitRepo = async (path: string) => {
-				const isRepoRoot = await electrobun.rpc?.request
-					.gitCheckIsRepoRoot({
-						repoRoot: _nodeToRender.path,
-					})
+				const isRepoRoot = await invokeGitCarrot<boolean>(
+					"gitCheckIsRepoRoot",
+					{
+						repoRoot: path,
+					},
+				)
 					.catch((err) => {
 						console.log(err);
 						return false;
 					});
 
-				// const isRepoRoot = await git.checkIsRepo(CheckRepoActions.IS_REPO_ROOT);
-				const isInRepoTree = await electrobun.rpc?.request
-					.gitCheckIsRepoInTree({
-						repoRoot: _nodeToRender.path,
-					})
+				const isInRepoTree = await invokeGitCarrot<boolean>(
+					"gitCheckIsRepoInTree",
+					{
+						repoRoot: path,
+					},
+				)
 					.catch((err) => {
 						console.log(err);
 						return false;
 					});
-
-				// const isInRepoTree = await git.checkIsRepo(CheckRepoActions.IN_TREE);
-
-				// todo (yoav): bench this to see if it's really faster
 
 				if (isRepoRoot) {
-					//   console.log("isRepoRoot", join(path, ".git"));
 					return basename(path) === ".git" ? path : join(path, ".git");
 				}
 
 				if (isInRepoTree) {
-					// console.log("isInRepoTree", await git.revparse(["--show-toplevel"]));
-					return await electrobun.rpc?.request
-						.gitRevParse({
-							repoRoot: _nodeToRender.path,
-							options: ["--show-toplevel"],
-						})
+					return await invokeGitCarrot<string>("gitRevParse", {
+						repoRoot: path,
+						options: ["--show-toplevel"],
+					})
 						.catch((err) => {
 							console.log(err);
 							return false;
 						});
-					// return await git.revparse(["--show-toplevel"]);
 				}
 
-				// Note: we can use rev-parse --is-inside-work-tree or simplegit's wrappers to check if
-				// we're in a git repo, but it doesn't work inside the .git folder itself
 				const ancestorGitSegements = path.split("/.git/");
 
 				if (ancestorGitSegements.length === 1) {
@@ -2617,15 +2661,12 @@ const NodeName = ({
 					currentPath = join(currentPath, segment);
 					const gitPathToCheck = join(currentPath, ".git");
 
-					// git.cwd(gitPathToCheck);
-
-					// const isRepoRoot = await git.checkIsRepo(
-					//   CheckRepoActions.IS_REPO_ROOT
-					// );
-					const isRepoRoot = await electrobun.rpc?.request
-						.gitCheckIsRepoRoot({
+					const isRepoRoot = await invokeGitCarrot<boolean>(
+						"gitCheckIsRepoRoot",
+						{
 							repoRoot: gitPathToCheck,
-						})
+						},
+					)
 						.catch((err) => {
 							console.log(err);
 							return false;
@@ -2642,10 +2683,7 @@ const NodeName = ({
 
 			const firstNestedGitRepo = async (path: string) => {
 				try {
-					// Use vendored fd binary for fast searching with timeout
-					// This searches the entire tree to prevent nested git repos
 					const gitPath = await fsFindFirstNestedGitRepo(path);
-
 					return gitPath || false;
 				} catch (error) {
 					console.log(error);
@@ -2653,180 +2691,138 @@ const NodeName = ({
 				}
 			};
 
-			// const unwrappedNodeToRender = unwrap(_nodeToRender);
-
-			const menuItems = [
+			const canInitGit =
+				node.type === "dir" &&
+				!(await nearestParentGitRepo(_nodeToRender.path)) &&
+				!(await firstNestedGitRepo(_nodeToRender.path));
+			const nodeIsProjectRoot = isProjectRoot(_nodeToRender);
+			const projectForRoot =
+				nodeIsProjectRoot && _nodeToRender?.path
+					? getProjectByRootPath(_nodeToRender.path)
+					: null;
+			openDashContextMenu(e, [
 				...openTabs.map((tab, index) => ({
 					label: `Focus Tab (${index + 1})`,
-					...createContextMenuAction("focus_tab", {
-						tabId: tab.id,
-					}),
+					onSelect: () => focusTabWithId(tab.id),
 				})),
-
-				{ type: "separator", visible: Boolean(openTabs.length) },
-
+				{ type: "separator", hidden: !openTabs.length },
 				{
 					label: "Open in New Tab",
 					hidden: !(
 						_nodeToRender.type === "file" ||
 						Boolean(getSlateForNode(_nodeToRender))
 					),
-					...createContextMenuAction("open_new_tab", {
-						nodePath: _nodeToRender.path,
-					}),
+					onSelect: () =>
+						openNewTabForNode(_nodeToRender.path, false, {
+							focusNewTab: false,
+						}),
 				},
-
 				{
 					label: "Open as Text",
 					hidden: !(
 						_nodeToRender.type === "file" &&
 						Boolean(getSlateForNode(_nodeToRender))
 					),
-					...createContextMenuAction("open_as_text", {
-						nodePath: _nodeToRender.path,
-					}),
+					onSelect: () =>
+						openNewTab(
+							{
+								type: "file",
+								path: _nodeToRender.path,
+								forceEditor: true,
+							},
+							false,
+						),
 				},
-
 				{
 					label: "Copy Path to Clipboard",
-					...createContextMenuAction("copy_path_to_clipboard", {
-						nodePath: _nodeToRender.path,
-					}),
+					onSelect: () => copyTextToClipboard(_nodeToRender.path),
 				},
-
-				// should show what settings "type" it is
 				{
 					label: "Show Node Settings",
 					hidden: readonly,
-					...createContextMenuAction("show_node_settings", {
-						nodePath: _nodeToRender.path,
-					}),
+					onSelect: () => editNodeSettings(_nodeToRender as any),
 				},
-
-				{ type: "separator", visible: Boolean(openTabs.length) },
-				// Add different node types for folders
+				{ type: "separator", hidden: readonly || node.type !== "dir" },
 				{
 					label: "Add File",
 					hidden: readonly || node.type !== "dir",
-					...createContextMenuAction("add_child_file", {
-						nodePath: _nodeToRender.path,
-					}),
+					onSelect: () => openAddChildNodeSettings(_nodeToRender.path, "file"),
 				},
 				{
 					label: "Add Folder",
 					hidden: readonly || node.type !== "dir",
-					...createContextMenuAction("add_child_folder", {
-						nodePath: _nodeToRender.path,
-					}),
+					onSelect: () => openAddChildNodeSettings(_nodeToRender.path, "dir"),
 				},
 				{
 					label: "Add Browser Profile",
 					hidden: readonly || node.type !== "dir",
-					...createContextMenuAction("add_child_web", {
-						nodePath: _nodeToRender.path,
-					}),
+					onSelect: () => openAddChildNodeSettings(_nodeToRender.path, "web"),
 				},
 				{
 					label: "Add AI Agent",
 					hidden: readonly || node.type !== "dir",
-					...createContextMenuAction("add_child_agent", {
-						nodePath: _nodeToRender.path,
-					}),
+					onSelect: () => openAddChildNodeSettings(_nodeToRender.path, "agent"),
 				},
 				{
 					label: "New Terminal",
 					hidden: readonly || node.type !== "dir",
-					...createContextMenuAction("new_terminal", {
-						nodePath: _nodeToRender.path,
-					}),
+					onSelect: () => openNewTerminalTab(_nodeToRender.path),
 				},
-				{ type: "separator", visible: Boolean(openTabs.length) },
+				{ type: "separator", hidden: readonly },
 				{
 					label: "Rename",
 					hidden: readonly,
-					...createContextMenuAction("show_node_settings", {
-						nodePath: _nodeToRender.path,
-					}),
+					onSelect: () => editNodeSettings(_nodeToRender as any),
 				},
-
-				// Special file creation for different node types
 				{
 					label: "Edit preload script",
 					hidden: readonly || getSlateForNode(_nodeToRender)?.type !== "web",
-					...createContextMenuAction("create_preload_file", {
-						nodePath: _nodeToRender.path,
-					}),
+					onSelect: () => createSpecialFileForNode(_nodeToRender.path, "preload"),
 				},
 				{
 					label: "Create .context.md",
 					hidden: readonly || getSlateForNode(_nodeToRender)?.type !== "agent",
-					...createContextMenuAction("create_context_file", {
-						nodePath: _nodeToRender.path,
-					}),
+					onSelect: () => createSpecialFileForNode(_nodeToRender.path, "context"),
 				},
-
-				{ type: "separator", hidden: !openTabs.length },
+				{ type: "separator", hidden: !(node.type === "dir") },
 				{
 					label: "Init Git",
-					hidden: !(
-						node.type === "dir" &&
-						!(await nearestParentGitRepo(_nodeToRender.path)) &&
-						!(await firstNestedGitRepo(_nodeToRender.path))
-					),
-					...createContextMenuAction("init_git_in_folder", {
-						nodePath: _nodeToRender.path,
-					}),
+					hidden: !canInitGit,
+					onSelect: async () => {
+						await invokeGitCarrot("initGit", {
+							repoRoot: _nodeToRender.path,
+						});
+						await syncGitFolderNode(_nodeToRender.path);
+					},
 				},
 				{
 					label: "Clone Repo",
 					hidden: !(node.type === "dir"),
-					...createContextMenuAction("open_git_clone_ui", {
-						nodePath: _nodeToRender.path,
-					}),
+					onSelect: () =>
+						openGitSettingsPane({
+							mode: "clone",
+							parentPath: _nodeToRender.path,
+						}),
 				},
-				{
-					type: "separator",
-				},
+				{ type: "separator" },
 				{
 					label: "Open in Finder",
 					hidden: readonly,
-					...createContextMenuAction("open_node_in_finder", {
-						nodePath: _nodeToRender.path,
-					}),
+					onSelect: () => hostShowInFinder(_nodeToRender.path),
 				},
-				{
-					type: "separator",
-				},
-			];
-
-			// Check if this node is a project root (its path exactly matches a project's path)
-			const nodeIsProjectRoot = isProjectRoot(_nodeToRender);
-			const projectForRoot =
-				nodeIsProjectRoot && _nodeToRender?.path
-					? getProjectByRootPath(_nodeToRender.path)
-					: null;
-
-			menuItems.push(
+				{ type: "separator" },
 				{
 					label: "Remove Project from Bunny Dash",
-					hidden: readonly || !nodeIsProjectRoot,
-					...createContextMenuAction("remove_project_from_bunny_dash", {
-						projectId: projectForRoot?.id,
-					}),
+					hidden: readonly || !nodeIsProjectRoot || !projectForRoot?.id,
+					onSelect: () => removeLocalProjectMount(String(projectForRoot?.id)),
 				},
 				{
 					label: "Delete Node from Disk",
 					hidden: readonly || nodeIsProjectRoot,
-					...createContextMenuAction("fully_delete_node_from_disk", {
-						nodePath: _nodeToRender?.path,
-						projectId: nodeIsProjectRoot ? projectForRoot?.id : undefined,
-					}),
+					danger: true,
+					onSelect: () => deleteNodeFromDisk(_nodeToRender.path),
 				},
-			);
-
-			await electrobun.rpc?.request.showContextMenu({
-				menuItems,
-			});
+			]);
 		};
 		showContextMenu();
 	};

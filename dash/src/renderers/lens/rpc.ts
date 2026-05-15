@@ -132,12 +132,6 @@ export type WorkspaceRPC = {
         };
         response: any;
       };
-      showContextMenu: {
-        params: {
-          // todo: electrobun should expose menu items type
-          menuItems: any[];
-        };
-      };
       newPreviewNode: {
         params: {
           candidateName: string;

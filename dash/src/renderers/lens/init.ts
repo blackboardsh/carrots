@@ -53,7 +53,7 @@ import {
 registerBunnyTerminal();
 registerDashDiffEditor();
 
-async function syncGitFolderNode(folderPath: string) {
+export async function syncGitFolderNode(folderPath: string) {
   const gitFolderPath = join(folderPath, ".git");
   const gitNode = await fsGetNode(gitFolderPath);
   if (!gitNode) {
@@ -74,7 +74,7 @@ async function syncGitFolderNode(folderPath: string) {
   setNodeExpanded(folderPath, true);
 }
 
-function openGitSettingsPane(query?: Record<string, string>) {
+export function openGitSettingsPane(query?: Record<string, string>) {
   setState("settingsPane", {
     type: "carrot-remote-ui",
     data: {
@@ -84,6 +84,151 @@ function openGitSettingsPane(query?: Record<string, string>) {
       query,
     },
   });
+}
+
+export async function openAddChildNodeSettings(
+	nodePath: string,
+	nodeType?: string,
+) {
+	const node = getNode(nodePath);
+	if (!node) {
+		return;
+	}
+
+	const actualNodeType = nodeType || "file";
+	const baseName = actualNodeType === "dir" ? "new-folder" : "new-file";
+	const delay = untrack(() => {
+		return state.settingsPane.type ? 400 : 0;
+	});
+
+	setState("settingsPane", {
+		type: "",
+		data: {},
+	});
+
+	setTimeout(async () => {
+		const nodeName = await fsGetUniqueNewName(node.path, baseName);
+		const childNode: CachedFileType | PreviewFolderNodeType = {
+			type: actualNodeType === "dir" ? "dir" : "file",
+			name: nodeName,
+			path: join(node.path, nodeName),
+			persistedContent: "",
+			model: null,
+			isDirty: false,
+			editors: {},
+		};
+
+		setState("settingsPane", {
+			type: "add-node",
+			data: {
+				node: childNode,
+				previewNode: childNode,
+				selectedNodeType: actualNodeType,
+			},
+		});
+	}, delay);
+}
+
+export async function createSpecialFileForNode(
+	nodePath: string,
+	fileType: string,
+) {
+	let fileName = "";
+	let defaultContent = "";
+
+	if (fileType === "preload") {
+		fileName = ".preload.js";
+		defaultContent = `// Preload script for this web browser profile
+// This script runs before the page loads and can modify the page behavior
+
+// Example: Hide all ads
+// document.addEventListener('DOMContentLoaded', () => {
+//   const ads = document.querySelectorAll('[class*="ad"], [id*="ad"]');
+//   ads.forEach(ad => ad.style.display = 'none');
+// });
+
+// Example: Auto-fill a form
+// document.addEventListener('DOMContentLoaded', () => {
+//   const usernameField = document.querySelector('input[name="username"]');
+//   if (usernameField) {
+//     usernameField.value = 'your-username';
+//   }
+// });
+
+console.log('Preload script loaded for:', window.location.href);
+`;
+	} else if (fileType === "context") {
+		fileName = ".context.md";
+		defaultContent = `# Agent Context
+
+This file contains custom context and instructions for your AI agent.
+
+## Personality
+You are a helpful assistant with the following characteristics:
+- Be concise and direct
+- Focus on practical solutions
+- Ask clarifying questions when needed
+
+## Special Instructions
+- When writing code, always include comments
+- Prefer modern JavaScript/TypeScript syntax
+- Suggest best practices and alternatives
+
+## Knowledge Areas
+- Web development
+- JavaScript/TypeScript
+- Node.js
+- React
+- Backend development
+
+## Response Style
+- Use examples when explaining concepts
+- Break down complex topics into steps
+- Provide actionable advice
+
+---
+*Edit this file to customize your agent's behavior and knowledge.*
+`;
+	}
+
+	const filePath = join(nodePath, fileName);
+
+	try {
+		const exists = await fsExists(filePath);
+
+		let wasCreated = false;
+		if (!exists) {
+			await fsTouchFile(filePath, defaultContent);
+			wasCreated = true;
+		}
+
+		if (fileType === "preload") {
+			if (wasCreated) {
+				setTimeout(() => {
+					setNodeExpanded(nodePath, true);
+				}, 500);
+			} else {
+				setNodeExpanded(nodePath, true);
+			}
+			openNewTabForNode(filePath, false, { focusNewTab: true });
+			return;
+		}
+
+		openNewTabForNode(filePath, false, { focusNewTab: true });
+	} catch (error) {
+		console.error(`Error creating ${fileName}:`, error);
+		alert(`Failed to create ${fileName}. Please try again.`);
+	}
+}
+
+export async function copyTextToClipboard(text: string) {
+	try {
+		await navigator.clipboard.writeText(text);
+		console.log("Copied to clipboard:", text);
+	} catch (error) {
+		console.error("Failed to copy to clipboard:", error);
+		alert(`Failed to copy automatically. Path:\n${text}`);
+	}
 }
 
 export async function getHydratedInitialState() {
@@ -490,51 +635,8 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
         }
         editNodeSettings(node);
       },
-      addChildNode: async ({ nodePath, nodeType }) => {
-        console.log("addChildNode called with:", { nodePath, nodeType });
-        const node = getNode(nodePath);
-        if (!node) {
-          console.log("Node not found:", nodePath);
-          return;
-        }
-
-        // Always open settings panel to allow name editing
-        const actualNodeType = nodeType || "file";
-        const baseName = actualNodeType === "dir" ? "new-folder" : "new-file";
-
-        // clear settings and then set after a delay for animation to play
-        // and to cleanly reset the add node settings
-        const delay = untrack(() => {
-          return state.settingsPane.type ? 400 : 0;
-        })
-
-        setState("settingsPane", {
-          type: "",
-          data: {}
-        })        
-        setTimeout(async () => {
-          const nodeName = await fsGetUniqueNewName(node.path, baseName);
-          
-          const childNode: CachedFileType | PreviewFolderNodeType = {
-            type: actualNodeType === "dir" ? "dir" : "file",
-            name: nodeName,
-            path: join(node.path, nodeName),
-            persistedContent: "",
-            model: null,
-            isDirty: false,
-            editors: {},
-          };
-        
-          setState("settingsPane", {
-            type: "add-node",
-            data: {
-              node: childNode,
-              previewNode: childNode,
-              selectedNodeType: actualNodeType, // Pass the intended node type to settings
-            },
-          });
-        }, delay)
-        
+      addChildNode: ({ nodePath, nodeType }) => {
+        void openAddChildNodeSettings(nodePath, nodeType);
       },
       newTerminal: ({ nodePath }) => {        
         const node = getNode(nodePath);
@@ -778,111 +880,11 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
         // Notify slate components about render updates from plugins
         window.dispatchEvent(new CustomEvent('slateRender', { detail: data }));
       },
-      createSpecialFile: async ({ nodePath, fileType }) => {
-        let fileName = "";
-        let defaultContent = "";
-
-        if (fileType === "preload") {
-          fileName = ".preload.js";
-          defaultContent = `// Preload script for this web browser profile
-// This script runs before the page loads and can modify the page behavior
-
-// Example: Hide all ads
-// document.addEventListener('DOMContentLoaded', () => {
-//   const ads = document.querySelectorAll('[class*="ad"], [id*="ad"]');
-//   ads.forEach(ad => ad.style.display = 'none');
-// });
-
-// Example: Auto-fill a form
-// document.addEventListener('DOMContentLoaded', () => {
-//   const usernameField = document.querySelector('input[name="username"]');
-//   if (usernameField) {
-//     usernameField.value = 'your-username';
-//   }
-// });
-
-console.log('Preload script loaded for:', window.location.href);
-`;
-        } else if (fileType === "context") {
-          fileName = ".context.md";
-          defaultContent = `# Agent Context
-
-This file contains custom context and instructions for your AI agent.
-
-## Personality
-You are a helpful assistant with the following characteristics:
-- Be concise and direct
-- Focus on practical solutions
-- Ask clarifying questions when needed
-
-## Special Instructions
-- When writing code, always include comments
-- Prefer modern JavaScript/TypeScript syntax
-- Suggest best practices and alternatives
-
-## Knowledge Areas
-- Web development
-- JavaScript/TypeScript
-- Node.js
-- React
-- Backend development
-
-## Response Style
-- Use examples when explaining concepts
-- Break down complex topics into steps
-- Provide actionable advice
-
----
-*Edit this file to customize your agent's behavior and knowledge.*
-`;
-        }
-
-        const filePath = join(nodePath, fileName);
-
-        try {
-          // Check if file already exists
-          const exists = await fsExists(filePath);
-
-          let wasCreated = false;
-          if (!exists) {
-            // Create the file if it doesn't exist
-            await fsTouchFile(filePath, defaultContent);
-            wasCreated = true;
-          }
-
-          // For preload files, expand the web node folder after creation and open the file
-          if (fileType === "preload") {
-            if (wasCreated) {
-              // Wait a bit for the file system events to be processed and the file to be detected
-              setTimeout(() => {
-                // Expand the web node folder
-                setNodeExpanded(nodePath, true);
-              }, 500);
-            } else {
-              // File already exists, expand immediately
-              setNodeExpanded(nodePath, true);
-            }
-
-            // Open the file in the current pane (not as a new tab, replace preview if needed)
-            openNewTabForNode(filePath, false, { focusNewTab: true });
-          } else {
-            // For other file types, keep the existing behavior
-            openNewTabForNode(filePath, false, { focusNewTab: true });
-          }
-        } catch (error) {
-          console.error(`Error creating ${fileName}:`, error);
-          alert(`Failed to create ${fileName}. Please try again.`);
-        }
+      createSpecialFile: ({ nodePath, fileType }) => {
+        void createSpecialFileForNode(nodePath, fileType);
       },
-      copyToClipboard: async ({ text }: { text: string }) => {
-        try {
-          await navigator.clipboard.writeText(text);
-          console.log("Copied to clipboard:", text);
-        } catch (error) {
-          console.error("Failed to copy to clipboard:", error);
-          // Fallback: show the text in an alert so user can manually copy
-          alert(`Failed to copy automatically. Path:\n${text}`);
-        }
+      copyToClipboard: ({ text }: { text: string }) => {
+        void copyTextToClipboard(text);
       },
     },
   },
