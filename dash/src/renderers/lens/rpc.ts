@@ -83,6 +83,10 @@ export type WorkspaceRPC = {
         params: void;
         response: any;
       };
+      getDashHostBootState: {
+        params: void;
+        response: any;
+      };
       openLens: {
         params: {
           lensId: string;
@@ -396,6 +400,7 @@ export type WorkspaceRPC = {
       closeWindow: {
         windowId?: string;
       } | void;
+      syncDashHostCache: any;
       openBunnyWindow: {
         screenX: number;
         screenY: number;

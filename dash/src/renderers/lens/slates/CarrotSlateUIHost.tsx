@@ -1,6 +1,6 @@
 import { createEffect, createMemo, createSignal, onCleanup, onMount, Show, type JSX } from "solid-js";
 import { openNewTabForNode, setState, state } from "../store";
-import { electrobun } from "../init";
+import { getDashHostBootState } from "../init";
 import { handleCloneSuccessInDash } from "./CarrotRemoteUIHost";
 
 type HostMessage =
@@ -137,7 +137,7 @@ export const CarrotSlateUIHost = (props: {
 
       for (let attempt = 0; attempt < 20 && !cancelled; attempt += 1) {
         try {
-          const response = await electrobun.rpc?.request.getInitialState();
+          const response = await getDashHostBootState();
           const nextOrigin =
             response && typeof response.webBridgeOrigin === "string"
               ? response.webBridgeOrigin

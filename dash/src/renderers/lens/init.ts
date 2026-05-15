@@ -39,6 +39,10 @@ import {
   persistLocalDashGraph,
   persistWorkspaceState,
 } from "./localStateDb";
+import type {
+  DashHostBootState,
+  DashHostCacheSyncPayload,
+} from "./dashHostCache";
 // import { readSlateConfigFile } from "./files";
 
 // Register web components for plugins to use
@@ -122,6 +126,36 @@ export async function getHydratedInitialState() {
 
   await persistLocalDashGraphFromWorker();
   return response;
+}
+
+export function getDashHostBootState() {
+  return electrobun.rpc?.request.getDashHostBootState() as Promise<DashHostBootState | undefined>;
+}
+
+let pendingDashHostCacheTimer: ReturnType<typeof setTimeout> | null = null;
+let pendingDashHostCachePayload: DashHostCacheSyncPayload | null = null;
+
+export function scheduleDashHostCacheSync(
+  payload: DashHostCacheSyncPayload | null | undefined,
+) {
+  if (!payload) {
+    return;
+  }
+
+  pendingDashHostCachePayload = payload;
+  if (pendingDashHostCacheTimer) {
+    clearTimeout(pendingDashHostCacheTimer);
+  }
+
+  pendingDashHostCacheTimer = setTimeout(() => {
+    pendingDashHostCacheTimer = null;
+    const nextPayload = pendingDashHostCachePayload;
+    pendingDashHostCachePayload = null;
+    if (!nextPayload) {
+      return;
+    }
+    electrobun.rpc?.send("syncDashHostCache", nextPayload);
+  }, 80);
 }
 
 const rpc = Electroview.defineRPC<WorkspaceRPC>({

@@ -9,7 +9,7 @@ import {
   type RPCSchema,
   Updater,
 } from "electrobun/bun";
-import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type {
   CarrotPermissionConsentRequest,
@@ -89,6 +89,42 @@ type CarrotInfo = {
   remoteUIs: CarrotRemoteUIInfo[];
   slateUIs: CarrotSlateUIInfo[];
   contributions?: CarrotContributions;
+};
+
+type DashHostWindowCache = {
+  windowId: string;
+  title: string;
+  frame: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  workspaceId: string;
+  lensId: string;
+  activeTreeNodeId: string;
+};
+
+type DashHostSummaryCache = {
+  version: 1;
+  updatedAt: number;
+  currentWorkspaceId: string;
+  currentLensId: string;
+  currentWindow: DashHostWindowCache | null;
+  windows: DashHostWindowCache[];
+  workspaces: unknown[];
+  cloudWorkspaces: unknown[];
+  knownLocalProjects: unknown[];
+  peerDependencies: unknown;
+  account: {
+    signedIn: boolean;
+    email: string;
+    name: string;
+    userId: string;
+    emailVerified: boolean;
+    connectedAt?: number;
+  };
+  currentInstance: unknown;
 };
 
 type DashboardState = {
@@ -270,6 +306,9 @@ class CarrotInstance {
   private async handleControllerWindowClosed(windowId: string, win: BrowserWindow) {
     this.removeControllerWindow(windowId, win);
     this.restoreApplicationMenuIfActive();
+    if (this.carrot.manifest.id === "bunny-dash") {
+      (runtime as any).removeDashHostCacheWindow(windowId);
+    }
 
     if (!(runtime as any).shutdownInProgress) {
       if (this.carrot.manifest.id === "bunny-dash" && this.status === "running") {
@@ -1438,35 +1477,12 @@ class BunnyEarsRuntime {
   }
 
   private getDashOpenWindowsSnapshotInfo() {
-    const dashCarrot = this.carrots.get("bunny-dash");
-    if (!dashCarrot || !existsSync(dashCarrot.statePath)) {
-      return { path: dashCarrot?.statePath || null, windowCount: 0 };
-    }
-
-    try {
-      const persisted = JSON.parse(readFileSync(dashCarrot.statePath, "utf8")) as {
-        sessionSnapshot?: { windows?: unknown[] };
-        currentState?: { windows?: unknown[] };
-      };
-
-      const sessionWindows = Array.isArray(persisted.sessionSnapshot?.windows)
-        ? persisted.sessionSnapshot.windows
-        : null;
-      if (sessionWindows) {
-        return { path: dashCarrot.statePath, windowCount: sessionWindows.length };
-      }
-
-      const currentWindows = Array.isArray(persisted.currentState?.windows)
-        ? persisted.currentState.windows
-        : [];
-      return { path: dashCarrot.statePath, windowCount: currentWindows.length };
-    } catch (error) {
-      console.error(
-        "[bunny-ears] Failed to inspect Dash state for boot restore:",
-        error instanceof Error ? error.message : error,
-      );
-      return { path: dashCarrot.statePath, windowCount: 0 };
-    }
+    const cachePath = this.getDashHostCachePath();
+    const cache = this.loadDashHostCache();
+    return {
+      path: existsSync(cachePath) ? cachePath : null,
+      windowCount: Array.isArray(cache?.windows) ? cache.windows.length : 0,
+    };
   }
 
   private lastWakeCheckAt = Date.now();
@@ -1940,6 +1956,291 @@ class BunnyEarsRuntime {
     return path.join(os.homedir(), ".electrobunny", this.channel, ".auth-token");
   }
 
+  private getChannelStateDir() {
+    const path = require("node:path");
+    const os = require("node:os");
+    return path.join(os.homedir(), ".electrobunny", this.channel);
+  }
+
+  private getDashHostCachePath() {
+    const path = require("node:path");
+    return path.join(this.getChannelStateDir(), "dash-host-cache.json");
+  }
+
+  private loadDashHostCache(): DashHostSummaryCache | null {
+    const cachePath = this.getDashHostCachePath();
+    if (!existsSync(cachePath)) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as DashHostSummaryCache;
+      if (!parsed || typeof parsed !== "object") {
+        return null;
+      }
+      return {
+        version: 1,
+        updatedAt: Number(parsed.updatedAt || 0),
+        currentWorkspaceId: String(parsed.currentWorkspaceId || ""),
+        currentLensId: String(parsed.currentLensId || ""),
+        currentWindow:
+          parsed.currentWindow && typeof parsed.currentWindow === "object"
+            ? {
+                windowId: String(parsed.currentWindow.windowId || ""),
+                title: String(parsed.currentWindow.title || ""),
+                frame: {
+                  x: Number(parsed.currentWindow.frame?.x || 0),
+                  y: Number(parsed.currentWindow.frame?.y || 0),
+                  width: Number(parsed.currentWindow.frame?.width || 1500),
+                  height: Number(parsed.currentWindow.frame?.height || 900),
+                },
+                workspaceId: String(parsed.currentWindow.workspaceId || ""),
+                lensId: String(parsed.currentWindow.lensId || ""),
+                activeTreeNodeId: String(parsed.currentWindow.activeTreeNodeId || ""),
+              }
+            : null,
+        windows: Array.isArray(parsed.windows)
+          ? parsed.windows
+              .filter((window) => window && typeof window === "object")
+              .map((window) => ({
+                windowId: String(window.windowId || ""),
+                title: String(window.title || ""),
+                frame: {
+                  x: Number(window.frame?.x || 0),
+                  y: Number(window.frame?.y || 0),
+                  width: Number(window.frame?.width || 1500),
+                  height: Number(window.frame?.height || 900),
+                },
+                workspaceId: String(window.workspaceId || ""),
+                lensId: String(window.lensId || ""),
+                activeTreeNodeId: String(window.activeTreeNodeId || ""),
+              }))
+              .filter((window) => Boolean(window.windowId))
+          : [],
+        workspaces: Array.isArray(parsed.workspaces) ? parsed.workspaces : [],
+        cloudWorkspaces: Array.isArray(parsed.cloudWorkspaces) ? parsed.cloudWorkspaces : [],
+        knownLocalProjects: Array.isArray(parsed.knownLocalProjects)
+          ? parsed.knownLocalProjects
+          : [],
+        peerDependencies:
+          parsed.peerDependencies && typeof parsed.peerDependencies === "object"
+            ? parsed.peerDependencies
+            : {},
+        account:
+          parsed.account && typeof parsed.account === "object"
+            ? {
+                signedIn: Boolean(parsed.account.signedIn),
+                email: String(parsed.account.email || ""),
+                name: String(parsed.account.name || ""),
+                userId: String(parsed.account.userId || ""),
+                emailVerified: Boolean(parsed.account.emailVerified),
+                connectedAt:
+                  typeof parsed.account.connectedAt === "number"
+                    ? parsed.account.connectedAt
+                    : undefined,
+              }
+            : {
+                signedIn: false,
+                email: "",
+                name: "",
+                userId: "",
+                emailVerified: false,
+              },
+        currentInstance:
+          parsed.currentInstance && typeof parsed.currentInstance === "object"
+            ? parsed.currentInstance
+            : null,
+      };
+    } catch (error) {
+      console.error(
+        "[bunny-ears] Failed to load Dash host cache:",
+        error instanceof Error ? error.message : error,
+      );
+      return null;
+    }
+  }
+
+  private saveDashHostCache(cache: DashHostSummaryCache) {
+    const cachePath = this.getDashHostCachePath();
+    mkdirSync(this.getChannelStateDir(), { recursive: true });
+    writeFileSync(cachePath, JSON.stringify(cache, null, 2));
+  }
+
+  private upsertDashHostCache(payload: Partial<DashHostSummaryCache>) {
+    const current = this.loadDashHostCache() || {
+      version: 1 as const,
+      updatedAt: 0,
+      currentWorkspaceId: "",
+      currentLensId: "",
+      currentWindow: null,
+      windows: [],
+      workspaces: [],
+      cloudWorkspaces: [],
+      knownLocalProjects: [],
+      peerDependencies: {},
+      account: {
+        signedIn: false,
+        email: "",
+        name: "",
+        userId: "",
+        emailVerified: false,
+      },
+      currentInstance: null,
+    };
+
+    if (payload.currentWindow && payload.currentWindow.windowId) {
+      current.windows = current.windows.filter(
+        (window) => window.windowId !== payload.currentWindow?.windowId,
+      );
+      current.windows.push(payload.currentWindow);
+    }
+    if (typeof payload.currentWorkspaceId === "string") {
+      current.currentWorkspaceId = payload.currentWorkspaceId;
+    }
+    if (typeof payload.currentLensId === "string") {
+      current.currentLensId = payload.currentLensId;
+    }
+    if (payload.currentWindow !== undefined) {
+      current.currentWindow = payload.currentWindow || null;
+    }
+    if (Array.isArray(payload.workspaces)) {
+      current.workspaces = payload.workspaces;
+    }
+    if (Array.isArray(payload.cloudWorkspaces)) {
+      current.cloudWorkspaces = payload.cloudWorkspaces;
+    }
+    if (Array.isArray(payload.knownLocalProjects)) {
+      current.knownLocalProjects = payload.knownLocalProjects;
+    }
+    if (payload.peerDependencies && typeof payload.peerDependencies === "object") {
+      current.peerDependencies = payload.peerDependencies;
+    }
+    if (payload.account && typeof payload.account === "object") {
+      current.account = payload.account;
+    }
+    if (payload.currentInstance !== undefined) {
+      current.currentInstance = payload.currentInstance ?? null;
+    }
+
+    current.updatedAt = Date.now();
+    this.saveDashHostCache(current);
+    return current;
+  }
+
+  private removeDashHostCacheWindow(windowId: string) {
+    const current = this.loadDashHostCache();
+    if (!current) {
+      return;
+    }
+    current.windows = current.windows.filter((window) => window.windowId !== windowId);
+    if (current.currentWindow?.windowId === windowId) {
+      current.currentWindow = null;
+    }
+    current.updatedAt = Date.now();
+    this.saveDashHostCache(current);
+  }
+
+  private getDashHomeDir() {
+    const dashCarrot = this.carrots.get("bunny-dash");
+    return dashCarrot?.stateDir || this.getChannelStateDir();
+  }
+
+  private getDashProjectsFolder(workspaceId?: string) {
+    const path = require("node:path");
+    const root = path.join(
+      this.getDashHomeDir(),
+      "projects",
+      workspaceId || "default",
+    );
+    mkdirSync(root, { recursive: true });
+    return root;
+  }
+
+  private getDashBuildVars() {
+    const dashCarrot = this.carrots.get("bunny-dash");
+    return {
+      channel: this.channel,
+      version: dashCarrot?.carrot.manifest.version || "0.1.0",
+      hash: "bunny-dash",
+    };
+  }
+
+  private getDashPaths(workspaceId?: string) {
+    const bunPath = Bun.which("bun") || "";
+    const gitPath = Bun.which("git") || "";
+    return {
+      APP_PATH: this.getDashHomeDir(),
+      BUNNY_HOME_FOLDER: this.getDashHomeDir(),
+      BUNNY_PROJECTS_FOLDER: this.getDashProjectsFolder(workspaceId),
+      BUNNY_DEPS_PATH: "",
+      BUNNY_ENV_PATH: "",
+      BUN_BINARY_PATH: bunPath,
+      BIOME_BINARY_PATH: "",
+      TSSERVER_PATH: "",
+      GIT_BINARY_PATH: gitPath,
+      BUN_PATH: bunPath,
+      BUN_DEPS_FOLDER: "",
+      TYPESCRIPT_PACKAGE_PATH: "",
+      BIOME_PACKAGE_PATH: "",
+    };
+  }
+
+  private getDashWebBridgeOrigin() {
+    if (!this.webBridgePort) {
+      return "";
+    }
+    return `http://localhost:${this.webBridgePort}`;
+  }
+
+  private buildCurrentDashInstanceSummary() {
+    const os = require("node:os");
+    return {
+      id: "host-machine",
+      name: os.hostname() || "This Machine",
+      os: process.platform === "darwin" ? "macos" : process.platform,
+      status: "online",
+      isCurrent: true,
+      carrots: this.summaries(),
+    };
+  }
+
+  private buildDashHostBootState(sourceWindowId?: string) {
+    const cache = this.loadDashHostCache();
+    const targetWindowId = sourceWindowId || cache?.currentWindow?.windowId || "main";
+    const windowTarget =
+      cache?.windows.find((window) => window.windowId === targetWindowId) ||
+      cache?.currentWindow ||
+      null;
+
+    return {
+      windowId: targetWindowId,
+      buildVars: this.getDashBuildVars(),
+      paths: this.getDashPaths(windowTarget?.workspaceId || cache?.currentWorkspaceId || undefined),
+      peerDependencies: cache?.peerDependencies || {
+        bun: {
+          installed: Boolean(Bun.which("bun")),
+          version: Bun.version,
+        },
+        typescript: {
+          installed: false,
+          version: "",
+        },
+        biome: {
+          installed: false,
+          version: "",
+        },
+        git: {
+          installed: Boolean(Bun.which("git")),
+          version: "",
+        },
+      },
+      webBridgeOrigin: this.getDashWebBridgeOrigin(),
+      dashCache: cache,
+      windowTarget,
+      currentInstance: cache?.currentInstance || this.buildCurrentDashInstanceSummary(),
+    };
+  }
+
   private getDeviceTokenPath() {
     const path = require("node:path");
     const os = require("node:os");
@@ -2037,6 +2338,15 @@ class BunnyEarsRuntime {
     this.clearSavedAuthToken();
     this.clearDeviceToken();
     this.instanceId = null;
+    this.upsertDashHostCache({
+      account: {
+        signedIn: false,
+        email: "",
+        name: "",
+        userId: "",
+        emailVerified: false,
+      },
+    });
 
     try { this.hopWs?.close(); } catch {}
     this.hopWs = null;
@@ -2123,6 +2433,17 @@ class BunnyEarsRuntime {
         fs.writeFileSync(tokenPath, token);
       } catch {}
     }
+    const cache = this.loadDashHostCache();
+    this.upsertDashHostCache({
+      account: {
+        signedIn: true,
+        email: cache?.account.email || "",
+        name: cache?.account.name || "",
+        userId: cache?.account.userId || "",
+        emailVerified: Boolean(cache?.account.emailVerified),
+        connectedAt: cache?.account.connectedAt,
+      },
+    });
   }
 
   // Get a fresh short-lived access token by exchanging the device token.
@@ -2531,6 +2852,11 @@ class BunnyEarsRuntime {
       this.invokeCarrotFrom("bunny-dash", "bunny.fs", fsMethod, params, sourceWindowId);
 
     switch (method) {
+      case "getDashHostBootState":
+        return {
+          handled: true,
+          result: this.buildDashHostBootState(sourceWindowId),
+        };
       case "openFileDialog": {
         const options = (params || {}) as {
           startingFolder?: string;
@@ -2644,6 +2970,14 @@ class BunnyEarsRuntime {
             },
           );
         }
+        return { handled: true };
+      }
+      case "syncDashHostCache": {
+        const cachePayload =
+          payload && typeof payload === "object"
+            ? (payload as Partial<DashHostSummaryCache>)
+            : {};
+        this.upsertDashHostCache(cachePayload);
         return { handled: true };
       }
       case "fullyDeleteNodeFromDisk":
@@ -2838,8 +3172,33 @@ class BunnyEarsRuntime {
       }
       // Set dash as active menu owner so menu clicks route to it
       this.activeApplicationMenuOwnerId = dashCarrot.carrot.manifest.id;
-      // Dash manages its own windows — send an event to focus/create
-      dashCarrot.sendEvent("open-window");
+      const dashCache = this.loadDashHostCache();
+      const cachedWindows = Array.isArray(dashCache?.windows)
+        ? dashCache.windows
+        : [];
+
+      if (dashCarrot.controllerWindows.size > 0) {
+        const targetWindow =
+          cachedWindows.find((window) => dashCarrot.controllerWindows.has(window.windowId)) ||
+          cachedWindows[0];
+        await dashCarrot.openWindow(targetWindow?.windowId, {
+          title: targetWindow?.title,
+          frame: targetWindow?.frame,
+        });
+        return;
+      }
+
+      if (cachedWindows.length > 0) {
+        for (const window of cachedWindows) {
+          await dashCarrot.openWindow(window.windowId, {
+            title: window.title,
+            frame: window.frame,
+          });
+        }
+        return;
+      }
+
+      await dashCarrot.openWindow("main");
       return;
     }
     if (action === "open-farm") {

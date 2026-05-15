@@ -1297,7 +1297,6 @@ export const WorkspaceLensesTree = () => {
 		const label = `${workspace.name} · ${lens.name}`;
 		await runInWindowTransition(label, async () => {
 			await openLocalLens(lensId);
-			await refreshDashStateFromWorker();
 		});
 	};
 
@@ -1311,7 +1310,6 @@ export const WorkspaceLensesTree = () => {
 	) => {
 		await runInWindowTransition(workspace.name, async () => {
 			await openLocalWorkspace(workspaceId);
-			await refreshDashStateFromWorker();
 		});
 	};
 
@@ -1339,7 +1337,6 @@ export const WorkspaceLensesTree = () => {
 	) => {
 		await runInWindowTransition(`${workspace.name} · ${lens.name}`, async () => {
 			await openLocalLens(lens.id);
-			await refreshDashStateFromWorker();
 		});
 	};
 
@@ -1347,7 +1344,6 @@ export const WorkspaceLensesTree = () => {
 		console.log("[bunny-dash] overwriteCurrentLens click");
 		await overwriteCurrentLocalLens();
 		console.log("[bunny-dash] overwriteCurrentLens resolved");
-		await refreshDashStateFromWorker();
 	};
 
 	const showWorkspaceContextMenu = async (

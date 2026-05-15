@@ -3835,61 +3835,6 @@ async function openLensInNewWindow(lensId: string) {
   return snapshot();
 }
 
-function getPreferredWorkspaceIdForDashOpen() {
-  const currentWorkspace = getCurrentWorkspaceUnsafe();
-  if (currentWorkspace) {
-    return currentWorkspace.key;
-  }
-
-  const firstVisibleLocalWorkspace = listVisibleLocalWorkspaces()[0];
-  if (firstVisibleLocalWorkspace) {
-    return firstVisibleLocalWorkspace.key;
-  }
-
-  return listWorkspaces()[0]?.key || "";
-}
-
-async function openDashWindow() {
-  log(
-    `openDashWindow runtimeWindows=${runtimeWindows.length} hostWindows=${hostWindowIds.size} currentWindow=${state.currentWindowId}`,
-  );
-
-  if (runtimeWindows.length > 0 && hostWindowIds.size === 0) {
-    log(`openDashWindow restoring ${runtimeWindows.length} snapshot window(s)`);
-    await restoreCurrentState();
-    return snapshot();
-  }
-
-  if (runtimeWindows.length > 0) {
-    log(`openDashWindow focusing existing runtime window ${state.currentWindowId}`);
-    focusWindow(state.currentWindowId, getCurrentWindow().title);
-    emitSnapshot();
-    return snapshot();
-  }
-
-  const snapshotDoc = getCurrentStateDoc();
-  if (snapshotDoc.windows.length > 0) {
-    log(`openDashWindow restoring ${snapshotDoc.windows.length} persisted snapshot window(s)`);
-    await restoreCurrentState();
-    return snapshot();
-  }
-
-  const preferredLens = findLensByKey(state.currentLayoutId);
-  if (preferredLens) {
-    log(`openDashWindow opening preferred lens ${preferredLens.key}`);
-    return openLensInNewWindow(preferredLens.key);
-  }
-
-  const preferredWorkspaceId = getPreferredWorkspaceIdForDashOpen();
-  if (preferredWorkspaceId) {
-    log(`openDashWindow opening preferred workspace ${preferredWorkspaceId}`);
-    return openWorkspaceInNewWindow(preferredWorkspaceId);
-  }
-
-  emitSnapshot();
-  return snapshot();
-}
-
 async function openLens(lensId: string) {
   const lens = getLensByKey(lensId);
   if (!isCloudShadowLensKey(lens.key)) {
@@ -3897,43 +3842,6 @@ async function openLens(lensId: string) {
   }
   log(`openLens request: ${lensId}`);
   return restoreLensInCurrentWindow(lensId);
-}
-
-async function restoreCurrentState() {
-  log(
-    `restoreCurrentState begin runtimeWindows=${runtimeWindows.length} hostWindows=${hostWindowIds.size}`,
-  );
-  for (const runtimeWindow of runtimeWindows) {
-    await closeTsServerEditorsForWindow(runtimeWindow.id, runtimeWindow.workspaceId);
-  }
-  const snapshotDoc = getCurrentStateDoc();
-  log(
-    `restoreCurrentState snapshot windows=${snapshotDoc.windows.length} ids=${snapshotDoc.windows.map((window) => window.id).join(",")}`,
-  );
-  runtimeWindows = cloneWindows(snapshotDoc.windows);
-  state.currentLayoutId = snapshotDoc.currentLayoutId;
-  state.currentWindowId = snapshotDoc.currentWindowId;
-  state.commandPaletteOpen = false;
-  state.commandQuery = "";
-  currentState = {
-    updatedAt: snapshotDoc.updatedAt,
-    currentLayoutId: snapshotDoc.currentLayoutId,
-    currentWindowId: snapshotDoc.currentWindowId,
-    windows: cloneWindows(snapshotDoc.windows),
-  };
-  ensureRuntimeState();
-  await saveState();
-  syncTray();
-  emitSetProjects();
-  emitSnapshot();
-  if (runtimeWindows.length > 0) {
-    for (const runtimeWindow of runtimeWindows) {
-      log(`restoreCurrentState creating host window ${runtimeWindow.id}`);
-      ensureHostDashWindow(runtimeWindow.id, runtimeWindow.title);
-    }
-    focusWindow(state.currentWindowId, getCurrentWindow().title);
-  }
-  log("current state restored");
 }
 
 async function overwriteCurrentLens() {
@@ -4509,11 +4417,6 @@ self.onmessage = async (event) => {
       return;
     }
 
-    if (message.name === "open-window") {
-      await openDashWindow();
-      return;
-    }
-
     if (message.name === "window-move" || message.name === "window-resize") {
       const windowId = String(message.payload?.windowId || "");
       if (!windowId) {
@@ -4650,11 +4553,6 @@ self.onmessage = async (event) => {
       case "selectLayoutWindow":
       case "selectWindow":
         await selectWindow(String(message.params?.windowId || state.currentWindowId));
-        post({ type: "response", requestId: message.requestId, success: true, payload: snapshot() });
-        break;
-      case "restoreCurrentState":
-      case "resumeLastState":
-        await restoreCurrentState();
         post({ type: "response", requestId: message.requestId, success: true, payload: snapshot() });
         break;
       case "overwriteCurrentLens":

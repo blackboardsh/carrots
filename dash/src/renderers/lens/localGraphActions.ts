@@ -4,10 +4,13 @@ import {
   electrobun,
   fsGetNode,
   fsSafeDeleteFileOrFolder,
+  getDashHostBootState,
   getHydratedInitialState,
   hostCreateWindow,
+  scheduleDashHostCacheSync,
 } from "./init";
 import {
+  loadPersistedAppSettings,
   loadPersistedWorkspaceState,
   loadPersistedLocalDashGraph,
   mergeAppSettingsForBoot,
@@ -16,7 +19,15 @@ import {
   persistWorkspaceState,
   type PersistedLocalDashGraph,
 } from "./localStateDb";
+import type { DashHostWindowSummary } from "./dashHostCache";
 import { getWindow, setState, state, syncWorkspaceNow } from "./store";
+import {
+  buildBootWindowTitle,
+  buildLocalBunnyDashPayload,
+  buildLocalProjectsForWorkspace,
+  buildLocalWorkspaceForBoot,
+  pickLocalBootTarget,
+} from "./localBoot";
 
 const WORKSPACE_CURRENT_LENS_PREFIX = "__workspace-current__:";
 const CLOUD_WORKSPACE_SHADOW_PREFIX = "__cloud_workspace__:";
@@ -60,6 +71,10 @@ function isCloudLensId(lensId: string) {
 
 function cloneGraph(graph: PersistedLocalDashGraph): PersistedLocalDashGraph {
   return structuredClone(graph);
+}
+
+function clonePlain<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function makeDefaultBunnyWindow(id = "main") {
@@ -178,6 +193,36 @@ function getHostFrameForWindow(windowState: {
     width: Number(windowState.position?.width || 1500),
     height: Number(windowState.position?.height || 900),
   };
+}
+
+function scheduleDashHostCacheForWindow(
+  currentWindow: DashHostWindowSummary | null,
+  workspaceId: string,
+  lensId: string,
+) {
+  scheduleDashHostCacheSync({
+    currentWorkspaceId: workspaceId,
+    currentLensId: lensId,
+    currentWindow,
+    workspaces: clonePlain(state.bunnyDash.workspaces || []),
+    cloudWorkspaces: clonePlain(state.bunnyDash.cloudWorkspaces || []),
+    knownLocalProjects: clonePlain(state.bunnyDash.knownLocalProjects || []),
+    peerDependencies: clonePlain(state.peerDependencies),
+    account: {
+      signedIn: Boolean(
+        state.appSettings.bunnyCloud?.accessToken &&
+          state.appSettings.bunnyCloud?.email,
+      ),
+      email: state.appSettings.bunnyCloud?.email || "",
+      name: state.appSettings.bunnyCloud?.name || "",
+      userId: state.appSettings.bunnyCloud?.userId || "",
+      emailVerified: Boolean(state.appSettings.bunnyCloud?.emailVerified),
+      connectedAt: state.appSettings.bunnyCloud?.connectedAt,
+    },
+    currentInstance: clonePlain(
+      state.bunnyDash.instances?.find((instance) => instance.isCurrent) || null,
+    ),
+  });
 }
 
 function buildRuntimeTemplateFromLiveWindow(
@@ -334,6 +379,18 @@ async function applyLocalLensToCurrentWindow(
       workspaceId,
     },
   });
+  scheduleDashHostCacheForWindow(
+    {
+      windowId: state.windowId,
+      title: templateWindow.title || buildLiveWindowTitle(workspace.name, lens.name),
+      frame: getHostFrameForWindow(liveWindowState),
+      workspaceId,
+      lensId,
+      activeTreeNodeId,
+    },
+    workspaceId,
+    lensId,
+  );
 }
 
 async function openLocalWindowInNewHostWindow(
@@ -396,19 +453,34 @@ async function openLocalWindowInNewHostWindow(
     title: nextRuntimeWindow.title,
     frame: getHostFrameForWindow(liveWindowState),
   });
+  scheduleDashHostCacheForWindow(
+    {
+      windowId: liveWindowId,
+      title: nextRuntimeWindow.title,
+      frame: getHostFrameForWindow(liveWindowState),
+      workspaceId,
+      lensId,
+      activeTreeNodeId,
+    },
+    workspaceId,
+    lensId,
+  );
 }
 
 async function getEditableLocalDashGraph(): Promise<PersistedLocalDashGraph> {
+  const persisted = await loadPersistedLocalDashGraph();
+  if (persisted) {
+    return structuredClone(persisted);
+  }
+
   try {
     const graph = await electrobun.rpc?.request.getLocalDashGraph();
     if (graph) {
       return structuredClone(graph);
     }
   } catch {}
-
-  const persisted = await loadPersistedLocalDashGraph();
   return (
-    persisted || {
+    {
       workspaces: [],
       projectMounts: [],
       layouts: [],
@@ -417,6 +489,106 @@ async function getEditableLocalDashGraph(): Promise<PersistedLocalDashGraph> {
 }
 
 export async function refreshDashRendererStateFromWorker() {
+  const [persistedGraph, persistedAppSettings, hostBoot] = await Promise.all([
+    loadPersistedLocalDashGraph().catch(() => null),
+    loadPersistedAppSettings().catch(() => null),
+    getDashHostBootState().catch(() => null),
+  ]);
+
+  if (persistedGraph) {
+    const windowId = state.windowId || hostBoot?.windowId || "main";
+    const target = pickLocalBootTarget(
+      persistedGraph,
+      windowId,
+      hostBoot?.windowTarget,
+    );
+
+    if (target) {
+      const persistedWorkspace = await loadPersistedWorkspaceState(target.workspaceId);
+      const nextWorkspace = buildLocalWorkspaceForBoot(
+        persistedGraph,
+        target.workspaceId,
+        target.lensId,
+        windowId,
+        persistedWorkspace,
+        hostBoot?.windowTarget,
+      );
+
+      if (nextWorkspace) {
+        const nextAppSettings = mergeAppSettingsForBoot(
+          state.appSettings,
+          null,
+          persistedAppSettings,
+        );
+        const currentInstance =
+          hostBoot?.currentInstance ||
+          state.bunnyDash.instances?.find((instance) => instance.isCurrent) ||
+          null;
+        const nextBunnyDash = buildLocalBunnyDashPayload({
+          graph: persistedGraph,
+          currentWorkspaceId: target.workspaceId,
+          currentLensId: target.lensId,
+          currentInstance,
+          cloudWorkspaces:
+            hostBoot?.dashCache?.cloudWorkspaces || state.bunnyDash.cloudWorkspaces || [],
+          knownLocalProjects:
+            hostBoot?.dashCache?.knownLocalProjects ||
+            state.bunnyDash.knownLocalProjects ||
+            [],
+        });
+        const nextProjects = buildLocalProjectsForWorkspace(
+          persistedGraph,
+          target.workspaceId,
+        );
+
+        setState({
+          windowId,
+          buildVars: hostBoot?.buildVars || state.buildVars,
+          paths: hostBoot?.paths || state.paths,
+          peerDependencies: hostBoot?.peerDependencies || state.peerDependencies,
+          webBridgeOrigin: hostBoot?.webBridgeOrigin || state.webBridgeOrigin,
+          workspace: nextWorkspace as any,
+          bunnyDash: nextBunnyDash as any,
+          projects: nextProjects,
+          tokens: [],
+          appSettings: nextAppSettings,
+        });
+
+        try {
+          await persistWorkspaceState(nextWorkspace as any);
+          await persistAppSettings(nextAppSettings);
+        } catch (error) {
+          console.warn("Failed to persist refreshed local Dash state:", error);
+        }
+
+        const activeWindow =
+          nextWorkspace.windows.find((window) => window.id === windowId) ||
+          nextWorkspace.windows[0];
+        if (activeWindow) {
+          scheduleDashHostCacheForWindow(
+            {
+              windowId,
+              title: buildBootWindowTitle(
+                persistedGraph,
+                target.workspaceId,
+                target.lensId,
+                hostBoot?.windowTarget?.title,
+              ),
+              frame: getHostFrameForWindow(activeWindow),
+              workspaceId: target.workspaceId,
+              lensId: target.lensId,
+              activeTreeNodeId: target.activeTreeNodeId,
+            },
+            target.workspaceId,
+            target.lensId,
+          );
+        }
+
+        return;
+      }
+    }
+  }
+
   const nextState = await getHydratedInitialState();
   if (!nextState) {
     return;
@@ -884,4 +1056,16 @@ export async function createAdditionalLocalWindow(offset?: {
     title: nextTitle,
     frame: getHostFrameForWindow(nextWindowState),
   });
+  scheduleDashHostCacheForWindow(
+    {
+      windowId: liveWindowId,
+      title: nextTitle,
+      frame: getHostFrameForWindow(nextWindowState),
+      workspaceId,
+      lensId,
+      activeTreeNodeId: `lens-overview:${lensId}`,
+    },
+    workspaceId,
+    lensId,
+  );
 }
