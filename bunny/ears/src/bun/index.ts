@@ -1908,7 +1908,7 @@ class BunnyEarsRuntime {
 
       if (message.type === "hop:browser-connected") {
         console.log(`[hop] Browser connected: ${message.browserId} for ${message.carrotId}`);
-        if (message.carrotId === "dash-ui" || message.carrotId === "bunny-dash") {
+        if (message.carrotId === "dash-ui") {
           this.dashHopBrowserIds.set(message.browserId, { windowId: null });
         } else {
           const carrot = this.carrots.get(message.carrotId);
@@ -1936,7 +1936,7 @@ class BunnyEarsRuntime {
 
       if (message.type === "hop:message") {
         const { browserId, carrotId, payload } = message;
-        const isDashUiTarget = carrotId === "dash-ui" || carrotId === "bunny-dash";
+        const isDashUiTarget = carrotId === "dash-ui";
 
         // Handle RPC messages (fire-and-forget from view → bun)
         if (payload?.type === "message") {
@@ -4278,7 +4278,7 @@ class BunnyEarsRuntime {
       return;
     }
 
-    if (targetCarrotId === "dash-ui" || targetCarrotId === "bunny-dash") {
+    if (targetCarrotId === "dash-ui") {
       this.emitDashViewMessage(name, payload, options);
       return;
     }
@@ -4828,7 +4828,6 @@ const FOUNDATION_CARROTS = [
   { id: "bunny.git", artifact: "bunny.git-0.1.0.tar.zst" },
   { id: "bunny.pty", artifact: "bunny.pty-0.1.0.tar.zst" },
   { id: "bunny.fs", artifact: "bunny.fs-0.1.0.tar.zst" },
-  { id: "bunny.search", artifact: "bunny.search-0.1.0.tar.zst" },
   { id: "bunny.tsserver", artifact: "bunny.tsserver-0.1.0.tar.zst" },
   { id: "bunny.biome", artifact: "bunny.biome-0.1.0.tar.zst" },
   { id: "bunny.llama", artifact: "bunny.llama-0.1.0.tar.zst" },
@@ -4838,7 +4837,6 @@ const DEV_FOUNDATION_CARROTS = [
   { id: "bunny.git", directory: "git" },
   { id: "bunny.pty", directory: "pty" },
   { id: "bunny.fs", directory: "fs" },
-  { id: "bunny.search", directory: "search" },
   { id: "bunny.tsserver", directory: "tsserver" },
   { id: "bunny.biome", directory: "biome" },
   { id: "bunny.llama", directory: "llama" },
@@ -4946,6 +4944,7 @@ async function installFoundationCarrotsFromR2(channel: string, forceReinstall: b
 
 pruneLegacyPrototypeCarrots();
 uninstallInstalledCarrot("bunny-dash");
+uninstallInstalledCarrot("bunny.search");
 
 // In dev mode, rebuild carrots from source. In staging/prod, download pre-built artifacts.
 const channel = await Updater.localInfo.channel().catch(() => "dev");
