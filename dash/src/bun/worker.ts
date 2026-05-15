@@ -2750,6 +2750,46 @@ function getCurrentWindowUnsafe() {
   return runtimeWindows.find((window) => window.id === state.currentWindowId) || runtimeWindows[0] || null;
 }
 
+function ensureRuntimeWindowForHostWindow(windowId?: string) {
+  if (!windowId) {
+    return getCurrentWindowUnsafe();
+  }
+
+  const existing = runtimeWindows.find((window) => window.id === windowId);
+  if (existing) {
+    state.currentWindowId = windowId;
+    const lensId = getLensIdForWindow(existing);
+    if (lensId) {
+      state.currentLayoutId = lensId;
+    }
+    return existing;
+  }
+
+  const fallbackWorkspaceId =
+    getCurrentWorkspaceUnsafe()?.key ||
+    listVisibleLocalWorkspaces()[0]?.key ||
+    listWorkspaces()[0]?.key ||
+    "";
+  const preferredLens =
+    findLensByKey(state.currentLayoutId) ||
+    (fallbackWorkspaceId ? ensureWorkspaceCurrentLens(fallbackWorkspaceId) : null);
+
+  if (!preferredLens) {
+    return getCurrentWindowUnsafe();
+  }
+
+  const runtimeWindow = buildRuntimeWindowFromLens(preferredLens, windowId);
+  runtimeWindows = [
+    ...runtimeWindows.filter((candidate) => candidate.id !== runtimeWindow.id),
+    runtimeWindow,
+  ];
+  state.currentWindowId = runtimeWindow.id;
+  state.currentLayoutId = preferredLens.key;
+  ensureRuntimeState();
+  ensureBunnyWorkspaceWindow(runtimeWindow, preferredLens);
+  return runtimeWindow;
+}
+
 function getCurrentWorkspaceUnsafe() {
   const currentWindow = getCurrentWindowUnsafe();
   if (!currentWindow) {
@@ -4315,8 +4355,15 @@ async function handleBunnyDashRequest(method: string, params: any) {
       return { ok: true, overview: await getBunnyCloudOverview() };
     }
     case "getInitialState": {
+      const requestedWindowId =
+        typeof params?.__hostWindowId === "string" && params.__hostWindowId
+          ? params.__hostWindowId
+          : undefined;
+      const runtimeWindow = requestedWindowId
+        ? ensureRuntimeWindowForHostWindow(requestedWindowId)
+        : getCurrentWindow();
+      ensureBunnyWorkspaceWindow(runtimeWindow || getCurrentWindow());
       const workspace = currentBunnyWorkspace();
-      ensureBunnyWorkspaceWindow(getCurrentWindow());
       return {
         windowId: getCurrentWindow().id,
         buildVars: bunnyBuildVars(),
@@ -4580,7 +4627,15 @@ self.onmessage = async (event) => {
         break;
       }
       default: {
-        const payload = await handleBunnyDashRequest(String(message.method), message.params);
+        const payload = await handleBunnyDashRequest(
+          String(message.method),
+          typeof message.windowId === "string"
+            ? {
+                ...(message.params || {}),
+                __hostWindowId: message.windowId,
+              }
+            : message.params,
+        );
         if (payload === UNHANDLED_DASH_REQUEST) {
           post({
             type: "response",

@@ -55,7 +55,9 @@ import {
 	mergeAppSettingsForBoot,
 	mergeWorkspaceForBoot,
 	persistAppSettings,
+	persistLocalDashGraph,
 	persistWorkspaceState,
+	type PersistedLocalDashGraph,
 } from "./localStateDb";
 import { getHydratedInitialState } from "./init";
 import { buildDashHostCachePayloadFromState } from "./dashHostCache";
@@ -65,6 +67,7 @@ import {
 	buildLocalProjectsForWorkspace,
 	buildLocalWorkspaceForBoot,
 	buildRuntimeTemplateFromLiveWindow,
+	makeDefaultBunnyWindow,
 	pickLocalBootTarget,
 } from "./localBoot";
 import {
@@ -519,11 +522,142 @@ const getInitialState = () => {
 			{},
 		) || {};
 
+	const buildFallbackLocalGraph = (
+		hostBoot: Awaited<ReturnType<typeof getDashHostBootState>>,
+		persistedGraph: PersistedLocalDashGraph | null,
+	): PersistedLocalDashGraph => {
+		if (persistedGraph?.workspaces?.length && persistedGraph?.layouts?.length) {
+			return persistedGraph;
+		}
+
+		const workspaceId = hostBoot?.windowTarget?.workspaceId || "local-workspace";
+		const currentLensId =
+			hostBoot?.windowTarget?.lensId || `__workspace-current__:${workspaceId}`;
+		const workspaceName =
+			hostBoot?.dashCache?.workspaces?.find((workspace) => workspace.id === workspaceId)
+				?.name || "Local Workspace";
+		const lensName =
+			hostBoot?.dashCache?.workspaces
+				?.flatMap((workspace) => workspace.lenses)
+				?.find((lens) => lens.id === currentLensId)?.name || "Current";
+		const windowId = hostBoot?.windowId || "main";
+
+		return {
+			workspaces: [
+				{
+					key: workspaceId,
+					name: workspaceName,
+					subtitle: "Local workspace",
+					sortOrder: 0,
+				},
+			],
+			projectMounts: [],
+			layouts: [
+				{
+					key: currentLensId,
+					name: lensName,
+					description: `Current working state for ${workspaceName}.`,
+					workspaceId,
+					windowStateJson: JSON.stringify(makeDefaultBunnyWindow(windowId)),
+					sortOrder: 0,
+					windows: [
+						{
+							id: windowId,
+							title: `${workspaceName} · ${lensName}`,
+							workspaceId,
+							mainTabIds: ["workspace"],
+							sideTabIds: ["current-state"],
+							currentMainTabId: "workspace",
+							currentSideTabId: "current-state",
+						},
+					],
+				},
+			],
+		};
+	};
+
+	const buildFallbackHydratedState = async (
+		hostBoot: Awaited<ReturnType<typeof getDashHostBootState>> | null,
+		persistedAppSettings: any,
+		persistedGraph: PersistedLocalDashGraph | null,
+	) => {
+		if (!hostBoot) {
+			return null;
+		}
+
+		const fallbackGraph = buildFallbackLocalGraph(hostBoot, persistedGraph);
+		const target =
+			pickLocalBootTarget(fallbackGraph, hostBoot.windowId, hostBoot.windowTarget) || {
+				workspaceId: fallbackGraph.workspaces[0]?.key || "local-workspace",
+				lensId:
+					fallbackGraph.layouts[0]?.key ||
+					`__workspace-current__:${fallbackGraph.workspaces[0]?.key || "local-workspace"}`,
+				windowId: hostBoot.windowId,
+				activeTreeNodeId: `workspace-overview:${fallbackGraph.workspaces[0]?.key || "local-workspace"}`,
+			};
+		const persistedWorkspace = await loadPersistedWorkspaceState(target.workspaceId);
+		const nextWorkspace =
+			buildLocalWorkspaceForBoot(
+				fallbackGraph,
+				target.workspaceId,
+				target.lensId,
+				hostBoot.windowId,
+				persistedWorkspace,
+				hostBoot.windowTarget,
+			) || {
+				id: target.workspaceId,
+				name: fallbackGraph.workspaces[0]?.name || "Local Workspace",
+				color: "#184d8b",
+				windows: [makeDefaultBunnyWindow(hostBoot.windowId)],
+			};
+		const nextAppSettings = mergeAppSettingsForBoot(
+			state.appSettings,
+			null,
+			persistedAppSettings,
+		);
+		const nextBunnyDash = buildLocalBunnyDashPayload({
+			graph: fallbackGraph,
+			currentWorkspaceId: target.workspaceId,
+			currentLensId: target.lensId,
+			currentInstance: hostBoot.currentInstance,
+			cloudWorkspaces: hostBoot.dashCache?.cloudWorkspaces || [],
+			knownLocalProjects: hostBoot.dashCache?.knownLocalProjects || [],
+		});
+		const nextProjects = buildLocalProjectsForWorkspace(
+			fallbackGraph,
+			target.workspaceId,
+		);
+
+		try {
+			await Promise.all([
+				persistLocalDashGraph(fallbackGraph),
+				persistWorkspaceState(nextWorkspace as any),
+				persistAppSettings(nextAppSettings),
+			]);
+		} catch (error) {
+			console.warn("Failed to persist fallback local Dash state:", error);
+		}
+
+		return {
+			windowId: hostBoot.windowId,
+			buildVars: hostBoot.buildVars,
+			paths: hostBoot.paths,
+			peerDependencies: hostBoot.peerDependencies,
+			webBridgeOrigin: hostBoot.webBridgeOrigin || "",
+			workspace: nextWorkspace,
+			bunnyDash: nextBunnyDash,
+			projects: Object.values(nextProjects),
+			tokens: [],
+			appSettings: nextAppSettings,
+		};
+	};
+
 	const applyHydratedState = async ({
 		windowId,
 		buildVars,
 		paths,
 		peerDependencies,
+		webBridgeOrigin,
 		workspace,
 		bunnyDash,
 		projects,
@@ -534,6 +668,7 @@ const getInitialState = () => {
 		buildVars?: any;
 		paths?: any;
 		peerDependencies?: any;
+		webBridgeOrigin?: string;
 		workspace?: any;
 		bunnyDash?: any;
 		projects?: ProjectType[];
@@ -556,7 +691,7 @@ const getInitialState = () => {
 		}
 
 		const nextWorkspace = workspace
-			? mergeWorkspaceForBoot(workspace, persistedWorkspace)
+			? mergeWorkspaceForBoot(workspace, persistedWorkspace, windowId)
 			: state.workspace;
 		const nextAppSettings = mergeAppSettingsForBoot(
 			state.appSettings,
@@ -568,6 +703,7 @@ const getInitialState = () => {
 			buildVars: buildVars || state.buildVars,
 			paths: paths || state.paths,
 			peerDependencies: peerDependencies || state.peerDependencies,
+			webBridgeOrigin: webBridgeOrigin || state.webBridgeOrigin,
 			workspace: nextWorkspace,
 			bunnyDash: bunnyDash || state.bunnyDash,
 			projects: mapProjectsById(projects),
@@ -618,14 +754,6 @@ const getInitialState = () => {
 		);
 
 		if (!persistedGraph || !target) {
-			setState({
-				windowId: hostBoot.windowId,
-				buildVars: hostBoot.buildVars,
-				paths: hostBoot.paths,
-				peerDependencies: hostBoot.peerDependencies,
-				webBridgeOrigin: hostBoot.webBridgeOrigin || "",
-				appSettings: nextAppSettings,
-			});
 			return false;
 		}
 
@@ -656,11 +784,11 @@ const getInitialState = () => {
 		);
 
 		setState({
-			windowId: hostBoot.windowId,
-			buildVars: hostBoot.buildVars,
-			paths: hostBoot.paths,
-			peerDependencies: hostBoot.peerDependencies,
-			webBridgeOrigin: hostBoot.webBridgeOrigin || "",
+			windowId: hostBoot.windowId || state.windowId,
+			buildVars: hostBoot.buildVars ?? state.buildVars,
+			paths: hostBoot.paths ?? state.paths,
+			peerDependencies: hostBoot.peerDependencies ?? state.peerDependencies,
+			webBridgeOrigin: hostBoot.webBridgeOrigin ?? state.webBridgeOrigin,
 			workspace: nextWorkspace,
 			bunnyDash: nextBunnyDash as any,
 			projects: nextProjects,

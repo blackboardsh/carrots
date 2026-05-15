@@ -281,9 +281,45 @@ export function mergeAppSettingsForBoot(
 export function mergeWorkspaceForBoot(
   hostWorkspace: WorkspaceType,
   persistedWorkspace: WorkspaceType | null,
+  currentWindowId?: string,
 ): WorkspaceType {
   if (!persistedWorkspace) {
     return hostWorkspace;
+  }
+
+  const hasUsableWindowLayout = (window: WorkspaceType["windows"][number] | null | undefined) => {
+    return Boolean(
+      window &&
+        window.id &&
+        window.rootPane &&
+        typeof window.rootPane === "object" &&
+        "type" in window.rootPane &&
+        window.tabs &&
+        typeof window.tabs === "object" &&
+        Object.keys(window.tabs).length > 0 &&
+        window.currentPaneId,
+    );
+  };
+
+  const mergedWindows = new Map<string, WorkspaceType["windows"][number]>();
+
+  for (const window of persistedWorkspace.windows || []) {
+    if (!window?.id) {
+      continue;
+    }
+    mergedWindows.set(window.id, window);
+  }
+
+  for (const window of hostWorkspace.windows || []) {
+    if (!window?.id) {
+      continue;
+    }
+    const persistedWindow = mergedWindows.get(window.id);
+    const shouldPreferHostWindow =
+      window.id === currentWindowId || !hasUsableWindowLayout(persistedWindow);
+    if (shouldPreferHostWindow || !persistedWindow) {
+      mergedWindows.set(window.id, window);
+    }
   }
 
   return {
@@ -291,6 +327,10 @@ export function mergeWorkspaceForBoot(
     ...persistedWorkspace,
     id: hostWorkspace.id || persistedWorkspace.id,
     name: hostWorkspace.name || persistedWorkspace.name,
+    windows:
+      mergedWindows.size > 0
+        ? Array.from(mergedWindows.values())
+        : hostWorkspace.windows,
   };
 }
 

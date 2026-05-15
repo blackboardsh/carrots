@@ -106,7 +106,7 @@ const BunnyDash = () => {
 const Bun = () => {
   return (
     <div style={{ margin: "0 5px" }}>
-      Bun v{state.peerDependencies.bun.version}
+      Bun v{state.peerDependencies?.bun?.version || ""}
     </div>
   );
 };
@@ -114,7 +114,7 @@ const Bun = () => {
 const Typescript = () => {
   return (
     <div style={{ margin: "0 5px" }}>
-      Typescript v{state.peerDependencies.typescript.version}
+      Typescript v{state.peerDependencies?.typescript?.version || ""}
     </div>
   );
 };
@@ -122,7 +122,7 @@ const Typescript = () => {
 const Biome = () => {
   return (
     <div style={{ margin: "0 5px" }}>
-      Biome v{state.peerDependencies.biome.version}
+      Biome v{state.peerDependencies?.biome?.version || ""}
     </div>
   );
 };
@@ -134,7 +134,7 @@ const Git = (props: { onOpenSettings: () => void }) => {
       title="Open Git settings"
       onClick={props.onOpenSettings}
     >
-      Git v{state.peerDependencies.git.version}
+      Git v{state.peerDependencies?.git?.version || ""}
     </div>
   );
 };

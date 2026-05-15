@@ -1479,9 +1479,24 @@ class BunnyEarsRuntime {
   private getDashOpenWindowsSnapshotInfo() {
     const cachePath = this.getDashHostCachePath();
     const cache = this.loadDashHostCache();
+    const cachedWindows = Array.isArray(cache?.windows) ? cache.windows.length : 0;
+    if (cachedWindows > 0) {
+      return {
+        path: existsSync(cachePath) ? cachePath : null,
+        windowCount: cachedWindows,
+      };
+    }
+
+    const legacyWindows = this.loadLegacyDashWindowSummaries();
+    const legacyPath = this.carrots.get("bunny-dash")?.statePath || null;
     return {
-      path: existsSync(cachePath) ? cachePath : null,
-      windowCount: Array.isArray(cache?.windows) ? cache.windows.length : 0,
+      path:
+        legacyWindows.length > 0
+          ? legacyPath
+          : existsSync(cachePath)
+            ? cachePath
+            : null,
+      windowCount: legacyWindows.length,
     };
   }
 
@@ -1965,6 +1980,77 @@ class BunnyEarsRuntime {
   private getDashHostCachePath() {
     const path = require("node:path");
     return path.join(this.getChannelStateDir(), "dash-host-cache.json");
+  }
+
+  private loadLegacyDashWindowSummaries(): DashHostWindowCache[] {
+    const dashCarrot = this.carrots.get("bunny-dash");
+    const statePath = dashCarrot?.statePath;
+    if (!statePath || !existsSync(statePath)) {
+      return [];
+    }
+
+    try {
+      const parsed = JSON.parse(readFileSync(statePath, "utf8")) as {
+        currentState?: {
+          windows?: Array<{
+            id?: string;
+            title?: string;
+            workspaceId?: string;
+            lensId?: string;
+          }>;
+        };
+        sessionSnapshot?: {
+          windows?: Array<{
+            id?: string;
+            title?: string;
+            workspaceId?: string;
+            lensId?: string;
+          }>;
+        };
+        bunnyDash?: {
+          workspaces?: Record<
+            string,
+            {
+              windows?: Array<{
+                id?: string;
+                position?: {
+                  x?: number;
+                  y?: number;
+                  width?: number;
+                  height?: number;
+                };
+              }>;
+            }
+          >;
+        };
+      };
+
+      const windows = parsed.sessionSnapshot?.windows || parsed.currentState?.windows || [];
+      const positionedWindows = Object.values(parsed.bunnyDash?.workspaces || {}).flatMap(
+        (workspace) => workspace.windows || [],
+      );
+
+      return windows
+        .filter((window) => window && typeof window === "object" && window.id)
+        .map((window) => {
+          const positioned = positionedWindows.find((candidate) => candidate.id === window.id);
+          return {
+            windowId: String(window.id || ""),
+            title: String(window.title || "Dash"),
+            frame: {
+              x: Number(positioned?.position?.x || 120),
+              y: Number(positioned?.position?.y || 120),
+              width: Number(positioned?.position?.width || 1500),
+              height: Number(positioned?.position?.height || 900),
+            },
+            workspaceId: String(window.workspaceId || ""),
+            lensId: String(window.lensId || ""),
+            activeTreeNodeId: "",
+          };
+        });
+    } catch {
+      return [];
+    }
   }
 
   private loadDashHostCache(): DashHostSummaryCache | null {
@@ -3173,9 +3259,10 @@ class BunnyEarsRuntime {
       // Set dash as active menu owner so menu clicks route to it
       this.activeApplicationMenuOwnerId = dashCarrot.carrot.manifest.id;
       const dashCache = this.loadDashHostCache();
-      const cachedWindows = Array.isArray(dashCache?.windows)
-        ? dashCache.windows
-        : [];
+      const cachedWindows =
+        Array.isArray(dashCache?.windows) && dashCache.windows.length > 0
+          ? dashCache.windows
+          : this.loadLegacyDashWindowSummaries();
 
       if (dashCarrot.controllerWindows.size > 0) {
         const targetWindow =

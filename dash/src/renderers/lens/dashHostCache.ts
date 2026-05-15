@@ -80,6 +80,10 @@ export function buildDashHostCachePayloadFromState(
   const currentWindow =
     (state.workspace.windows || []).find((window) => window.id === state.windowId) || null;
 
+  if (!workspaceId || !lensId || !currentWindow || !state.workspace.windows?.length) {
+    return null;
+  }
+
   return {
     currentWorkspaceId: workspaceId,
     currentLensId: lensId,

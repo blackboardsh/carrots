@@ -176,15 +176,32 @@ export function buildLocalWorkspaceForBoot(
   persistedWorkspace: WorkspaceType | null,
   windowTarget?: DashHostWindowSummary | null,
 ): WorkspaceType | null {
+  const hasUsableWindowLayout = (window: WorkspaceType["windows"][number] | null | undefined) => {
+    return Boolean(
+      window &&
+        window.id &&
+        window.rootPane &&
+        typeof window.rootPane === "object" &&
+        "type" in window.rootPane &&
+        window.tabs &&
+        typeof window.tabs === "object" &&
+        Object.keys(window.tabs).length > 0 &&
+        window.currentPaneId,
+    );
+  };
+
   const workspace = graph.workspaces.find((item) => item.key === workspaceId);
   const lens = graph.layouts.find((item) => item.key === lensId);
   if (!workspace || !lens) {
     return null;
   }
 
-  const baseWindow =
-    persistedWorkspace?.windows?.find((window) => window.id === windowId) ||
-    parseWorkspaceWindowState(lens.windowStateJson, windowId);
+  const persistedWindow = persistedWorkspace?.windows?.find(
+    (window) => window.id === windowId,
+  );
+  const baseWindow = hasUsableWindowLayout(persistedWindow)
+    ? persistedWindow
+    : parseWorkspaceWindowState(lens.windowStateJson, windowId);
   if (windowTarget?.frame) {
     baseWindow.position = {
       ...baseWindow.position,

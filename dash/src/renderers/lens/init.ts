@@ -114,14 +114,31 @@ export async function persistLocalDashGraphFromWorker() {
 }
 
 export async function getHydratedInitialState() {
-  let response = await electrobun.rpc?.request.getInitialState();
+  let response;
+  try {
+    response = await electrobun.rpc?.request.getInitialState();
+  } catch (error) {
+    console.error("[dash boot] initial getInitialState failed", error);
+    throw error;
+  }
   if (!response) {
     return response;
   }
 
-  const hadPersistedGraph = await syncPersistedLocalGraphToWorker();
+  let hadPersistedGraph = false;
+  try {
+    hadPersistedGraph = await syncPersistedLocalGraphToWorker();
+  } catch (error) {
+    console.error("[dash boot] syncPersistedLocalGraphToWorker failed", error);
+    throw error;
+  }
   if (hadPersistedGraph) {
-    response = (await electrobun.rpc?.request.getInitialState()) || response;
+    try {
+      response = (await electrobun.rpc?.request.getInitialState()) || response;
+    } catch (error) {
+      console.error("[dash boot] second getInitialState failed", error);
+      throw error;
+    }
   }
 
   await persistLocalDashGraphFromWorker();
@@ -168,11 +185,11 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
       // },
       initState: ({ windowId, buildVars, paths, peerDependencies, webBridgeOrigin }) => {
         setState({
-          windowId,
-          buildVars,
-          paths,
-          peerDependencies,
-          webBridgeOrigin: webBridgeOrigin || "",
+          windowId: windowId || state.windowId,
+          buildVars: buildVars ?? state.buildVars,
+          paths: paths ?? state.paths,
+          peerDependencies: peerDependencies ?? state.peerDependencies,
+          webBridgeOrigin: webBridgeOrigin ?? state.webBridgeOrigin,
         });
       },
       updateStatus: (data) => {
