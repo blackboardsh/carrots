@@ -312,22 +312,14 @@ let runtimeChannel = "dev";
 let runtimeAuthToken: string | null = null;
 let runtimeWindows: LensWindow[] = [];
 const hostWindowIds = new Set<string>();
-const terminalWindowOwners = new Map<string, string>();
 const expandedFsDirs = new Set<string>();
 const framePersistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-let ptyHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 const LIVE_WINDOW_ID_SEPARATOR = "::";
 const WORKSPACE_CURRENT_LENS_PREFIX = "__workspace-current__:";
 const CLOUD_WORKSPACE_SHADOW_PREFIX = "__cloud_workspace__:";
 const CLOUD_LENS_SHADOW_PREFIX = "__cloud_lens__:";
-const PTY_CARROT_ID = "bunny.pty";
 const FS_CARROT_ID = "bunny.fs";
-const GIT_CARROT_ID = "bunny.git";
-const TSSERVER_CARROT_ID = "bunny.tsserver";
-const BIOME_CARROT_ID = "bunny.biome";
-const DEFAULT_PTY_HEARTBEAT_INTERVAL_MS = 60 * 1000;
-let ptyHeartbeatIntervalMs = DEFAULT_PTY_HEARTBEAT_INTERVAL_MS;
 let typeScriptPeerDependencyStatus: TypeScriptPeerDependencyStatus = {
   installed: false,
   version: "",
@@ -655,14 +647,6 @@ function post(message: unknown) {
   self.postMessage(message);
 }
 
-function parseDurationMs(value: unknown, fallback: number, minimum: number) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) {
-    return fallback;
-  }
-  return Math.max(minimum, parsed);
-}
-
 function ensureHostDashWindow(windowId = state.currentWindowId, title?: string) {
   const runtimeWindow = runtimeWindows.find((candidate) => candidate.id === windowId);
   if (!runtimeWindow) {
@@ -792,7 +776,6 @@ function initializeRuntimeContext(message?: {
     statePath?: string;
     authToken?: string | null;
     channel?: string;
-    config?: { ptyHeartbeatIntervalMs?: unknown };
   };
   manifest?: { version?: string };
 }) {
@@ -809,12 +792,6 @@ function initializeRuntimeContext(message?: {
   } else {
     runtimeAuthToken = app.authToken || runtimeAuthToken;
   }
-  ptyHeartbeatIntervalMs = parseDurationMs(
-    context?.config?.ptyHeartbeatIntervalMs ??
-      process.env.BUNNY_DASH_PTY_HEARTBEAT_INTERVAL_MS,
-    ptyHeartbeatIntervalMs,
-    1_000,
-  );
 }
 
 function ensureBootPromise() {
@@ -824,7 +801,7 @@ function ensureBootPromise() {
     }
     bootPromise = (async () => {
       await loadState();
-
+      
       // Initialize cloud API if logged in
       cloudApi = initCloudApi();
       if (cloudApi) {
@@ -834,10 +811,6 @@ function ensureBootPromise() {
 
       ensureRuntimeState();
       currentState = captureCurrentState();
-      ensurePtyHeartbeatLoop();
-      await refreshTypeScriptPeerDependencyStatus();
-      await refreshBiomePeerDependencyStatus();
-      await refreshGitPeerDependencyStatus();
       post({ type: "ready" });
       emitSnapshot();
       log("bunny dash worker initialized");
@@ -923,13 +896,6 @@ async function syncAuthFromEars() {
   broadcastAppSettings();
   emitSetProjects();
 }
-
-process.on("exit", () => {
-  if (ptyHeartbeatTimer) {
-    clearInterval(ptyHeartbeatTimer);
-    ptyHeartbeatTimer = null;
-  }
-});
 
 function flushDb() {
   const db = ensureDb() as any;
@@ -1560,166 +1526,12 @@ function emitViewMessage(name: string, payload?: unknown, windowId?: string) {
   post({ type: "action", action: "emit-view", payload: { name, payload, raw: true, windowId: targetWindowId } });
 }
 
-async function killTerminalSession(terminalId: string) {
-  if (!terminalId) {
-    return;
-  }
-
-  try {
-    await invokePtyCarrot<boolean>("killTerminal", {
-      terminalId,
-    });
-  } catch (error) {
-    log(
-      `failed to kill PTY terminal ${terminalId}: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-  } finally {
-    terminalWindowOwners.delete(terminalId);
-  }
-}
-
-async function killTerminalsForWindow(windowId: string) {
-  const terminalIds = Array.from(terminalWindowOwners.entries())
-    .filter(([, ownerWindowId]) => ownerWindowId === windowId)
-    .map(([terminalId]) => terminalId);
-
-  if (terminalIds.length === 0) {
-    return;
-  }
-
-  await Promise.all(terminalIds.map((terminalId) => killTerminalSession(terminalId)));
-  log(`killed ${terminalIds.length} PTY terminal(s) for window ${windowId}`);
-}
-
-async function invokePtyCarrot<T = unknown>(
-  method: string,
-  params?: unknown,
-  options?: { windowId?: string },
-) {
-  return Carrots.invoke<T>(PTY_CARROT_ID, method, params, options);
-}
-
 async function invokeFsCarrot<T = unknown>(
   method: string,
   params?: unknown,
   options?: { windowId?: string },
 ) {
   return Carrots.invoke<T>(FS_CARROT_ID, method, params, options);
-}
-
-async function invokeGitCarrot<T = unknown>(
-  method: string,
-  params?: unknown,
-  options?: { windowId?: string },
-) {
-  return Carrots.invoke<T>(GIT_CARROT_ID, method, params, options);
-}
-
-async function invokeTsServerCarrot<T = unknown>(
-  method: string,
-  params?: unknown,
-  options?: { windowId?: string },
-) {
-  return Carrots.invoke<T>(TSSERVER_CARROT_ID, method, params, options);
-}
-
-async function invokeBiomeCarrot<T = unknown>(
-  method: string,
-  params?: unknown,
-  options?: { windowId?: string },
-) {
-  return Carrots.invoke<T>(BIOME_CARROT_ID, method, params, options);
-}
-
-async function refreshTypeScriptPeerDependencyStatus() {
-  try {
-    const status = await invokeTsServerCarrot<TypeScriptPeerDependencyStatus>("getTypeScriptStatus");
-    typeScriptPeerDependencyStatus = {
-      installed: Boolean(status?.installed),
-      version: String(status?.version || ""),
-    };
-  } catch {
-    typeScriptPeerDependencyStatus = {
-      installed: false,
-      version: "",
-    };
-  }
-}
-
-async function refreshBiomePeerDependencyStatus() {
-  try {
-    const status = await invokeBiomeCarrot<BiomePeerDependencyStatus>("getBiomeStatus");
-    biomePeerDependencyStatus = {
-      installed: Boolean(status?.installed),
-      version: String(status?.version || ""),
-    };
-  } catch {
-    biomePeerDependencyStatus = {
-      installed: false,
-      version: "",
-    };
-  }
-}
-
-async function refreshGitPeerDependencyStatus() {
-  try {
-    const status = await invokeGitCarrot<{ installed: boolean; version: string }>("getGitStatus");
-    gitPeerDependencyStatus = {
-      installed: Boolean(status?.installed),
-      version: String(status?.version || ""),
-    };
-  } catch {
-    gitPeerDependencyStatus = {
-      installed: false,
-      version: "",
-    };
-  }
-}
-
-async function closeTsServerEditorsForWindow(windowId: string, workspaceId?: string) {
-  if (!windowId) {
-    return;
-  }
-
-  try {
-    await invokeTsServerCarrot(
-      "closeWindowEditors",
-      {
-        windowId,
-        workspaceId,
-      },
-      { windowId },
-    );
-  } catch {
-    // Ignore window-level cleanup failures here. Reopen paths will re-establish state.
-  }
-}
-
-async function heartbeatPtyTerminals() {
-  const terminalIds = Array.from(terminalWindowOwners.keys());
-  if (terminalIds.length === 0) {
-    return;
-  }
-
-  try {
-    await invokePtyCarrot<{ refreshedCount: number }>("heartbeatTerminals", {
-      terminalIds,
-    });
-  } catch {
-    // Ignore heartbeat failures here. Explicit terminal calls will still surface errors.
-  }
-}
-
-function ensurePtyHeartbeatLoop() {
-  if (ptyHeartbeatTimer) {
-    return;
-  }
-
-  ptyHeartbeatTimer = setInterval(() => {
-    void heartbeatPtyTerminals();
-  }, ptyHeartbeatIntervalMs);
 }
 
 function handleFsFileWatchEvent(payload: unknown) {
@@ -2691,8 +2503,6 @@ async function saveState() {
 async function handleHostWindowClosed(closedWindowId: string) {
   const closedRuntimeWindow = runtimeWindows.find((window) => window.id === closedWindowId);
   hostWindowIds.delete(closedWindowId);
-  await closeTsServerEditorsForWindow(closedWindowId, closedRuntimeWindow?.workspaceId);
-  await killTerminalsForWindow(closedWindowId);
   removeBunnyWindowFromAllWorkspaces(closedWindowId);
   runtimeWindows = runtimeWindows.filter((window) => window.id !== closedWindowId);
   const pendingPersist = framePersistTimers.get(closedWindowId);
@@ -2946,8 +2756,6 @@ async function restoreLensInCurrentWindow(lensId: string) {
     `restoreLensInCurrentWindow begin: ${lens.key} rootPane=${savedWindowState.rootPane.type} currentPane=${savedWindowState.currentPaneId}`,
   );
   const currentWindow = getCurrentWindow();
-  await closeTsServerEditorsForWindow(currentWindow.id, currentWindow.workspaceId);
-  await killTerminalsForWindow(currentWindow.id);
   const restoredWindow = buildRuntimeWindowFromLens(lens, currentWindow.id);
 
   currentWindow.title = restoredWindow.title;
@@ -3199,8 +3007,6 @@ async function deleteLens(lensId: string) {
   const affectedWindows = runtimeWindows.filter((window) => getLensIdForWindow(window) === lens.key);
 
   for (const runtimeWindow of affectedWindows) {
-    await closeTsServerEditorsForWindow(runtimeWindow.id, runtimeWindow.workspaceId);
-    await killTerminalsForWindow(runtimeWindow.id);
     const restoredWindow = buildRuntimeWindowFromLens(replacementLens, runtimeWindow.id);
     runtimeWindow.title = restoredWindow.title;
     runtimeWindow.lensId = restoredWindow.lensId;

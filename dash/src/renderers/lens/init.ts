@@ -935,6 +935,54 @@ export function invokeBiomeCarrot<T = unknown>(
 	return invokeCarrot<T>("bunny.biome", method, params, options);
 }
 
+export async function refreshPeerDependencies() {
+	const [typescriptResult, biomeResult, gitResult] = await Promise.allSettled([
+		invokeTsServerCarrot<{ installed?: boolean; version?: string }>(
+			"getTypeScriptStatus",
+			undefined,
+			{ windowId: state.windowId },
+		),
+		invokeBiomeCarrot<{ installed?: boolean; version?: string }>(
+			"getBiomeStatus",
+		),
+		invokeGitCarrot<{ installed?: boolean; version?: string }>("getGitStatus"),
+	]);
+
+	setState("peerDependencies", {
+		...state.peerDependencies,
+		typescript:
+			typescriptResult.status === "fulfilled"
+				? {
+						installed: Boolean(typescriptResult.value?.installed),
+						version: String(typescriptResult.value?.version || ""),
+					}
+				: {
+						installed: false,
+						version: "",
+					},
+		biome:
+			biomeResult.status === "fulfilled"
+				? {
+						installed: Boolean(biomeResult.value?.installed),
+						version: String(biomeResult.value?.version || ""),
+					}
+				: {
+						installed: false,
+						version: "",
+					},
+		git:
+			gitResult.status === "fulfilled"
+				? {
+						installed: Boolean(gitResult.value?.installed),
+						version: String(gitResult.value?.version || ""),
+					}
+				: {
+						installed: false,
+						version: "",
+					},
+	});
+}
+
 export function fsGetNode(path: string) {
 	return invokeFsCarrot("getNode", { path });
 }

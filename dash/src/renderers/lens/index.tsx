@@ -34,6 +34,7 @@ import {
 	scheduleDashHostCacheSync,
 	fsSafeDeleteFileOrFolder,
 	fsTouchFile,
+	refreshPeerDependencies,
 } from "./init";
 
 import {
@@ -843,6 +844,7 @@ const getInitialState = () => {
 					await applyHydratedState(hydrated);
 				}
 			}
+			void refreshPeerDependencies();
 		} catch (err) {
 			console.error("renderer getInitialState - error:", err);
 		}
