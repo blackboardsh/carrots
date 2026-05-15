@@ -22,7 +22,6 @@ import {
 	findAllInCurrentWorkspace,
 	cancelCurrentWorkspaceFindAll,
 	getFaviconForUrl,
-	getDashHostBootState,
 	fsGetNode,
 	fsRename,
 	fsExists,
@@ -35,6 +34,7 @@ import {
 	fsSafeDeleteFileOrFolder,
 	fsTouchFile,
 	refreshPeerDependencies,
+	syncProjectWatchersForCurrentState,
 } from "./init";
 
 import {
@@ -49,36 +49,20 @@ import {
 
 import { makeFileNameSafe } from "../../shared/utils/files";
 import "./index.css";
-import {
-	loadPersistedAppSettings,
-	loadPersistedLocalDashGraph,
-	loadPersistedWorkspaceState,
-	mergeAppSettingsForBoot,
-	mergeWorkspaceForBoot,
-	persistAppSettings,
-	persistLocalDashGraph,
-	persistWorkspaceState,
-	type PersistedLocalDashGraph,
-} from "./localStateDb";
-import { getHydratedInitialState } from "./init";
 import { buildDashHostCachePayloadFromState } from "./dashHostCache";
 import {
-	buildBootWindowTitle,
-	buildLocalBunnyDashPayload,
-	buildLocalProjectsForWorkspace,
-	buildLocalWorkspaceForBoot,
-	buildRuntimeTemplateFromLiveWindow,
-	makeDefaultBunnyWindow,
-	pickLocalBootTarget,
-} from "./localBoot";
-import {
 	addLocalProjectMount,
+	bootDashFrontendState,
 	createOrRenameLocalLens,
 	deleteCurrentLocalWorkspace,
 	editLocalProjectMount,
 	removeLocalProjectMount,
 	updateCurrentLocalWorkspaceName,
 } from "./localGraphActions";
+import {
+	createOrRenameCloudLens,
+	refreshCloudRuntimeState,
+} from "./cloudRuntime";
 import {
 	type AppState,
 	type FileTabType,
@@ -129,7 +113,6 @@ import type {
 	DomEventWithTarget,
 	FileNodeType,
 	PreviewFileTreeType,
-	ProjectType,
 	SlateType,
 } from "../../shared/types/types";
 
@@ -501,363 +484,44 @@ function createWebviewSyncBurst(durationMs = 250) {
 	return { start, stop };
 }
 
-const getInitialState = () => {
-	console.log("renderer getInitialState - making RPC call...");
-
-	if (!electrobun.rpc) {
-		console.log(
-			"renderer getInitialState - RPC not ready, retrying in 100ms...",
-		);
-		setTimeout(getInitialState, 100);
-		return;
+const bootDashFrontend = async () => {
+	try {
+		await bootDashFrontendState();
+		void refreshCloudRuntimeState({
+			currentWorkspaceId: state.bunnyDash.currentWorkspaceId,
+			currentLensId: state.bunnyDash.currentLensId,
+		});
+		void refreshPeerDependencies();
+	} catch (err) {
+		console.error("dash frontend boot error:", err);
 	}
-
-	const mapProjectsById = (projects?: ProjectType[]) =>
-		projects?.reduce(
-			(acc: Record<string, ProjectType>, project: ProjectType) => {
-				acc[project.id] = project;
-				return acc;
-			},
-			{},
-		) || {};
-
-	const buildFallbackLocalGraph = (
-		hostBoot: Awaited<ReturnType<typeof getDashHostBootState>>,
-		persistedGraph: PersistedLocalDashGraph | null,
-	): PersistedLocalDashGraph => {
-		if (persistedGraph?.workspaces?.length && persistedGraph?.layouts?.length) {
-			return persistedGraph;
-		}
-
-		const workspaceId = hostBoot?.windowTarget?.workspaceId || "local-workspace";
-		const currentLensId =
-			hostBoot?.windowTarget?.lensId || `__workspace-current__:${workspaceId}`;
-		const workspaceName =
-			hostBoot?.dashCache?.workspaces?.find((workspace) => workspace.id === workspaceId)
-				?.name || "Local Workspace";
-		const lensName =
-			hostBoot?.dashCache?.workspaces
-				?.flatMap((workspace) => workspace.lenses)
-				?.find((lens) => lens.id === currentLensId)?.name || "Current";
-		const windowId = hostBoot?.windowId || "main";
-
-		return {
-			workspaces: [
-				{
-					key: workspaceId,
-					name: workspaceName,
-					subtitle: "Local workspace",
-					sortOrder: 0,
-				},
-			],
-			projectMounts: [],
-			layouts: [
-				{
-					key: currentLensId,
-					name: lensName,
-					description: `Current working state for ${workspaceName}.`,
-					workspaceId,
-					windowStateJson: JSON.stringify(makeDefaultBunnyWindow(windowId)),
-					sortOrder: 0,
-					windows: [
-						{
-							id: windowId,
-							title: `${workspaceName} · ${lensName}`,
-							workspaceId,
-							mainTabIds: ["workspace"],
-							sideTabIds: ["current-state"],
-							currentMainTabId: "workspace",
-							currentSideTabId: "current-state",
-						},
-					],
-				},
-			],
-		};
-	};
-
-	const buildFallbackHydratedState = async (
-		hostBoot: Awaited<ReturnType<typeof getDashHostBootState>> | null,
-		persistedAppSettings: any,
-		persistedGraph: PersistedLocalDashGraph | null,
-	) => {
-		if (!hostBoot) {
-			return null;
-		}
-
-		const fallbackGraph = buildFallbackLocalGraph(hostBoot, persistedGraph);
-		const target =
-			pickLocalBootTarget(fallbackGraph, hostBoot.windowId, hostBoot.windowTarget) || {
-				workspaceId: fallbackGraph.workspaces[0]?.key || "local-workspace",
-				lensId:
-					fallbackGraph.layouts[0]?.key ||
-					`__workspace-current__:${fallbackGraph.workspaces[0]?.key || "local-workspace"}`,
-				windowId: hostBoot.windowId,
-				activeTreeNodeId: `workspace-overview:${fallbackGraph.workspaces[0]?.key || "local-workspace"}`,
-			};
-		const persistedWorkspace = await loadPersistedWorkspaceState(target.workspaceId);
-		const nextWorkspace =
-			buildLocalWorkspaceForBoot(
-				fallbackGraph,
-				target.workspaceId,
-				target.lensId,
-				hostBoot.windowId,
-				persistedWorkspace,
-				hostBoot.windowTarget,
-			) || {
-				id: target.workspaceId,
-				name: fallbackGraph.workspaces[0]?.name || "Local Workspace",
-				color: "#184d8b",
-				windows: [makeDefaultBunnyWindow(hostBoot.windowId)],
-			};
-		const nextAppSettings = mergeAppSettingsForBoot(
-			state.appSettings,
-			null,
-			persistedAppSettings,
-		);
-		const nextBunnyDash = buildLocalBunnyDashPayload({
-			graph: fallbackGraph,
-			currentWorkspaceId: target.workspaceId,
-			currentLensId: target.lensId,
-			currentInstance: hostBoot.currentInstance,
-			cloudWorkspaces: hostBoot.dashCache?.cloudWorkspaces || [],
-			knownLocalProjects: hostBoot.dashCache?.knownLocalProjects || [],
-		});
-		const nextProjects = buildLocalProjectsForWorkspace(
-			fallbackGraph,
-			target.workspaceId,
-		);
-
-		try {
-			await Promise.all([
-				persistLocalDashGraph(fallbackGraph),
-				persistWorkspaceState(nextWorkspace as any),
-				persistAppSettings(nextAppSettings),
-			]);
-		} catch (error) {
-			console.warn("Failed to persist fallback local Dash state:", error);
-		}
-
-		return {
-			windowId: hostBoot.windowId,
-			buildVars: hostBoot.buildVars,
-			paths: hostBoot.paths,
-			peerDependencies: hostBoot.peerDependencies,
-			webBridgeOrigin: hostBoot.webBridgeOrigin || "",
-			workspace: nextWorkspace,
-			bunnyDash: nextBunnyDash,
-			projects: Object.values(nextProjects),
-			tokens: [],
-			appSettings: nextAppSettings,
-		};
-	};
-
-	const applyHydratedState = async ({
-		windowId,
-		buildVars,
-		paths,
-		peerDependencies,
-		webBridgeOrigin,
-		workspace,
-		bunnyDash,
-		projects,
-		tokens,
-		appSettings,
-	}: {
-		windowId?: string;
-		buildVars?: any;
-		paths?: any;
-		peerDependencies?: any;
-		webBridgeOrigin?: string;
-		workspace?: any;
-		bunnyDash?: any;
-		projects?: ProjectType[];
-		tokens?: any[];
-		appSettings?: any;
-	}) => {
-		console.log(
-			"renderer getInitialState - received appSettings:",
-			appSettings,
-		);
-		let persistedWorkspace = null;
-		let persistedAppSettings = null;
-		try {
-			[persistedWorkspace, persistedAppSettings] = await Promise.all([
-				loadPersistedWorkspaceState(workspace?.id || ""),
-				loadPersistedAppSettings(),
-			]);
-		} catch (error) {
-			console.warn("Failed to load local Dash state from IndexedDB:", error);
-		}
-
-		const nextWorkspace = workspace
-			? mergeWorkspaceForBoot(workspace, persistedWorkspace, windowId)
-			: state.workspace;
-		const nextAppSettings = mergeAppSettingsForBoot(
-			state.appSettings,
-			appSettings,
-			persistedAppSettings,
-		);
-		setState({
-			windowId: windowId || state.windowId,
-			buildVars: buildVars || state.buildVars,
-			paths: paths || state.paths,
-			peerDependencies: peerDependencies || state.peerDependencies,
-			webBridgeOrigin: webBridgeOrigin || state.webBridgeOrigin,
-			workspace: nextWorkspace,
-			bunnyDash: bunnyDash || state.bunnyDash,
-			projects: mapProjectsById(projects),
-			tokens: Array.isArray(tokens) ? tokens : state.tokens,
-			appSettings: nextAppSettings,
-		});
-
-		try {
-			await persistWorkspaceState(nextWorkspace);
-			await persistAppSettings(nextAppSettings);
-		} catch (error) {
-			console.warn("Failed to persist initial local Dash state:", error);
-		}
-
-		if (persistedWorkspace) {
-			await electrobun.rpc?.request.syncWorkspace({
-				workspace: nextWorkspace,
-			});
-		}
-
-		if (persistedAppSettings) {
-			await electrobun.rpc?.request.syncAppSettings({
-				appSettings: nextAppSettings,
-			});
-		}
-	};
-
-	const bootFromLocalPersistence = async () => {
-		const [hostBoot, persistedGraph, persistedAppSettings] = await Promise.all([
-			getDashHostBootState().catch(() => null),
-			loadPersistedLocalDashGraph().catch(() => null),
-			loadPersistedAppSettings().catch(() => null),
-		]);
-
-		if (!hostBoot) {
-			return false;
-		}
-
-		const nextAppSettings = mergeAppSettingsForBoot(
-			state.appSettings,
-			null,
-			persistedAppSettings,
-		);
-		const target = pickLocalBootTarget(
-			persistedGraph,
-			hostBoot.windowId,
-			hostBoot.windowTarget,
-		);
-
-		if (!persistedGraph || !target) {
-			return false;
-		}
-
-		const persistedWorkspace = await loadPersistedWorkspaceState(target.workspaceId);
-		const nextWorkspace = buildLocalWorkspaceForBoot(
-			persistedGraph,
-			target.workspaceId,
-			target.lensId,
-			hostBoot.windowId,
-			persistedWorkspace,
-			hostBoot.windowTarget,
-		);
-		if (!nextWorkspace) {
-			return false;
-		}
-
-		const nextBunnyDash = buildLocalBunnyDashPayload({
-			graph: persistedGraph,
-			currentWorkspaceId: target.workspaceId,
-			currentLensId: target.lensId,
-			currentInstance: hostBoot.currentInstance,
-			cloudWorkspaces: hostBoot.dashCache?.cloudWorkspaces || [],
-			knownLocalProjects: hostBoot.dashCache?.knownLocalProjects || [],
-		});
-		const nextProjects = buildLocalProjectsForWorkspace(
-			persistedGraph,
-			target.workspaceId,
-		);
-
-		setState({
-			windowId: hostBoot.windowId || state.windowId,
-			buildVars: hostBoot.buildVars ?? state.buildVars,
-			paths: hostBoot.paths ?? state.paths,
-			peerDependencies: hostBoot.peerDependencies ?? state.peerDependencies,
-			webBridgeOrigin: hostBoot.webBridgeOrigin ?? state.webBridgeOrigin,
-			workspace: nextWorkspace,
-			bunnyDash: nextBunnyDash as any,
-			projects: nextProjects,
-			tokens: [],
-			appSettings: nextAppSettings,
-		});
-
-		try {
-			await persistWorkspaceState(nextWorkspace);
-			await persistAppSettings(nextAppSettings);
-		} catch (error) {
-			console.warn("Failed to persist local boot state:", error);
-		}
-
-		const currentWindow =
-			nextWorkspace.windows.find((window) => window.id === hostBoot.windowId) ||
-			nextWorkspace.windows[0];
-		if (currentWindow) {
-			try {
-				await electrobun.rpc?.request.syncWorkspace({
-					workspace: nextWorkspace,
-				});
-				await electrobun.rpc?.request.syncLocalCurrentWindow({
-					workspaceId: target.workspaceId,
-					lensId: target.lensId,
-					windowId: hostBoot.windowId,
-					activeTreeNodeId: target.activeTreeNodeId,
-					window: buildRuntimeTemplateFromLiveWindow(
-						currentWindow,
-						hostBoot.windowId,
-						target.workspaceId,
-						buildBootWindowTitle(
-							persistedGraph,
-							target.workspaceId,
-							target.lensId,
-							hostBoot.windowTarget?.title,
-						),
-					),
-				});
-			} catch (error) {
-				console.warn("Failed to sync local boot state to Dash worker:", error);
-			}
-		}
-
-		return true;
-	};
-
-	void (async () => {
-		try {
-			const bootedLocally = await bootFromLocalPersistence();
-			if (!bootedLocally) {
-				const hydrated = await getHydratedInitialState();
-				if (hydrated) {
-					await applyHydratedState(hydrated);
-				}
-			}
-			void refreshPeerDependencies();
-		} catch (err) {
-			console.error("renderer getInitialState - error:", err);
-		}
-	})();
 };
 
-console.log("🔵 DEBUG: About to call getInitialState");
-getInitialState();
+const handleRefreshDashFrontendState = () => {
+	void bootDashFrontend();
+};
+
+window.addEventListener("refreshDashFrontendState", handleRefreshDashFrontendState);
+void bootDashFrontend();
 
 const App = () => {
 	createEffect(() => {
 		const payload = buildDashHostCachePayloadFromState(state);
 		scheduleDashHostCacheSync(payload);
+	});
+
+	createEffect(() => {
+		const workspaceId = state.bunnyDash.currentWorkspaceId || state.workspace.id || "";
+		const projectSignature = Object.values(state.projects || {})
+			.map((project) => `${project.id}:${project.path}`)
+			.sort()
+			.join("|");
+		if (!workspaceId && !projectSignature) {
+			return;
+		}
+		void syncProjectWatchersForCurrentState().catch((error) => {
+			console.warn("Failed to sync project watchers from Dash frontend:", error);
+		});
 	});
 
 	// electrobun;
@@ -1503,45 +1167,9 @@ const LensSettings = () => {
 	let inputDescriptionRef: HTMLTextAreaElement | undefined;
 
 	const applyInitialState = async () => {
-		const response = await getHydratedInitialState();
-		if (!response) {
-			return;
-		}
-
-		const {
-			windowId,
-			buildVars,
-			paths,
-			webBridgeOrigin,
-			peerDependencies,
-			workspace,
-			bunnyDash,
-			projects,
-			tokens,
-			appSettings,
-		} = response;
-
-		const projectsById = projects?.reduce(
-			(acc: Record<string, ProjectType>, project: ProjectType) => {
-				acc[project.id] = project;
-				return acc;
-			},
-			{},
-		);
-
-		setState({
-			windowId,
-			buildVars,
-			paths,
-			webBridgeOrigin: webBridgeOrigin || "",
-			peerDependencies,
-			workspace,
-			bunnyDash,
-			projects: projectsById,
-			tokens,
-			appSettings: appSettings
-				? { ...state.appSettings, ...appSettings }
-				: state.appSettings,
+		await refreshCloudRuntimeState({
+			currentWorkspaceId: state.bunnyDash.currentWorkspaceId,
+			currentLensId: state.bunnyDash.currentLensId,
 		});
 	};
 
@@ -1576,20 +1204,17 @@ const LensSettings = () => {
 				return;
 			}
 
-			let needsWorkerRefresh = false;
-
 			if (data.mode === "create") {
 				if (data.workspaceId.startsWith("__cloud_workspace__:")) {
 					if (data.workspaceId === state.bunnyDash.currentWorkspaceId) {
 						await syncWorkspaceNow();
 					}
-					await electrobun.rpc?.request.createLens({
+					await createOrRenameCloudLens({
 						workspaceId: data.workspaceId,
 						name: nextName,
 						description: nextDescription,
 						sourceLensId: data.sourceLensId,
 					});
-					needsWorkerRefresh = true;
 				} else {
 					if (data.workspaceId === state.bunnyDash.currentWorkspaceId) {
 						await syncWorkspaceNow();
@@ -1603,12 +1228,12 @@ const LensSettings = () => {
 				}
 			} else if (data.lensId) {
 				if (data.lensId.startsWith("__cloud_lens__:")) {
-					await electrobun.rpc?.request.renameLens({
+					await createOrRenameCloudLens({
+						workspaceId: data.workspaceId,
 						lensId: data.lensId,
 						name: nextName,
 						description: nextDescription,
 					});
-					needsWorkerRefresh = true;
 				} else {
 					await createOrRenameLocalLens({
 						workspaceId: data.workspaceId,
@@ -1619,9 +1244,7 @@ const LensSettings = () => {
 				}
 			}
 
-			if (needsWorkerRefresh) {
-				await applyInitialState();
-			}
+			await applyInitialState();
 			setState("settingsPane", { type: "", data: {} });
 		})();
 	};

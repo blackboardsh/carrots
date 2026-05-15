@@ -28,12 +28,6 @@ import type {
 
 import { getNode } from "./FileWatcher";
 import {
-	mergeAppSettingsForBoot,
-	persistAppSettings,
-	persistWorkspaceState,
-} from "./localStateDb";
-
-import {
 	type AppState,
 	type BunnyDashCloudProjectMountType,
 	type BunnyDashKnownLocalProjectType,
@@ -50,6 +44,7 @@ import {
 	setNodeExpanded,
 	setState,
 	state,
+	syncWorkspaceNow,
 	updateSyncedState,
 	removeOpenFile,
 	openNewTab,
@@ -63,16 +58,20 @@ import {
 	openLocalWorkspaceInNewWindow,
 	overwriteCurrentLocalLens,
 } from "./localGraphActions";
+import {
+	openCloudLens as switchCloudLens,
+	openCloudWorkspace as switchCloudWorkspace,
+	overwriteCurrentCloudLens,
+} from "./cloudRuntime";
 
 import {
-	electrobun,
 	copyTextToClipboard,
+	createNewProjectPreviewNode,
 	createSpecialFileForNode,
 	fsSafeDeleteFileOrFolder,
 	hostShowInFinder,
 	invokeGitCarrot,
 	getUniqueLensNameFromState,
-	getHydratedInitialState,
 	fsGetUniqueNewName,
 	fsMkdir,
 	fsWriteFile,
@@ -154,60 +153,9 @@ const makeSafeSerializer = () => {
 			seen.add(value);
 		}
 
-		return value;
+	return value;
 	};
 };
-
-async function refreshDashStateFromWorker() {
-	const nextState = await getHydratedInitialState();
-	if (!nextState) {
-		return;
-	}
-
-	const payload = nextState as {
-		windowId?: string;
-		workspace?: unknown;
-		bunnyDash?: unknown;
-		projects?: Array<{ id: string }>;
-		tokens?: unknown[];
-		appSettings?: Record<string, unknown>;
-	};
-
-	const projectsById = Array.isArray(payload.projects)
-		? payload.projects.reduce((acc: Record<string, any>, project: any) => {
-				if (project?.id) {
-					acc[project.id] = project;
-				}
-				return acc;
-			}, {})
-		: {};
-
-	if (payload.windowId) {
-		setState("windowId", payload.windowId);
-	}
-	if (payload.workspace) {
-		setState("workspace", payload.workspace as any);
-		persistWorkspaceState(payload.workspace as any).catch((error) => {
-			console.warn("Failed to persist workspace locally:", error);
-		});
-	}
-	if (payload.bunnyDash) {
-		setState("bunnyDash", payload.bunnyDash as any);
-	}
-	setState("projects", projectsById);
-	setState("tokens", Array.isArray(payload.tokens) ? payload.tokens : []);
-	if (payload.appSettings) {
-		const nextAppSettings = mergeAppSettingsForBoot(
-			state.appSettings,
-			payload.appSettings as any,
-			null,
-		);
-		setState("appSettings", nextAppSettings);
-		persistAppSettings(nextAppSettings).catch((error) => {
-			console.warn("Failed to persist app settings locally:", error);
-		});
-	}
-}
 
 function dispatchWindowTransition(name: "begin" | "end", label?: string) {
 	if (name === "begin") {
@@ -378,8 +326,7 @@ const CategoryRow = ({
 					onMouseEnter={() => setIsAddButtonHovered(true)}
 					onMouseLeave={() => setIsAddButtonHovered(false)}
 					onClick={() => {
-						electrobun.rpc?.request
-							.newPreviewNode({ candidateName: "new-project" })
+						createNewProjectPreviewNode("new-project")
 							.then((newNode) => {
 								// Add project slate to the preview node so it's recognized as a project
 								const projectPreviewNode = {
@@ -923,8 +870,7 @@ export const ProjectsTree = () => {
 										<div
 											onClick={(e) => {
 												e.stopPropagation();
-												electrobun.rpc?.request
-													.newPreviewNode({ candidateName: "new-project" })
+												createNewProjectPreviewNode("new-project")
 													.then((newNode: any) => {
 														setState("settingsPane", {
 															type: "add-node",
@@ -1642,10 +1588,7 @@ export const CloudWorkspacesTree = () => {
 	const openCloudWorkspace = async (workspace: BunnyDashCloudWorkspaceTreeType) => {
 		await runInWindowTransition(workspace.name, async () => {
 			await syncWorkspaceNow();
-			await electrobun.rpc?.request.openWorkspace({
-				workspaceId: workspace.runtimeWorkspaceId,
-			});
-			await refreshDashStateFromWorker();
+			await switchCloudWorkspace(workspace.runtimeWorkspaceId);
 		});
 	};
 
@@ -1656,8 +1599,7 @@ export const CloudWorkspacesTree = () => {
 		const label = `${workspace.name} · ${lens.name}`;
 		await runInWindowTransition(label, async () => {
 			await syncWorkspaceNow();
-			await electrobun.rpc?.request.openLens({ lensId: lens.runtimeLensId });
-			await refreshDashStateFromWorker();
+			await switchCloudLens(lens.runtimeLensId);
 		});
 	};
 
@@ -1677,8 +1619,7 @@ export const CloudWorkspacesTree = () => {
 
 	const overwriteCurrentLens = async () => {
 		await syncWorkspaceNow();
-		await electrobun.rpc?.request.overwriteCurrentLens();
-		await refreshDashStateFromWorker();
+		await overwriteCurrentCloudLens();
 	};
 
 	return (

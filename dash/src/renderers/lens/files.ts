@@ -10,7 +10,7 @@ import {
   type CachedFileType,
   type FolderNodeType,
 } from "../../shared/types/types";
-import { fsWriteFile } from "./init";
+import { fsReadSlateConfigFile, fsWriteFile } from "./init";
 
 // const HOME_DIRECTORY = homedir();
 // const BUNNY_DIRECTORY = join(HOME_DIRECTORY, "bunny");
@@ -399,7 +399,7 @@ export const getSlateForNode = (
 // Note: this can be used to read and cache any slate config file .bunny.json, package.json, etc.
 // currently only supports json files
 export const readSlateConfigFile = (path: string, cacheResult = true) => {
-  electrobun.rpc?.request.readSlateConfigFile({ path }).then((slate) => {
+  fsReadSlateConfigFile(path).then((slate) => {
     if (slate && cacheResult) {
       setState("slateCache", path, slate);
     }

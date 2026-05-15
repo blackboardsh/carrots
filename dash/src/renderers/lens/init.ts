@@ -31,11 +31,7 @@ import { registerBunnyTerminal } from "../components/BunnyTerminal";
 import { registerDashDiffEditor } from "../components/DashDiffEditor";
 import {
   mergeAppSettingsForBoot,
-  mergeWorkspaceForBoot,
-  loadPersistedAppSettings,
-  loadPersistedWorkspaceState,
   persistAppSettings,
-  persistWorkspaceState,
 } from "./localStateDb";
 import type {
   DashHostBootState,
@@ -231,12 +227,32 @@ export async function copyTextToClipboard(text: string) {
 	}
 }
 
-export async function getHydratedInitialState() {
-  return electrobun.rpc?.request.getInitialState();
-}
-
 export function getDashHostBootState() {
   return electrobun.rpc?.request.getDashHostBootState() as Promise<DashHostBootState | undefined>;
+}
+
+export async function createNewProjectPreviewNode(candidateName = "new-project") {
+  const parentPath = state.paths?.BUNNY_PROJECTS_FOLDER || "";
+  if (!parentPath) {
+    throw new Error("Bunny projects folder is unavailable in this view");
+  }
+
+  const nodeName = await fsGetUniqueNewName(parentPath, candidateName);
+  return {
+    type: "dir" as const,
+    name: nodeName,
+    path: join(parentPath, nodeName),
+    previewChildren: [],
+    isExpanded: false,
+    slate: {
+      v: 1 as const,
+      name: "",
+      url: "",
+      icon: "",
+      type: "project" as const,
+      config: {},
+    },
+  };
 }
 
 let pendingDashHostCacheTimer: ReturnType<typeof setTimeout> | null = null;
@@ -296,57 +312,18 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
           persistAppSettings(nextAppSettings).catch((error) => {
             console.warn("Failed to persist app settings locally:", error);
           });
+          window.dispatchEvent(new CustomEvent("refreshDashFrontendState"));
         }
       },
-      setProjects: ({ projects, tokens, workspace, appSettings, bunnyDash }) => {
-        // TODO: [blocking] make this a util, maybe in goldfish
-        console.log("setProjects", { projects, tokens, workspace, appSettings });
+      setProjects: ({ projects }) => {
         const projectsById = projects?.reduce(
           (acc: Record<string, ProjectType>, project: ProjectType) => {
             acc[project.id] = project;
-            // buildFileTree(project.path, true)
             return acc;
           },
           {}
         );
-
-        // todo (yoav): [blocking] if we used a flatmap tree
-        // then we wouldn't need to rebuild the whole tree
-        // for open tabs, we could just create a node
-        // for the tab directly if the file exists
-
-        // todo (yoav): [blocking] make this a util and core part of Bunny Dash
-        // todo (yoav): [blocking] what stuff is actually synced with the server and what is just local to the window and ephemeral
-        const activeWindow = workspace?.windows?.find(
-          (window: { id: string; rootPane?: { type?: string }; currentPaneId?: string }) =>
-            window.id === state.windowId,
-        );
-        console.log("[bunny-dash] setProjects applying workspace state", {
-          windowId: state.windowId,
-          rootPaneType: activeWindow?.rootPane?.type,
-          currentPaneId: activeWindow?.currentPaneId,
-        });
-
-	        setState("workspace", workspace);
-	        setState("bunnyDash", bunnyDash);
-	        setState("projects", projectsById || {});
-	        setState("tokens", tokens || []);
-	        if (appSettings) {
-	          const nextAppSettings = mergeAppSettingsForBoot(
-	            state.appSettings,
-	            appSettings,
-	            null,
-	          );
-	          setState("appSettings", nextAppSettings);
-	          persistAppSettings(nextAppSettings).catch((error) => {
-	            console.warn("Failed to persist app settings locally:", error);
-	          });
-	        }
-          persistWorkspaceState(workspace).catch((error) => {
-            console.warn("Failed to persist workspace locally:", error);
-          });
-
-        console.log("projects", state.projects);
+        setState("projects", projectsById || {});
       },
       fileWatchEvent: async ({
         absolutePath,
@@ -549,84 +526,7 @@ const rpc = Electroview.defineRPC<WorkspaceRPC>({
         });
       },
       refreshBunnyDashState: async () => {
-        const response = await getHydratedInitialState();
-        if (!response) {
-          return;
-        }
-
-        const {
-          windowId,
-          buildVars,
-          paths,
-          webBridgeOrigin,
-          peerDependencies,
-          workspace,
-          bunnyDash,
-          projects,
-          tokens,
-          appSettings,
-        } = response;
-
-        let persistedWorkspace = null;
-        let persistedAppSettings = null;
-        try {
-          [persistedWorkspace, persistedAppSettings] = await Promise.all([
-            loadPersistedWorkspaceState(workspace?.id || ""),
-            loadPersistedAppSettings(),
-          ]);
-        } catch (error) {
-          console.warn("Failed to refresh local Dash state from IndexedDB:", error);
-        }
-
-        const projectsById = projects?.reduce(
-          (acc: Record<string, ProjectType>, project: ProjectType) => {
-            acc[project.id] = project;
-            return acc;
-          },
-          {},
-        );
-
-        const nextWorkspace = mergeWorkspaceForBoot(
-          workspace,
-          persistedWorkspace,
-        );
-        const nextAppSettings = mergeAppSettingsForBoot(
-          state.appSettings,
-          appSettings,
-          persistedAppSettings,
-        );
-
-        setState({
-          windowId,
-          buildVars,
-          paths,
-          webBridgeOrigin: webBridgeOrigin || "",
-          peerDependencies,
-          workspace: nextWorkspace,
-          bunnyDash,
-          projects: projectsById || {},
-          tokens: tokens || [],
-          appSettings: nextAppSettings,
-        });
-
-        try {
-          await persistWorkspaceState(nextWorkspace);
-          await persistAppSettings(nextAppSettings);
-        } catch (error) {
-          console.warn("Failed to persist refreshed local Dash state:", error);
-        }
-
-        if (persistedWorkspace) {
-          await electrobun.rpc?.request.syncWorkspace({
-            workspace: nextWorkspace,
-          });
-        }
-
-        if (persistedAppSettings) {
-          await electrobun.rpc?.request.syncAppSettings({
-            appSettings: nextAppSettings,
-          });
-        }
+        window.dispatchEvent(new CustomEvent("refreshDashFrontendState"));
       },
       showNodeSettings: ({ nodePath }) => {
         const node = getNode(nodePath);
@@ -1122,6 +1022,23 @@ export function cancelCurrentWorkspaceFindAll() {
 		"bunny.fs",
 		"cancelFindAll",
 		{},
+		{ windowId: state.windowId },
+	);
+}
+
+export function syncProjectWatchersForCurrentState() {
+	const projects = Object.values(state.projects || {})
+		.filter((project) => Boolean(project?.id && project?.path))
+		.map((project) => ({
+			watchId: String(project.id),
+			workspaceId: String(state.bunnyDash.currentWorkspaceId || state.workspace.id || ""),
+			path: String(project.path),
+		}));
+
+	return invokeCarrot<boolean>(
+		"bunny.fs",
+		"syncProjectWatchers",
+		{ projects },
 		{ windowId: state.windowId },
 	);
 }

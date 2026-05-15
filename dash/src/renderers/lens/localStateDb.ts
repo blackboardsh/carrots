@@ -49,12 +49,41 @@ const localDashStateSchema2 = schema({
   },
 });
 
-type LocalDashStateDocumentTypes = SchemaToDocumentTypes<typeof localDashStateSchema2>;
-type LocalDashStateDb = DB<typeof localDashStateSchema2>;
+const localDashStateSchema3 = schema({
+  v: 3,
+  stores: {
+    workspaces: collection({
+      key: string({ required: true, internal: false }),
+      name: string({ required: true, internal: false }),
+      color: string({ required: true, internal: false }),
+      workspaceJson: string({ required: true, internal: false }),
+      updatedAt: number({ required: true, internal: false }),
+    }),
+    appSettings: collection({
+      key: string({ required: true, internal: false }),
+      settingsJson: string({ required: true, internal: false }),
+      updatedAt: number({ required: true, internal: false }),
+    }),
+    localGraph: collection({
+      key: string({ required: true, internal: false }),
+      graphJson: string({ required: true, internal: false }),
+      updatedAt: number({ required: true, internal: false }),
+    }),
+    tokens: collection({
+      key: string({ required: true, internal: false }),
+      tokensJson: string({ required: true, internal: false }),
+      updatedAt: number({ required: true, internal: false }),
+    }),
+  },
+});
+
+type LocalDashStateDocumentTypes = SchemaToDocumentTypes<typeof localDashStateSchema3>;
+type LocalDashStateDb = DB<typeof localDashStateSchema3>;
 
 const LOCAL_DASH_DB_NAME = "bunny-dash-local-state";
 const APP_SETTINGS_KEY = "primary";
 const LOCAL_GRAPH_KEY = "primary";
+const TOKENS_KEY = "primary";
 
 export type PersistedLocalDashGraph = {
   workspaces: Array<{
@@ -105,10 +134,11 @@ function safeParseJson<T>(value: string, fallback: T): T {
 
 async function getLocalDashDb(): Promise<LocalDashStateDb> {
   if (!localDashDbPromise) {
-    localDashDbPromise = new DB<typeof localDashStateSchema2>().initAsync({
+    localDashDbPromise = new DB<typeof localDashStateSchema3>().initAsync({
       schemaHistory: [
         { v: 1, schema: localDashStateSchema1, migrationSteps: false },
         { v: 2, schema: localDashStateSchema2, migrationSteps: false },
+        { v: 3, schema: localDashStateSchema3, migrationSteps: false },
       ],
       engine: "indexeddb",
       db_name: LOCAL_DASH_DB_NAME,
@@ -147,6 +177,17 @@ function getLocalGraphDoc(
   return (
     db.collection("localGraph").query({
       where: (item) => item.key === LOCAL_GRAPH_KEY,
+      limit: 1,
+    }).data?.[0] || null
+  );
+}
+
+function getTokensDoc(
+  db: LocalDashStateDb,
+): LocalDashStateDocumentTypes["tokens"] | null {
+  return (
+    db.collection("tokens").query({
+      where: (item) => item.key === TOKENS_KEY,
       limit: 1,
     }).data?.[0] || null
   );
@@ -251,6 +292,32 @@ export async function persistLocalDashGraph(
     db.collection("localGraph").update(existing.id, payload);
   } else {
     db.collection("localGraph").insert(payload);
+  }
+}
+
+export async function loadPersistedTokens(): Promise<any[]> {
+  const db = await getLocalDashDb();
+  const doc = getTokensDoc(db);
+  if (!doc?.tokensJson) {
+    return [];
+  }
+
+  return safeParseJson<any[]>(doc.tokensJson, []);
+}
+
+export async function persistTokens(tokens: any[] | null | undefined) {
+  const db = await getLocalDashDb();
+  const existing = getTokensDoc(db);
+  const payload = {
+    key: TOKENS_KEY,
+    tokensJson: JSON.stringify(Array.isArray(tokens) ? tokens : []),
+    updatedAt: Date.now(),
+  };
+
+  if (existing) {
+    db.collection("tokens").update(existing.id, payload);
+  } else {
+    db.collection("tokens").insert(payload);
   }
 }
 

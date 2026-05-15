@@ -19,6 +19,12 @@ import {
   openLocalWorkspaceInNewWindow,
 } from "../localGraphActions";
 import {
+  openCloudLens,
+  openCloudLensInNewWindow,
+  openCloudWorkspace,
+  openCloudWorkspaceInNewWindow,
+} from "../cloudRuntime";
+import {
   type BunnyDashCloudWorkspaceTreeType,
   type BunnyDashWorkspaceTreeType,
   state,
@@ -377,12 +383,12 @@ const WorkspaceLensSwitcher = () => {
     );
     if (inNewWindow) {
       if (isCloudWorkspace) {
-        await electrobun.rpc?.request.openWorkspaceInNewWindow({ workspaceId });
+        await openCloudWorkspaceInNewWindow(workspaceId);
       } else {
         await openLocalWorkspaceInNewWindow(workspaceId);
       }
     } else if (isCloudWorkspace) {
-      await electrobun.rpc?.request.openWorkspace({ workspaceId });
+      await openCloudWorkspace(workspaceId);
     } else {
       await openLocalWorkspace(workspaceId);
     }
@@ -395,12 +401,12 @@ const WorkspaceLensSwitcher = () => {
     );
     if (inNewWindow) {
       if (isCloudLens) {
-        await electrobun.rpc?.request.openLensInNewWindow({ lensId });
+        await openCloudLensInNewWindow(lensId);
       } else {
         await openLocalLensInNewWindow(lensId);
       }
     } else if (isCloudLens) {
-      await electrobun.rpc?.request.openLens({ lensId });
+      await openCloudLens(lensId);
     } else {
       await openLocalLens(lensId);
     }

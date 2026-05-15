@@ -11,7 +11,10 @@ import type {
 } from "../../shared/types/types";
 import { getNode } from "./FileWatcher";
 import { getSlateForNode } from "./files";
-import { electrobun, invokePtyCarrot } from "./init";
+import {
+  invokePtyCarrot,
+  syncProjectWatchersForCurrentState,
+} from "./init";
 import { trackFrontend } from "./analytics";
 import {
   persistAppSettings,
@@ -120,10 +123,13 @@ export type BunnyDashCloudProjectMountType = {
 
 export type BunnyDashCloudWorkspaceLensType = {
   id: string;
+  cloudWorkspaceId?: string;
   name: string;
   description: string;
   workspaceId: string;
   runtimeLensId: string;
+  layoutJson?: string;
+  sortOrder?: number;
   isCurrent: boolean;
 };
 
@@ -150,6 +156,8 @@ export type BunnyDashCloudWorkspaceTreeType = {
   id: string;
   name: string;
   subtitle: string;
+  color?: string;
+  sortOrder?: number;
   runtimeWorkspaceId: string;
   isCurrent: boolean;
   canExpand: boolean;
@@ -234,9 +242,7 @@ export const syncWorkspaceNow = async () => {
   } catch (error) {
     console.warn("Failed to persist workspace locally:", error);
   }
-  await electrobun.rpc?.request.syncWorkspace({
-    workspace: unwrap(state.workspace),
-  });
+  await syncProjectWatchersForCurrentState();
 };
 
 export const updateSyncedState = () => {
@@ -254,9 +260,6 @@ export const updateSyncedAppSettings = () => {
   setTimeout(() => {
     persistAppSettings(unwrap(state.appSettings)).catch((error) => {
       console.warn("Failed to persist app settings locally:", error);
-    });
-    electrobun.rpc?.request.syncAppSettings({
-      appSettings: unwrap(state.appSettings),
     });
   });
 };

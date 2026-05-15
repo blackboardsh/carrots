@@ -827,10 +827,10 @@ class CarrotInstance {
     switch (message.type) {
       case "ready": {
         this.pushLog("worker ready");
-        // Tell connected web clients to re-fetch state from the (new) worker.
+        // Tell connected web clients to refresh their frontend-owned state.
         // This handles the case where the carrot was restarted while web
-        // clients were still connected — their windowId is stale and they
-        // need to call getInitialState again to pick up the new runtime window.
+        // clients were still connected and need to re-bootstrap from the
+        // current host/window context.
         for (const client of this.webClients.values()) {
           try {
             client.send(JSON.stringify({

@@ -1,21 +1,21 @@
 import { basename } from "../utils/pathUtils";
 import { produce } from "solid-js/store";
 import {
-  electrobun,
   fsGetNode,
   fsSafeDeleteFileOrFolder,
   getDashHostBootState,
-  getHydratedInitialState,
   hostCreateWindow,
   scheduleDashHostCacheSync,
 } from "./init";
 import {
   loadPersistedAppSettings,
+  loadPersistedTokens,
   loadPersistedWorkspaceState,
   loadPersistedLocalDashGraph,
   mergeAppSettingsForBoot,
   persistAppSettings,
   persistLocalDashGraph,
+  persistTokens,
   persistWorkspaceState,
   type PersistedLocalDashGraph,
 } from "./localStateDb";
@@ -28,6 +28,11 @@ import {
   buildLocalWorkspaceForBoot,
   pickLocalBootTarget,
 } from "./localBoot";
+import {
+  bootCloudStateFromHostCache,
+  isCloudRuntimeWorkspaceId,
+  refreshCloudRuntimeState,
+} from "./cloudRuntime";
 
 const WORKSPACE_CURRENT_LENS_PREFIX = "__workspace-current__:";
 const CLOUD_WORKSPACE_SHADOW_PREFIX = "__cloud_workspace__:";
@@ -283,6 +288,69 @@ function getTemplateWindowsForWorkspace(
       );
 }
 
+function buildInitialLocalGraph(params: {
+  hostBoot: Awaited<ReturnType<typeof getDashHostBootState>> | null;
+  persistedGraph?: PersistedLocalDashGraph | null;
+}): PersistedLocalDashGraph | null {
+  if (params.persistedGraph?.workspaces?.length && params.persistedGraph.layouts?.length) {
+    return params.persistedGraph;
+  }
+
+  const workspaceId =
+    params.hostBoot?.windowTarget?.workspaceId ||
+    params.persistedGraph?.workspaces?.[0]?.key ||
+    "local-workspace";
+  const lensId =
+    params.hostBoot?.windowTarget?.lensId ||
+    params.persistedGraph?.layouts?.[0]?.key ||
+    workspaceCurrentLensKey(workspaceId);
+  const workspaceName =
+    params.hostBoot?.dashCache?.workspaces?.find((workspace) => workspace.id === workspaceId)
+      ?.name ||
+    params.persistedGraph?.workspaces?.find((workspace) => workspace.key === workspaceId)?.name ||
+    "Local Workspace";
+  const lensName =
+    params.hostBoot?.dashCache?.workspaces
+      ?.flatMap((workspace) => workspace.lenses)
+      ?.find((lens) => lens.id === lensId)?.name ||
+    params.persistedGraph?.layouts?.find((layout) => layout.key === lensId)?.name ||
+    "Current";
+  const windowId = params.hostBoot?.windowId || state.windowId || "main";
+
+  return {
+    workspaces: [
+      {
+        key: workspaceId,
+        name: workspaceName,
+        subtitle: "Local workspace",
+        sortOrder: 0,
+      },
+    ],
+    projectMounts: params.persistedGraph?.projectMounts || [],
+    layouts: [
+      {
+        key: lensId,
+        name: lensName,
+        description: `Current working state for ${workspaceName}.`,
+        workspaceId,
+        windowStateJson: JSON.stringify(makeDefaultBunnyWindow(windowId)),
+        sortOrder: 0,
+        windows: [
+          {
+            id: windowId,
+            title: `${workspaceName} · ${lensName}`,
+            workspaceId,
+            mainTabIds: ["workspace"],
+            sideTabIds: ["current-state"],
+            currentMainTabId: "workspace",
+            currentSideTabId: "current-state",
+          },
+        ],
+      },
+    ],
+  };
+}
+
 function patchCurrentLensFlags(workspaceId: string, lensId: string) {
   setState("bunnyDash", "currentWorkspaceId", workspaceId);
   setState("bunnyDash", "currentLensId", lensId);
@@ -302,24 +370,6 @@ function patchCurrentLensFlags(workspaceId: string, lensId: string) {
       }));
     }),
   );
-}
-
-async function syncCurrentLocalWindowToWorker(params: {
-  workspaceId: string;
-  lensId: string;
-  windowId: string;
-  activeTreeNodeId: string;
-  window: {
-    id: string;
-    title: string;
-    workspaceId: string;
-    mainTabIds: string[];
-    sideTabIds: string[];
-    currentMainTabId: string;
-    currentSideTabId: string;
-  };
-}) {
-  await electrobun.rpc?.request.syncLocalCurrentWindow(params);
 }
 
 async function applyLocalLensToCurrentWindow(
@@ -364,21 +414,7 @@ async function applyLocalLensToCurrentWindow(
   patchCurrentLensFlags(workspaceId, lensId);
   setState("ui", "showCommandPalette", false);
 
-  await persistWorkspaceState(nextWorkspace as any);
-  await electrobun.rpc?.request.syncWorkspace({
-    workspace: nextWorkspace,
-  });
-  await syncCurrentLocalWindowToWorker({
-    workspaceId,
-    lensId,
-    windowId: state.windowId,
-    activeTreeNodeId,
-    window: {
-      ...templateWindow,
-      id: state.windowId,
-      workspaceId,
-    },
-  });
+  await syncWorkspaceNow();
   scheduleDashHostCacheForWindow(
     {
       windowId: state.windowId,
@@ -438,16 +474,6 @@ async function openLocalWindowInNewHostWindow(
   };
 
   await persistWorkspaceState(nextWorkspace as any);
-  await electrobun.rpc?.request.syncWorkspace({
-    workspace: nextWorkspace,
-  });
-  await syncCurrentLocalWindowToWorker({
-    workspaceId,
-    lensId,
-    windowId: liveWindowId,
-    activeTreeNodeId,
-    window: nextRuntimeWindow,
-  });
   hostCreateWindow({
     windowId: liveWindowId,
     title: nextRuntimeWindow.title,
@@ -488,8 +514,9 @@ async function applyRendererStateFromLocalGraph(params: {
   windowId?: string;
   activeTreeNodeId?: string;
 }) {
-  const [persistedAppSettings, hostBoot] = await Promise.all([
+  const [persistedAppSettings, persistedTokens, hostBoot] = await Promise.all([
     loadPersistedAppSettings().catch(() => null),
+    loadPersistedTokens().catch(() => []),
     getDashHostBootState().catch(() => null),
   ]);
 
@@ -563,13 +590,14 @@ async function applyRendererStateFromLocalGraph(params: {
     workspace: nextWorkspace as any,
     bunnyDash: nextBunnyDash as any,
     projects: nextProjects,
-    tokens: [],
+    tokens: Array.isArray(persistedTokens) ? persistedTokens : [],
     appSettings: nextAppSettings,
   });
 
   try {
     await persistWorkspaceState(nextWorkspace as any);
     await persistAppSettings(nextAppSettings);
+    await persistTokens(persistedTokens);
   } catch (error) {
     console.warn("Failed to persist refreshed local Dash state:", error);
   }
@@ -600,78 +628,56 @@ async function applyRendererStateFromLocalGraph(params: {
   return true;
 }
 
-export async function refreshDashRendererStateFromWorker(params?: {
+export async function refreshDashFrontendState(params?: {
   graph?: PersistedLocalDashGraph;
   workspaceId?: string;
   lensId?: string;
   windowId?: string;
   activeTreeNodeId?: string;
 }) {
-  const persistedGraph =
-    params?.graph ||
-    (await loadPersistedLocalDashGraph().catch(() => null));
+  const [hostBoot, persistedGraph] = await Promise.all([
+    getDashHostBootState().catch(() => null),
+    (params?.graph ? Promise.resolve(params.graph) : loadPersistedLocalDashGraph().catch(() => null)),
+  ]);
 
-  if (persistedGraph) {
-    const appliedLocalState = await applyRendererStateFromLocalGraph({
-      graph: persistedGraph,
-      workspaceId: params?.workspaceId,
-      lensId: params?.lensId,
-      windowId: params?.windowId,
-      activeTreeNodeId: params?.activeTreeNodeId,
-    });
-    if (appliedLocalState) {
-      return;
+  const targetWorkspaceId =
+    params?.workspaceId ||
+    hostBoot?.windowTarget?.workspaceId ||
+    state.bunnyDash.currentWorkspaceId;
+  const shouldBootCloud = isCloudRuntimeWorkspaceId(String(targetWorkspaceId || ""));
+
+  if (shouldBootCloud) {
+    const booted = await bootCloudStateFromHostCache();
+    if (!booted) {
+      await refreshCloudRuntimeState({
+        currentWorkspaceId: targetWorkspaceId,
+        currentLensId:
+          params?.lensId || hostBoot?.windowTarget?.lensId || state.bunnyDash.currentLensId,
+      });
     }
-  }
-
-  const nextState = await getHydratedInitialState();
-  if (!nextState) {
     return;
   }
 
-  const payload = nextState as {
-    windowId?: string;
-    workspace?: unknown;
-    bunnyDash?: unknown;
-    projects?: Array<{ id: string }>;
-    tokens?: unknown[];
-    appSettings?: Record<string, unknown>;
-  };
+  const graph = buildInitialLocalGraph({
+    hostBoot,
+    persistedGraph,
+  });
+  if (!graph) {
+    return;
+  }
 
-  const projectsById = Array.isArray(payload.projects)
-    ? payload.projects.reduce((acc: Record<string, any>, project: any) => {
-        if (project?.id) {
-          acc[project.id] = project;
-        }
-        return acc;
-      }, {})
-    : {};
+  await persistLocalDashGraph(graph);
+  await applyRendererStateFromLocalGraph({
+    graph,
+    workspaceId: params?.workspaceId,
+    lensId: params?.lensId,
+    windowId: params?.windowId,
+    activeTreeNodeId: params?.activeTreeNodeId,
+  });
+}
 
-  if (payload.windowId) {
-    setState("windowId", payload.windowId);
-  }
-  if (payload.workspace) {
-    setState("workspace", payload.workspace as any);
-    persistWorkspaceState(payload.workspace as any).catch((error) => {
-      console.warn("Failed to persist workspace locally:", error);
-    });
-  }
-  if (payload.bunnyDash) {
-    setState("bunnyDash", payload.bunnyDash as any);
-  }
-  setState("projects", projectsById);
-  setState("tokens", Array.isArray(payload.tokens) ? payload.tokens : []);
-  if (payload.appSettings) {
-    const nextAppSettings = mergeAppSettingsForBoot(
-      state.appSettings,
-      payload.appSettings as any,
-      null,
-    );
-    setState("appSettings", nextAppSettings);
-    persistAppSettings(nextAppSettings).catch((error) => {
-      console.warn("Failed to persist app settings locally:", error);
-    });
-  }
+export async function bootDashFrontendState() {
+  await refreshDashFrontendState();
 }
 
 async function syncLocalGraph(graph: PersistedLocalDashGraph) {
@@ -708,7 +714,7 @@ export async function createOrRenameLocalLens(params: {
       title: buildLiveWindowTitle(workspace.name, cleanName, window.title),
     }));
     await syncLocalGraph(graph);
-    await refreshDashRendererStateFromWorker({
+    await refreshDashFrontendState({
       graph,
       workspaceId: state.bunnyDash.currentWorkspaceId || params.workspaceId,
       lensId: state.bunnyDash.currentLensId || params.lensId,
@@ -800,7 +806,7 @@ export async function overwriteCurrentLocalLens() {
   );
 
   await syncLocalGraph(graph);
-  await refreshDashRendererStateFromWorker({
+  await refreshDashFrontendState({
     graph,
     workspaceId,
     lensId,
@@ -837,7 +843,7 @@ export async function deleteLocalLens(lensId: string) {
     return;
   }
 
-  await refreshDashRendererStateFromWorker({
+  await refreshDashFrontendState({
     graph,
     workspaceId: state.bunnyDash.currentWorkspaceId,
     lensId: state.bunnyDash.currentLensId,
@@ -889,7 +895,7 @@ export async function addLocalProjectMount(path: string, projectName?: string) {
   });
 
   await syncLocalGraph(graph);
-  await refreshDashRendererStateFromWorker({
+  await refreshDashFrontendState({
     graph,
     workspaceId,
     lensId: state.bunnyDash.currentLensId,
@@ -915,7 +921,7 @@ export async function editLocalProjectMount(projectId: string, nextName: string,
   project.path = cleanPath;
 
   await syncLocalGraph(graph);
-  await refreshDashRendererStateFromWorker({
+  await refreshDashFrontendState({
     graph,
     workspaceId: state.bunnyDash.currentWorkspaceId,
     lensId: state.bunnyDash.currentLensId,
@@ -926,7 +932,7 @@ export async function removeLocalProjectMount(projectId: string) {
   const graph = cloneGraph(await getEditableLocalDashGraph());
   graph.projectMounts = graph.projectMounts.filter((item) => item.key !== projectId);
   await syncLocalGraph(graph);
-  await refreshDashRendererStateFromWorker({
+  await refreshDashFrontendState({
     graph,
     workspaceId: state.bunnyDash.currentWorkspaceId,
     lensId: state.bunnyDash.currentLensId,
@@ -994,7 +1000,7 @@ export async function updateCurrentLocalWorkspaceName(name: string) {
   }
 
   await syncLocalGraph(graph);
-  await refreshDashRendererStateFromWorker({
+  await refreshDashFrontendState({
     graph,
     workspaceId,
     lensId: state.bunnyDash.currentLensId,
@@ -1033,7 +1039,7 @@ export async function deleteCurrentLocalWorkspace(deleteProjectFiles = false) {
       `workspace-overview:${fallbackWorkspace.key}`,
     );
   } else {
-    await refreshDashRendererStateFromWorker({
+    await refreshDashFrontendState({
       graph,
     });
   }
@@ -1135,21 +1141,6 @@ export async function createAdditionalLocalWindow(offset?: {
   );
 
   await persistWorkspaceState(nextWorkspace as any);
-  await electrobun.rpc?.request.syncWorkspace({
-    workspace: nextWorkspace,
-  });
-  await syncCurrentLocalWindowToWorker({
-    workspaceId,
-    lensId,
-    windowId: liveWindowId,
-    activeTreeNodeId: `lens-overview:${lensId}`,
-    window: buildRuntimeTemplateFromLiveWindow(
-      nextWindowState,
-      liveWindowId,
-      workspaceId,
-      nextTitle,
-    ),
-  });
   hostCreateWindow({
     windowId: liveWindowId,
     title: nextTitle,

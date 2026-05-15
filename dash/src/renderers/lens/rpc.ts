@@ -1,12 +1,9 @@
 import { type RPCSchema } from "electrobun/view";
 import type {
-  PreviewFileTreeType,
   ParsedResponseType,
   PanePathType,
   SlateType,
 } from "../../shared/types/types";
-import type { AppState } from "./store";
-import type { WorkspaceType } from "./store";
 import type { track } from "../../main/utils/analytics";
 
 export type WorkspaceRPC = {
@@ -79,64 +76,9 @@ export type WorkspaceRPC = {
           overview?: any;
         };
       };
-      getInitialState: {
-        params: void;
-        response: any;
-      };
       getDashHostBootState: {
         params: void;
         response: any;
-      };
-      openLens: {
-        params: {
-          lensId: string;
-        };
-        response: any;
-      };
-      openLensInNewWindow: {
-        params: {
-          lensId: string;
-        };
-        response: any;
-      };
-      openWorkspace: {
-        params: {
-          workspaceId: string;
-        };
-        response: any;
-      };
-      openWorkspaceInNewWindow: {
-        params: {
-          workspaceId: string;
-        };
-        response: any;
-      };
-      overwriteCurrentLens: {
-        params: void;
-        response: any;
-      };
-      createLens: {
-        params: {
-          workspaceId: string;
-          name?: string;
-          description?: string;
-          sourceLensId?: string;
-        };
-        response: any;
-      };
-      renameLens: {
-        params: {
-          lensId: string;
-          name: string;
-          description?: string;
-        };
-        response: any;
-      };
-      newPreviewNode: {
-        params: {
-          candidateName: string;
-        };
-        response: PreviewFileTreeType;
       };
       getFaviconForUrl: {
         params: {
@@ -157,36 +99,6 @@ export type WorkspaceRPC = {
           timeoutMs?: number;
         };
         response: string | null;
-      };
-      syncWorkspace: {
-        params: {
-          workspace: WorkspaceType;
-        };
-        response: void;
-      };
-      syncAppSettings: {
-        params: {
-          appSettings: AppState["appSettings"];
-        };
-        response: void;
-      };
-      syncLocalCurrentWindow: {
-        params: {
-          workspaceId: string;
-          lensId: string;
-          windowId: string;
-          activeTreeNodeId: string;
-          window: {
-            id: string;
-            title: string;
-            workspaceId: string;
-            mainTabIds: string[];
-            sideTabIds: string[];
-            currentMainTabId: string;
-            currentSideTabId: string;
-          };
-        };
-        response: void;
       };
       openFileDialog: {
         params: {

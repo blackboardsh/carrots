@@ -5,7 +5,7 @@
 
 import { state, setState, updateSyncedAppSettings } from '../store';
 import { encryptSettings, decryptSettings, type EncryptedPayload } from './settingsSyncEncryption';
-import { electrobun } from '../init';
+import { loadPersistedTokens, persistTokens } from '../localStateDb';
 
 /**
  * Schema for synced settings
@@ -98,12 +98,12 @@ export async function gatherSyncableSettings(): Promise<SyncedSettings> {
       }
     : undefined;
 
-  // Get API tokens from goldfishdb via RPC
+  // Get API tokens from local browser persistence
   let tokens: SyncedSettings['tokens'] = [];
   try {
-    const tokensResult = await (electrobun.rpc as any)?.request.getTokens?.();
-    if (tokensResult?.ok && Array.isArray(tokensResult.tokens)) {
-      tokens = tokensResult.tokens.map((t: any) => ({
+    const persistedTokens = await loadPersistedTokens();
+    if (Array.isArray(persistedTokens)) {
+      tokens = persistedTokens.map((t: any) => ({
         name: t.name,
         url: t.url,
         endpoint: t.endpoint,
@@ -148,15 +148,9 @@ export async function applySyncedSettings(settings: SyncedSettings): Promise<voi
     });
   }
 
-  // Apply tokens via RPC
-  if (settings.tokens && settings.tokens.length > 0) {
-    try {
-      for (const token of settings.tokens) {
-        await (electrobun.rpc as any)?.request.setToken?.(token);
-      }
-    } catch (error) {
-      console.warn('Failed to apply tokens:', error);
-    }
+  if (settings.tokens) {
+    setState('tokens', settings.tokens as any);
+    await persistTokens(settings.tokens as any);
   }
 
   // Persist changes
