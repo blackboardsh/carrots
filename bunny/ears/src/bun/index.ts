@@ -9,7 +9,7 @@ import {
   type RPCSchema,
   Updater,
 } from "electrobun/bun";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type {
   CarrotPermissionConsentRequest,
@@ -48,9 +48,10 @@ import {
   type CloudInstance,
   type CloudUserProfile,
   type CloudWorkspace,
-} from "../../../../dash/src/bun/cloudApi";
+} from "./cloudApi";
 
 const DEBUG_BUNNY_EARS_BOOT = process.env.BUNNY_EARS_BOOT_DEBUG === "1";
+const DEFAULT_DASH_WORKSPACE_ID = "local-workspace";
 
 function bootLog(message: string, details?: unknown) {
   if (!DEBUG_BUNNY_EARS_BOOT) {
@@ -385,14 +386,9 @@ class CarrotInstance {
   private async handleControllerWindowClosed(windowId: string, win: BrowserWindow) {
     this.removeControllerWindow(windowId, win);
     this.restoreApplicationMenuIfActive();
-    if (this.carrot.manifest.id === "bunny-dash") {
-      (runtime as any).removeDashHostCacheWindow(windowId);
-    }
 
     if (!(runtime as any).shutdownInProgress) {
-      if (this.carrot.manifest.id !== "bunny-dash") {
-        this.sendEvent("window-closed", { windowId });
-      }
+      this.sendEvent("window-closed", { windowId });
     }
 
     if (this.status === "running" && this.carrot.manifest.mode === "window") {
@@ -712,43 +708,10 @@ class CarrotInstance {
               payload?.params,
               typeof payload?.windowId === "string" ? payload.windowId : windowId,
             ),
-          _: async (method, params) => {
-            if (this.carrot.manifest.id === "bunny-dash") {
-              const direct = await (runtime as any).handleDirectDashRequest(
-                String(method),
-                params,
-                windowId,
-              );
-              if (direct?.handled) {
-                return direct.result;
-              }
-            }
-            return this.invoke(String(method), params, windowId);
-          },
+          _: async (method, params) => this.invoke(String(method), params, windowId),
         },
         messages: {
           "*": (messageName, payload) => {
-            if (this.carrot.manifest.id === "bunny-dash") {
-              void (async () => {
-                const direct = await (runtime as any).handleDirectDashSend(
-                  String(messageName),
-                  payload,
-                  windowId,
-                );
-                if (direct?.handled) {
-                  return;
-                }
-                this.invoke(`send:${String(messageName)}`, payload, windowId).catch((error) => {
-                  this.pushLog(
-                    `view message failed: ${String(messageName)} ${
-                      error instanceof Error ? error.message : String(error)
-                    }`,
-                  );
-                });
-              })();
-              return;
-            }
-
             this.invoke(`send:${String(messageName)}`, payload, windowId).catch((error) => {
               this.pushLog(
                 `view message failed: ${String(messageName)} ${
@@ -1039,11 +1002,6 @@ class CarrotInstance {
           this.pushLog("tray denied by permissions");
           return;
         }
-        if (this.carrot.manifest.id === "bunny-dash") {
-          // Dash uses the runtime tray — don't create a separate one.
-          // Tray click events are forwarded from the runtime tray.
-          break;
-        }
         const trayPayload = payload as { title?: string };
         if (!this.tray) {
           this.tray = new Tray({ title: trayPayload.title || this.carrot.manifest.name });
@@ -1061,9 +1019,7 @@ class CarrotInstance {
         if (!hasHostPermission(this.carrot.install.permissionsGranted, "tray")) {
           return;
         }
-        if (this.carrot.manifest.id === "bunny-dash") {
-          // Dash no longer owns or extends the system tray.
-        } else if (this.tray) {
+        if (this.tray) {
           this.tray.setMenu(payload as any);
         }
         break;
@@ -1419,7 +1375,7 @@ class BunnyEarsRuntime {
 
       if (
         !this.activeApplicationMenuOwnerId ||
-        this.activeApplicationMenuOwnerId === "bunny-dash"
+        this.activeApplicationMenuOwnerId === "dash-ui"
       ) {
         void this.handleDashApplicationMenuAction(action);
         return;
@@ -1458,6 +1414,207 @@ class BunnyEarsRuntime {
   // mark the instance offline on logout.
   instanceId: string | null = null;
   farmWindow: BrowserWindow | null = null;
+  dashWindows = new Map<string, BrowserWindow>();
+  dashWebClients = new Map<string, { send: (data: string) => void; windowId: string | null }>();
+  dashHopBrowserIds = new Map<string, { windowId: string | null }>();
+
+  private getDashWindow(windowId?: string | null) {
+    if (windowId && this.dashWindows.has(windowId)) {
+      return this.dashWindows.get(windowId) || null;
+    }
+    return this.dashWindows.values().next().value ?? null;
+  }
+
+  private getPrimaryDashWindowId() {
+    return this.dashWindows.keys().next().value ?? "main";
+  }
+
+  private createDashViewRpc(windowId: string) {
+    return BrowserView.defineRPC({
+      maxRequestTime: 10000,
+      handlers: {
+        requests: {
+          invokeCarrot: async (payload: any) =>
+            this.invokeCarrotFrom(
+              "dash-ui",
+              String(payload?.carrotId || ""),
+              String(payload?.method || ""),
+              payload?.params,
+              typeof payload?.windowId === "string" ? payload.windowId : windowId,
+            ),
+          _: async (method: string, params: unknown) => {
+            const direct = await this.handleDirectDashRequest(
+              String(method),
+              params,
+              windowId,
+            );
+            if (direct?.handled) {
+              return direct.result;
+            }
+            throw new Error(`Unknown Dash UI host request: ${String(method)}`);
+          },
+        },
+        messages: {
+          "*": (messageName: string, payload: unknown) => {
+            void (async () => {
+              const direct = await this.handleDirectDashSend(
+                String(messageName),
+                payload,
+                windowId,
+              );
+              if (!direct?.handled) {
+                console.warn(`[dash-ui] unhandled host message: ${String(messageName)}`);
+              }
+            })();
+          },
+        },
+      },
+    });
+  }
+
+  private setDashWindow(windowId: string, win: BrowserWindow) {
+    this.dashWindows.set(windowId, win);
+    win.on("focus", () => {
+      this.activeApplicationMenuOwnerId = "dash-ui";
+      this.restoreDefaultApplicationMenu();
+    });
+    win.on("close", () => {
+      this.dashWindows.delete(windowId);
+      this.removeDashHostCacheWindow(windowId);
+      if (this.activeApplicationMenuOwnerId === "dash-ui" && this.dashWindows.size === 0) {
+        this.activeApplicationMenuOwnerId = null;
+        this.restoreDefaultApplicationMenu();
+      }
+    });
+  }
+
+  private async openDashWindow(
+    windowId = this.getPreferredDashWindowId(),
+    options?: {
+      title?: string;
+      frame?: {
+        x?: number;
+        y?: number;
+        width?: number;
+        height?: number;
+      };
+    },
+  ) {
+    const existing = this.dashWindows.get(windowId);
+    if (existing) {
+      existing.activate();
+      return existing;
+    }
+
+    const url = await this.getDashUiUrl();
+    if (!url) {
+      throw new Error("Dash UI URL is unavailable");
+    }
+
+    const win = new BrowserWindow({
+      id: `dash-ui:${windowId}`,
+      title: options?.title || "Dash",
+      url,
+      rpc: this.createDashViewRpc(windowId),
+      titleBarStyle: "hidden",
+      transparent: true,
+      frame: {
+        width: options?.frame?.width ?? 1440,
+        height: options?.frame?.height ?? 900,
+        x: options?.frame?.x ?? 120,
+        y: options?.frame?.y ?? 120,
+      },
+    });
+    this.setDashWindow(windowId, win);
+    this.activeApplicationMenuOwnerId = "dash-ui";
+    this.restoreDefaultApplicationMenu();
+    win.activate();
+    return win;
+  }
+
+  private async requestCloseDashWindow(windowId?: string) {
+    const targetWindowId = windowId || this.getPrimaryDashWindowId();
+    const win = this.dashWindows.get(targetWindowId);
+    if (!win) {
+      return;
+    }
+    win.close();
+  }
+
+  private emitDashViewMessage(
+    name: string,
+    payload?: unknown,
+    options?: {
+      raw?: boolean;
+      windowId?: string;
+    },
+  ) {
+    const targets = options?.windowId
+      ? [this.getDashWindow(options.windowId)].filter(Boolean)
+      : Array.from(this.dashWindows.values());
+
+    for (const target of targets) {
+      if (options?.raw) {
+        (target?.webview.rpc as any)?.send?.[name]?.(payload);
+      } else {
+        (target?.webview.rpc as any)?.send?.runtimeEvent({ name, payload });
+      }
+    }
+
+    for (const client of this.dashWebClients.values()) {
+      if (options?.windowId && client.windowId !== options.windowId) {
+        continue;
+      }
+      try {
+        client.send(JSON.stringify({
+          type: "message",
+          name,
+          payload,
+        }));
+      } catch {}
+    }
+
+    if (this.hopWs && this.dashHopBrowserIds.size > 0) {
+      for (const [browserId, browserState] of this.dashHopBrowserIds.entries()) {
+        if (options?.windowId && browserState.windowId !== options.windowId) {
+          continue;
+        }
+        try {
+          this.hopWs.send(JSON.stringify({
+            browserId,
+            payload: {
+              type: "message",
+              id: name,
+              payload,
+            },
+          }));
+        } catch (err) {
+          console.warn(
+            "[hop] Failed to forward Dash UI view message:",
+            err instanceof Error ? err.message : err,
+          );
+        }
+      }
+    }
+  }
+
+  private setDashWebClientWindowId(clientId: string, windowId?: string | null) {
+    const client = this.dashWebClients.get(clientId);
+    if (!client) {
+      return;
+    }
+    client.windowId = typeof windowId === "string" && windowId ? windowId : null;
+  }
+
+  private setDashHopBrowserWindowId(browserId: string, windowId?: string | null) {
+    const current = this.dashHopBrowserIds.get(browserId);
+    this.dashHopBrowserIds.set(browserId, {
+      windowId:
+        typeof windowId === "string" && windowId
+          ? windowId
+          : current?.windowId ?? null,
+    });
+  }
 
   async boot() {
     this.channel = await Updater.localInfo.channel().catch(() => "dev");
@@ -1751,15 +1908,20 @@ class BunnyEarsRuntime {
 
       if (message.type === "hop:browser-connected") {
         console.log(`[hop] Browser connected: ${message.browserId} for ${message.carrotId}`);
-        const carrot = this.carrots.get(message.carrotId);
-        if (carrot) {
-          carrot.hopBrowserIds.set(message.browserId, { windowId: null });
+        if (message.carrotId === "dash-ui" || message.carrotId === "bunny-dash") {
+          this.dashHopBrowserIds.set(message.browserId, { windowId: null });
+        } else {
+          const carrot = this.carrots.get(message.carrotId);
+          if (carrot) {
+            carrot.hopBrowserIds.set(message.browserId, { windowId: null });
+          }
         }
         return;
       }
 
       if (message.type === "hop:browser-disconnected") {
         console.log(`[hop] Browser disconnected: ${message.browserId}`);
+        this.dashHopBrowserIds.delete(message.browserId);
         // Remove from all carrots
         for (const carrot of this.carrots.values()) {
           carrot.hopBrowserIds.delete(message.browserId);
@@ -1774,34 +1936,41 @@ class BunnyEarsRuntime {
 
       if (message.type === "hop:message") {
         const { browserId, carrotId, payload } = message;
+        const isDashUiTarget = carrotId === "dash-ui" || carrotId === "bunny-dash";
 
         // Handle RPC messages (fire-and-forget from view → bun)
         if (payload?.type === "message") {
           const messageName = payload.id;
           const messagePayload = payload.payload;
-          const carrot = this.carrots.get(carrotId);
-          if (carrot && carrot.status === "running") {
-            carrot.setHopBrowserWindowId(
+          if (isDashUiTarget) {
+            this.setDashHopBrowserWindowId(
               browserId,
               typeof (messagePayload as { windowId?: unknown } | undefined)?.windowId === "string"
                 ? ((messagePayload as { windowId: string }).windowId)
                 : undefined,
             );
-            const direct =
-              carrotId === "bunny-dash"
-                ? await this.handleDirectDashSend(
-                    String(messageName || ""),
-                    messagePayload,
-                    typeof (messagePayload as { windowId?: unknown } | undefined)?.windowId === "string"
-                      ? ((messagePayload as { windowId: string }).windowId)
-                      : undefined,
-                  )
-                : { handled: false as const };
+            const direct = await this.handleDirectDashSend(
+              String(messageName || ""),
+              messagePayload,
+              typeof (messagePayload as { windowId?: unknown } | undefined)?.windowId === "string"
+                ? ((messagePayload as { windowId: string }).windowId)
+                : undefined,
+            );
             if (!direct.handled) {
-              // Forward as an event to the carrot worker
+              console.warn(`[hop] Unhandled Dash UI message: ${String(messageName || "")}`);
+            }
+          } else {
+            const carrot = this.carrots.get(carrotId);
+            if (carrot && carrot.status === "running") {
+              carrot.setHopBrowserWindowId(
+                browserId,
+                typeof (messagePayload as { windowId?: unknown } | undefined)?.windowId === "string"
+                  ? ((messagePayload as { windowId: string }).windowId)
+                  : undefined,
+              );
               carrot.worker?.postMessage({
                 type: "request",
-                requestId: 0, // fire-and-forget, no response expected
+                requestId: 0,
                 method: `send:${messageName}`,
                 params: messagePayload,
               });
@@ -1818,12 +1987,57 @@ class BunnyEarsRuntime {
         if (!method || requestId === undefined) return;
 
         // Handle runtime-level requests (carrotId = "bunny-ears" or no carrot found)
-        if (carrotId === "bunny-ears" || !this.carrots.has(carrotId)) {
+        if (carrotId === "bunny-ears" || (!isDashUiTarget && !this.carrots.has(carrotId))) {
           this.handleHopRuntimeRequest(browserId, requestId, method, params);
           return;
         }
 
-        // Route to a specific carrot
+        if (isDashUiTarget) {
+          this.setDashHopBrowserWindowId(
+            browserId,
+            typeof (params as { windowId?: unknown } | undefined)?.windowId === "string"
+              ? ((params as { windowId?: string }).windowId)
+              : undefined,
+          );
+          this.handleDirectDashRequest(
+            String(method || ""),
+            params,
+            typeof (params as { windowId?: unknown } | undefined)?.windowId === "string"
+              ? ((params as { windowId?: string }).windowId)
+              : undefined,
+          )
+          .then((direct) => {
+            if (direct.handled) {
+              return direct.result;
+            }
+            if (method === "invokeCarrot") {
+              return this.invokeCarrotFrom(
+                "dash-ui",
+                String((params as any)?.carrotId || ""),
+                String((params as any)?.method || ""),
+                (params as any)?.params,
+                typeof (params as any)?.windowId === "string"
+                  ? (params as any).windowId
+                  : undefined,
+              );
+            }
+            throw new Error(`Unknown Dash UI hop request: ${String(method || "")}`);
+          })
+          .then((result: unknown) => {
+            this.hopWs?.send(JSON.stringify({
+              browserId,
+              payload: { type: "response", id: requestId, success: true, payload: result },
+            }));
+          })
+          .catch((err: Error) => {
+            this.hopWs?.send(JSON.stringify({
+              browserId,
+              payload: { type: "response", id: requestId, success: false, error: err.message },
+            }));
+          });
+          return;
+        }
+
         const carrot = this.carrots.get(carrotId)!;
         carrot.setHopBrowserWindowId(
           browserId,
@@ -1839,22 +2053,8 @@ class BunnyEarsRuntime {
           return;
         }
 
-        const directPromise =
-          carrotId === "bunny-dash"
-            ? this.handleDirectDashRequest(
-                String(method || ""),
-                params,
-                typeof (params as { windowId?: unknown } | undefined)?.windowId === "string"
-                  ? ((params as { windowId?: string }).windowId)
-                  : undefined,
-              )
-            : Promise.resolve({ handled: false as const });
-
-        directPromise
-          .then((direct) => {
-            if (direct.handled) {
-              return direct.result;
-            }
+        Promise.resolve()
+          .then(() => {
             if (method === "invokeCarrot") {
               return this.invokeCarrotFrom(
                 carrotId,
@@ -2250,27 +2450,210 @@ class BunnyEarsRuntime {
   }
 
   private getDashHomeDir() {
-    const dashCarrot = this.carrots.get("bunny-dash");
-    return dashCarrot?.stateDir || this.getChannelStateDir();
+    const os = require("node:os");
+    return join(os.homedir(), ".dash", this.channel);
+  }
+
+  private getLegacyDashHomeDir() {
+    return join(Utils.paths.userData, "carrots", "bunny-dash", "data");
+  }
+
+  private listDashProjectWorkspaceRoots(workspaceId?: string) {
+    const resolvedWorkspaceId = workspaceId || DEFAULT_DASH_WORKSPACE_ID;
+    const currentRoot = join(this.getDashHomeDir(), "projects", resolvedWorkspaceId);
+    const legacyRoot = join(this.getLegacyDashHomeDir(), "projects", resolvedWorkspaceId);
+    return Array.from(new Set([currentRoot, legacyRoot]));
+  }
+
+  private listDashProjectContainerRoots() {
+    const currentRoot = join(this.getDashHomeDir(), "projects");
+    const legacyRoot = join(this.getLegacyDashHomeDir(), "projects");
+    return Array.from(new Set([currentRoot, legacyRoot]));
+  }
+
+  private ensureDashProjectStorageMigrated() {
+    const currentProjectsRoot = join(this.getDashHomeDir(), "projects");
+    const legacyProjectsRoot = join(this.getLegacyDashHomeDir(), "projects");
+
+    mkdirSync(currentProjectsRoot, { recursive: true });
+
+    if (!existsSync(legacyProjectsRoot)) {
+      return;
+    }
+
+    try {
+      for (const workspaceEntry of readdirSync(legacyProjectsRoot, { withFileTypes: true })) {
+        if (workspaceEntry.name.startsWith(".")) {
+          continue;
+        }
+        const legacyWorkspaceRoot = join(legacyProjectsRoot, workspaceEntry.name);
+        let isWorkspaceDirectory = workspaceEntry.isDirectory();
+        if (!isWorkspaceDirectory && workspaceEntry.isSymbolicLink()) {
+          try {
+            isWorkspaceDirectory = statSync(legacyWorkspaceRoot).isDirectory();
+          } catch {
+            isWorkspaceDirectory = false;
+          }
+        }
+        if (!isWorkspaceDirectory) {
+          continue;
+        }
+
+        const nextWorkspaceRoot = join(currentProjectsRoot, workspaceEntry.name);
+        mkdirSync(nextWorkspaceRoot, { recursive: true });
+
+        for (const projectEntry of readdirSync(legacyWorkspaceRoot, { withFileTypes: true })) {
+          if (projectEntry.name.startsWith(".")) {
+            continue;
+          }
+          const legacyProjectRoot = join(legacyWorkspaceRoot, projectEntry.name);
+          let isProjectDirectory = projectEntry.isDirectory();
+          if (!isProjectDirectory && projectEntry.isSymbolicLink()) {
+            try {
+              isProjectDirectory = statSync(legacyProjectRoot).isDirectory();
+            } catch {
+              isProjectDirectory = false;
+            }
+          }
+          if (!isProjectDirectory) {
+            continue;
+          }
+
+          const nextProjectRoot = join(nextWorkspaceRoot, projectEntry.name);
+          if (existsSync(nextProjectRoot)) {
+            continue;
+          }
+
+          cpSync(legacyProjectRoot, nextProjectRoot, {
+            recursive: true,
+            errorOnExist: false,
+            force: false,
+          });
+        }
+      }
+    } catch (error) {
+      console.warn(
+        "[bunny-ears] Failed to migrate legacy Dash projects:",
+        error instanceof Error ? error.message : error,
+      );
+    }
+  }
+
+  private folderHasProjectEntries(root: string) {
+    if (!existsSync(root)) {
+      return false;
+    }
+    try {
+      if (!statSync(root).isDirectory()) {
+        return false;
+      }
+      return readdirSync(root, { withFileTypes: true }).some((entry) => {
+        if (entry.name.startsWith(".")) {
+          return false;
+        }
+        if (entry.isDirectory()) {
+          return true;
+        }
+        if (entry.isSymbolicLink()) {
+          try {
+            return statSync(join(root, entry.name)).isDirectory();
+          } catch {
+            return false;
+          }
+        }
+        return false;
+      });
+    } catch {
+      return false;
+    }
   }
 
   private getDashProjectsFolder(workspaceId?: string) {
-    const path = require("node:path");
-    const root = path.join(
-      this.getDashHomeDir(),
-      "projects",
-      workspaceId || "default",
+    this.ensureDashProjectStorageMigrated();
+    const [currentRoot, legacyRoot] = this.listDashProjectWorkspaceRoots(workspaceId);
+    if (this.folderHasProjectEntries(currentRoot)) {
+      return currentRoot;
+    }
+    if (this.folderHasProjectEntries(legacyRoot)) {
+      return legacyRoot;
+    }
+    mkdirSync(currentRoot, { recursive: true });
+    return currentRoot;
+  }
+
+  private listDashKnownLocalProjects() {
+    this.ensureDashProjectStorageMigrated();
+    const projects = new Map<string, {
+      id: string;
+      name: string;
+      path: string;
+      instanceId: string;
+      instanceLabel: string;
+      kind: string;
+      status: string;
+    }>();
+
+    for (const containerRoot of this.listDashProjectContainerRoots()) {
+      if (!existsSync(containerRoot)) {
+        continue;
+      }
+      try {
+        for (const workspaceEntry of readdirSync(containerRoot, { withFileTypes: true })) {
+          if (workspaceEntry.name.startsWith(".")) {
+            continue;
+          }
+          const workspaceRoot = join(containerRoot, workspaceEntry.name);
+          let isWorkspaceDirectory = workspaceEntry.isDirectory();
+          if (!isWorkspaceDirectory && workspaceEntry.isSymbolicLink()) {
+            try {
+              isWorkspaceDirectory = statSync(workspaceRoot).isDirectory();
+            } catch {
+              isWorkspaceDirectory = false;
+            }
+          }
+          if (!isWorkspaceDirectory) {
+            continue;
+          }
+          for (const entry of readdirSync(workspaceRoot, { withFileTypes: true })) {
+            if (entry.name.startsWith(".")) {
+              continue;
+            }
+            const fullPath = join(workspaceRoot, entry.name);
+            let isDirectory = entry.isDirectory();
+            if (!isDirectory && entry.isSymbolicLink()) {
+              try {
+                isDirectory = statSync(fullPath).isDirectory();
+              } catch {
+                isDirectory = false;
+              }
+            }
+            if (!isDirectory) {
+              continue;
+            }
+            projects.set(fullPath, {
+              id: fullPath,
+              name: entry.name,
+              path: fullPath,
+              instanceId: "host-machine",
+              instanceLabel: "This Machine",
+              kind: "project",
+              status: "available",
+            });
+          }
+        }
+      } catch {}
+    }
+
+    return Array.from(projects.values()).sort((left, right) =>
+      left.name.localeCompare(right.name),
     );
-    mkdirSync(root, { recursive: true });
-    return root;
   }
 
   private getDashBuildVars() {
-    const dashCarrot = this.carrots.get("bunny-dash");
     return {
       channel: this.channel,
-      version: dashCarrot?.carrot.manifest.version || "0.1.0",
-      hash: "bunny-dash",
+      version: "0.1.0",
+      hash: "dash-ui",
     };
   }
 
@@ -2320,12 +2703,40 @@ class BunnyEarsRuntime {
       cache?.windows.find((window) => window.windowId === targetWindowId) ||
       cache?.currentWindow ||
       null;
+    const workspaceId =
+      windowTarget?.workspaceId ||
+      cache?.currentWorkspaceId ||
+      DEFAULT_DASH_WORKSPACE_ID;
+    const knownLocalProjects = this.listDashKnownLocalProjects();
+    const dashCache: DashHostSummaryCache = {
+      version: 1,
+      updatedAt: cache?.updatedAt || 0,
+      currentWorkspaceId: cache?.currentWorkspaceId || workspaceId,
+      currentLensId: cache?.currentLensId || "",
+      currentWindow: cache?.currentWindow || null,
+      windows: cache?.windows || [],
+      workspaces: cache?.workspaces || [],
+      cloudWorkspaces: cache?.cloudWorkspaces || [],
+      knownLocalProjects:
+        knownLocalProjects.length > 0
+          ? knownLocalProjects
+          : cache?.knownLocalProjects || [],
+      peerDependencies: cache?.peerDependencies || {},
+      account: cache?.account || {
+        signedIn: false,
+        email: "",
+        name: "",
+        userId: "",
+        emailVerified: false,
+      },
+      currentInstance: cache?.currentInstance || this.buildCurrentDashInstanceSummary(),
+    };
 
     return {
       windowId: targetWindowId,
       buildVars: this.getDashBuildVars(),
-      paths: this.getDashPaths(windowTarget?.workspaceId || cache?.currentWorkspaceId || undefined),
-      peerDependencies: cache?.peerDependencies || {
+      paths: this.getDashPaths(workspaceId),
+      peerDependencies: dashCache?.peerDependencies || {
         bun: {
           installed: Boolean(Bun.which("bun")),
           version: Bun.version,
@@ -2344,9 +2755,9 @@ class BunnyEarsRuntime {
         },
       },
       webBridgeOrigin: this.getDashWebBridgeOrigin(),
-      dashCache: cache,
+      dashCache,
       windowTarget,
-      currentInstance: cache?.currentInstance || this.buildCurrentDashInstanceSummary(),
+      currentInstance: dashCache.currentInstance || this.buildCurrentDashInstanceSummary(),
     };
   }
 
@@ -2558,11 +2969,10 @@ class BunnyEarsRuntime {
   }
 
   private refreshDashViews() {
-    const dashCarrot = this.carrots.get("bunny-dash");
-    if (!dashCarrot || dashCarrot.status !== "running") {
+    if (this.dashWindows.size === 0) {
       return;
     }
-    dashCarrot.emitViewMessage("refreshBunnyDashState", {}, { raw: true });
+    this.emitDashViewMessage("refreshBunnyDashState", {}, { raw: true });
   }
 
   private broadcastDashAuthTokenChanged(token: string) {
@@ -2849,6 +3259,19 @@ class BunnyEarsRuntime {
     return "https://farm.electrobunny.ai";
   }
 
+  async getDashUiUrl(): Promise<string | null> {
+    try {
+      const channel = await Updater.localInfo.channel();
+      if (channel === "dev") {
+        return "http://localhost:5174";
+      }
+      if (channel === "canary") {
+        return "https://staging-dash.electrobunny.ai";
+      }
+    } catch {}
+    return "https://dash.electrobunny.ai";
+  }
+
   private async openFarmForLogin(): Promise<void> {
     const url = await this.getFarmUrl();
     return new Promise((resolve) => {
@@ -3006,11 +3429,7 @@ class BunnyEarsRuntime {
 
 
   /**
-   * WebSocket bridge for web clients (e.g. Bunny Dash running in a browser).
-   *
-   * Web clients connect and specify a target carrot (default: bunny-dash).
-   * Requests are routed to the carrot worker via CarrotInstance.invoke(),
-   * and emit-view messages from the worker are forwarded back over WebSocket.
+   * WebSocket bridge for browser-hosted Dash UI sessions and other web clients.
    */
   private startWebBridge() {
     const self = this;
@@ -3058,38 +3477,21 @@ class BunnyEarsRuntime {
             open(ws) {
               const id = (ws.data as any).id as string;
               console.log(`[web-bridge] Client connected: ${id}`);
-
-              const dashCarrot = self.carrots.get("bunny-dash");
-              if (dashCarrot) {
-                dashCarrot.webClients.set(id, {
-                  send: (data: string) => {
-                    try { ws.send(data); } catch {}
-                  },
-                  windowId: null,
-                });
-              } else {
-                console.warn("[web-bridge] bunny-dash carrot not found");
-              }
+              self.dashWebClients.set(id, {
+                send: (sendData: string) => {
+                  try { ws.send(sendData); } catch {}
+                },
+                windowId: null,
+              });
             },
             async message(ws, data) {
               const id = (ws.data as any).id as string;
               try {
                 const msg = JSON.parse(String(data));
-                const dashCarrot = self.carrots.get("bunny-dash");
-                if (!dashCarrot) {
-                  if (msg.type === "request") {
-                    ws.send(JSON.stringify({
-                      type: "response",
-                      id: msg.id,
-                      error: "bunny-dash carrot not running",
-                    }));
-                  }
-                  return;
-                }
 
                 if (msg.type === "request") {
                   try {
-                    dashCarrot.setWebClientWindowId(
+                    self.setDashWebClientWindowId(
                       id,
                       typeof msg?.params?.windowId === "string" ? msg.params.windowId : undefined,
                     );
@@ -3105,7 +3507,7 @@ class BunnyEarsRuntime {
                         ? direct.result
                         : msg.method === "invokeCarrot"
                           ? await self.invokeCarrotFrom(
-                              "bunny-dash",
+                              "dash-ui",
                               String(msg?.params?.carrotId || ""),
                               String(msg?.params?.method || ""),
                               msg?.params?.params,
@@ -3113,7 +3515,9 @@ class BunnyEarsRuntime {
                                 ? msg.params.windowId
                                 : undefined,
                             )
-                          : await dashCarrot.invoke(msg.method, msg.params);
+                          : (() => {
+                              throw new Error(`Unknown Dash UI bridge request: ${String(msg.method || "")}`);
+                            })();
                     ws.send(JSON.stringify({
                       type: "response",
                       id: msg.id,
@@ -3129,7 +3533,7 @@ class BunnyEarsRuntime {
                 }
 
                 if (msg.type === "message") {
-                  dashCarrot.setWebClientWindowId(
+                  self.setDashWebClientWindowId(
                     id,
                     typeof msg?.payload?.windowId === "string" ? msg.payload.windowId : undefined,
                   );
@@ -3139,7 +3543,7 @@ class BunnyEarsRuntime {
                     typeof msg?.payload?.windowId === "string" ? msg.payload.windowId : undefined,
                   );
                   if (!direct.handled) {
-                    dashCarrot.invoke(`send:${msg.name}`, msg.payload).catch(() => {});
+                    console.warn(`[web-bridge] Unhandled Dash UI message: ${String(msg.name || "")}`);
                   }
                 }
               } catch (err) {
@@ -3149,8 +3553,7 @@ class BunnyEarsRuntime {
             close(ws) {
               const id = (ws.data as any).id as string;
               console.log(`[web-bridge] Client disconnected: ${id}`);
-              const dashCarrot = self.carrots.get("bunny-dash");
-              dashCarrot?.webClients.delete(id);
+              self.dashWebClients.delete(id);
             },
           },
         });
@@ -3180,34 +3583,18 @@ class BunnyEarsRuntime {
     (this.managerWindow?.webview.rpc as any)?.send?.dashboardChanged(this.dashboardState());
   }
 
-  private getDashCarrot() {
-    return this.carrots.get("bunny-dash") || null;
-  }
-
   private getPreferredDashWindowId() {
     const cachedWindowId = this.loadDashHostCache()?.currentWindow?.windowId;
     if (cachedWindowId) {
       return cachedWindowId;
     }
-
-    const dashCarrot = this.getDashCarrot();
-    if (!dashCarrot) {
-      return "main";
-    }
-
-    return dashCarrot.controllerWindows.keys().next().value ?? "main";
+    return this.dashWindows.keys().next().value ?? "main";
   }
 
   private async ensureDashWindowForMenuAction() {
-    const dashCarrot = this.getDashCarrot();
-    if (!dashCarrot) {
-      return null;
-    }
-
     const windowId = this.getPreferredDashWindowId();
-    await dashCarrot.openWindow(windowId);
+    await this.openDashWindow(windowId);
     return {
-      dashCarrot,
       windowId,
     };
   }
@@ -3217,8 +3604,7 @@ class BunnyEarsRuntime {
     if (!target) {
       return;
     }
-
-    target.dashCarrot.emitViewMessage(name, payload, {
+    this.emitDashViewMessage(name, payload, {
       raw: true,
       windowId: target.windowId,
     });
@@ -3482,7 +3868,7 @@ class BunnyEarsRuntime {
     sourceWindowId?: string,
   ): Promise<{ handled: boolean; result?: unknown }> {
     const invokeFs = (fsMethod: string) =>
-      this.invokeCarrotFrom("bunny-dash", "bunny.fs", fsMethod, params, sourceWindowId);
+      this.invokeCarrotFrom("dash-ui", "bunny.fs", fsMethod, params, sourceWindowId);
 
     switch (method) {
       case "logoutBunnyCloud":
@@ -3686,43 +4072,55 @@ class BunnyEarsRuntime {
         });
         return { handled: true };
       case "closeWindow": {
-        const dashCarrot = this.carrots.get("bunny-dash");
-        if (dashCarrot) {
-          const targetWindowId =
-            typeof (payload as { windowId?: unknown } | undefined)?.windowId === "string"
-              ? ((payload as { windowId: string }).windowId)
-              : sourceWindowId;
-          await dashCarrot.requestCloseWindow(targetWindowId);
+        const targetWindowId =
+          typeof (payload as { windowId?: unknown } | undefined)?.windowId === "string"
+            ? ((payload as { windowId: string }).windowId)
+            : sourceWindowId;
+        await this.requestCloseDashWindow(targetWindowId);
+        return { handled: true };
+      }
+      case "minimizeWindow":
+      case "toggleMaximizeWindow": {
+        const targetWindowId =
+          typeof (payload as { windowId?: unknown } | undefined)?.windowId === "string"
+            ? ((payload as { windowId: string }).windowId)
+            : sourceWindowId;
+        const targetWindow = this.getDashWindow(targetWindowId || undefined);
+        if (targetWindow) {
+          if (name === "minimizeWindow") {
+            targetWindow.minimize();
+          } else if (targetWindow.isMaximized()) {
+            targetWindow.unmaximize();
+          } else {
+            targetWindow.maximize();
+          }
         }
         return { handled: true };
       }
       case "createHostWindow": {
-        const dashCarrot = this.carrots.get("bunny-dash");
-        if (dashCarrot) {
-          const createPayload =
-            payload && typeof payload === "object"
-              ? (payload as {
-                  windowId?: string;
-                  title?: string;
-                  frame?: {
-                    x?: number;
-                    y?: number;
-                    width?: number;
-                    height?: number;
-                  };
-                })
-              : {};
-          await dashCarrot.openWindow(
-            String(createPayload.windowId || sourceWindowId || "main"),
-            {
-              title:
-                typeof createPayload.title === "string"
-                  ? createPayload.title
-                  : undefined,
-              frame: createPayload.frame,
-            },
-          );
-        }
+        const createPayload =
+          payload && typeof payload === "object"
+            ? (payload as {
+                windowId?: string;
+                title?: string;
+                frame?: {
+                  x?: number;
+                  y?: number;
+                  width?: number;
+                  height?: number;
+                };
+              })
+            : {};
+        await this.openDashWindow(
+          String(createPayload.windowId || sourceWindowId || "main"),
+          {
+            title:
+              typeof createPayload.title === "string"
+                ? createPayload.title
+                : undefined,
+            frame: createPayload.frame,
+          },
+        );
         return { handled: true };
       }
       case "syncDashHostCache": {
@@ -3735,7 +4133,7 @@ class BunnyEarsRuntime {
       }
       case "fullyDeleteNodeFromDisk":
         await this.invokeCarrotFrom(
-          "bunny-dash",
+          "dash-ui",
           "bunny.fs",
           "safeDeleteFileOrFolder",
           { path: String((payload as { nodePath?: string } | undefined)?.nodePath || "") },
@@ -3917,12 +4315,6 @@ class BunnyEarsRuntime {
 
   private async handleTrayAction(action: string) {
     if (action === "open-dash") {
-      const dashCarrot = this.carrots.get("bunny-dash");
-      if (!dashCarrot) return;
-      if (dashCarrot.status !== "running") {
-        await dashCarrot.start();
-        dashCarrot.sendEvent("boot");
-      }
       this.restoreDefaultApplicationMenu();
       const dashCache = this.loadDashHostCache();
       const cachedWindows =
@@ -3930,11 +4322,11 @@ class BunnyEarsRuntime {
           ? dashCache.windows
           : [];
 
-      if (dashCarrot.controllerWindows.size > 0) {
+      if (this.dashWindows.size > 0) {
         const targetWindow =
-          cachedWindows.find((window) => dashCarrot.controllerWindows.has(window.windowId)) ||
+          cachedWindows.find((window) => this.dashWindows.has(window.windowId)) ||
           cachedWindows[0];
-        await dashCarrot.openWindow(targetWindow?.windowId, {
+        await this.openDashWindow(targetWindow?.windowId, {
           title: targetWindow?.title,
           frame: targetWindow?.frame,
         });
@@ -3943,7 +4335,7 @@ class BunnyEarsRuntime {
 
       if (cachedWindows.length > 0) {
         for (const window of cachedWindows) {
-          await dashCarrot.openWindow(window.windowId, {
+          await this.openDashWindow(window.windowId, {
             title: window.title,
             frame: window.frame,
           });
@@ -3951,7 +4343,7 @@ class BunnyEarsRuntime {
         return;
       }
 
-      await dashCarrot.openWindow("main");
+      await this.openDashWindow("main");
       return;
     }
     if (action === "open-farm") {
@@ -4435,7 +4827,6 @@ const FOUNDATION_CARROTS = [
   { id: "bunny.tsserver", artifact: "bunny.tsserver-0.1.0.tar.zst" },
   { id: "bunny.biome", artifact: "bunny.biome-0.1.0.tar.zst" },
   { id: "bunny.llama", artifact: "bunny.llama-0.1.0.tar.zst" },
-  { id: "bunny-dash", artifact: "bunny-dash-0.1.0.tar.zst" },
 ];
 
 const DEV_FOUNDATION_CARROTS = [
@@ -4446,7 +4837,6 @@ const DEV_FOUNDATION_CARROTS = [
   { id: "bunny.tsserver", directory: "tsserver" },
   { id: "bunny.biome", directory: "biome" },
   { id: "bunny.llama", directory: "llama" },
-  { id: "bunny-dash", directory: "dash" },
 ] as const;
 const FOUNDATION_CARROT_IDS = new Set<string>(DEV_FOUNDATION_CARROTS.map((carrot) => carrot.id));
 
@@ -4550,6 +4940,7 @@ async function installFoundationCarrotsFromR2(channel: string, forceReinstall: b
 }
 
 pruneLegacyPrototypeCarrots();
+uninstallInstalledCarrot("bunny-dash");
 
 // In dev mode, rebuild carrots from source. In staging/prod, download pre-built artifacts.
 const channel = await Updater.localInfo.channel().catch(() => "dev");

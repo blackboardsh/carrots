@@ -1,8 +1,3 @@
-/**
- * Cloud API client for Bunny Dash.
- * Talks to the Electrobunny API for workspaces, instances, lenses, etc.
- */
-
 export type CloudInstance = {
   id: string;
   user_id: string;
@@ -113,8 +108,11 @@ export class CloudApi {
         const data = (await resp.json()) as { accessToken: string; refreshToken: string };
         this.onTokenRefresh(data);
         return true;
-      } catch { return false; }
-      finally { this.refreshPromise = null; }
+      } catch {
+        return false;
+      } finally {
+        this.refreshPromise = null;
+      }
     })();
     return this.refreshPromise;
   }
@@ -124,7 +122,6 @@ export class CloudApi {
     return response.json() as Promise<T>;
   }
 
-  // Instances
   async upsertInstance(machineId: string, name: string, os: string): Promise<CloudInstance> {
     const res = await this.authedFetch("PUT", "/v1/instances", { machine_id: machineId, name, os });
     return (await this.jsonOrThrow<{ instance: CloudInstance }>(res)).instance;
@@ -139,7 +136,6 @@ export class CloudApi {
     await this.authedFetch("DELETE", `/v1/instances/${id}`);
   }
 
-  // Workspaces
   async listWorkspaces(): Promise<CloudWorkspace[]> {
     const res = await this.authedFetch("GET", "/v1/workspaces");
     return (await this.jsonOrThrow<{ workspaces: CloudWorkspace[] }>(res)).workspaces;
@@ -158,7 +154,6 @@ export class CloudApi {
     await this.authedFetch("DELETE", `/v1/workspaces/${id}`);
   }
 
-  // Project Mounts
   async createProjectMount(workspaceId: string, instanceId: string, path: string, name: string): Promise<CloudProjectMount> {
     const res = await this.authedFetch("POST", `/v1/workspaces/${workspaceId}/mounts`, { instance_id: instanceId, path, name });
     return (await this.jsonOrThrow<{ mount: CloudProjectMount }>(res)).mount;
@@ -168,7 +163,6 @@ export class CloudApi {
     await this.authedFetch("DELETE", `/v1/workspaces/${workspaceId}/mounts/${mountId}`);
   }
 
-  // Lenses
   async createLens(workspaceId: string, name: string, layoutJson?: string, description?: string): Promise<CloudLens> {
     const res = await this.authedFetch("POST", `/v1/workspaces/${workspaceId}/lenses`, { name, description, layout_json: layoutJson });
     return (await this.jsonOrThrow<{ lens: CloudLens }>(res)).lens;
@@ -182,7 +176,6 @@ export class CloudApi {
     await this.authedFetch("DELETE", `/v1/workspaces/${workspaceId}/lenses/${lensId}`);
   }
 
-  // User / device tokens
   async getUserProfile(): Promise<CloudUserProfile> {
     const res = await this.authedFetch("GET", "/v1/user/profile");
     return (await this.jsonOrThrow<{ user: CloudUserProfile }>(res)).user;

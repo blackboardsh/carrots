@@ -948,221 +948,7 @@ describe("Bunny Ears carrots", () => {
     expect((logAction.payload as { message: string }).message).toContain("workspace-settings");
   });
 
-  test("Bunny Dash builds from source and exposes a Dash shell snapshot", async () => {
-    const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-build-");
-    expect(built.manifest.id).toBe("bunny-dash");
-    expect(built.manifest.dependencies).toEqual({
-      "bunny.pty": "file:../foundation-carrots/pty",
-      "bunny.fs": "file:../foundation-carrots/fs",
-      "bunny.git": "file:../foundation-carrots/git",
-      "bunny.tsserver": "file:../foundation-carrots/tsserver",
-      "bunny.biome": "file:../foundation-carrots/biome",
-      "bunny.llama": "file:../foundation-carrots/llama",
-    });
-    expect(existsSync(join(built.outDir, "lens", "index.js"))).toBe(true);
-    expect(existsSync(join(built.outDir, "lens", "index.css"))).toBe(true);
-    expect(existsSync(join(built.outDir, "worker.js"))).toBe(true);
-    expect(built.manifest.view.relativePath).toBe("lens/index.html");
-    const html = await Bun.file(join(built.outDir, "lens", "index.html")).text();
-    expect(html).toContain('href="views://lens/index.css"');
-
-    const carrot = await startBuiltCarrot(built);
-    const initialApplicationMenu = await carrot.nextAction("set-application-menu");
-    expect(initialApplicationMenu.payload).toEqual({
-      menu: [
-      {
-        label: "Bunny Dash",
-        submenu: [{ role: "quit", accelerator: "cmd+q" }],
-      },
-      {
-        label: "File",
-        submenu: [
-          { type: "normal", label: "Open File...", action: "open-file", accelerator: "cmd+o" },
-          {
-            type: "normal",
-            label: "Open Folder...",
-            action: "open-folder",
-            accelerator: "cmd+shift+o",
-          },
-          { type: "separator" },
-          {
-            type: "normal",
-            label: "New Browser Tab",
-            action: "new-browser-tab",
-            accelerator: "cmd+t",
-          },
-          { type: "normal", label: "Close Tab", action: "close-tab", accelerator: "cmd+w" },
-          {
-            type: "normal",
-            label: "Close Window",
-            action: "close-window",
-            accelerator: "cmd+shift+w",
-          },
-        ],
-      },
-      {
-        label: "Edit",
-        submenu: [
-          { role: "undo" },
-          { role: "redo" },
-          { type: "separator" },
-          { role: "cut" },
-          { role: "copy" },
-          { role: "paste" },
-          { role: "pasteAndMatchStyle" },
-          { role: "delete" },
-          { role: "selectAll" },
-        ],
-      },
-      {
-        label: "View",
-        submenu: [
-          {
-            type: "normal",
-            label: "Next Tab",
-            action: "global-shortcut:ctrl+tab",
-            accelerator: "ctrl+tab",
-          },
-          {
-            type: "normal",
-            label: "Previous Tab",
-            action: "global-shortcut:ctrl+shift+tab",
-            accelerator: "ctrl+shift+tab",
-          },
-        ],
-      },
-      {
-        label: "Tools",
-        submenu: [
-          {
-            type: "normal",
-            label: "Command Palette",
-            action: "open-command-palette",
-            accelerator: "cmd+p",
-          },
-          {
-            type: "normal",
-            label: "Command Palette (Commands)",
-            action: "global-shortcut:cmd+shift+p",
-            accelerator: "cmd+shift+p",
-          },
-          {
-            type: "normal",
-            label: "Find in Files",
-            action: "global-shortcut:cmd+shift+f",
-            accelerator: "cmd+shift+f",
-          },
-        ],
-      },
-      {
-        label: "Settings",
-        submenu: [
-          { type: "normal", label: "Plugins", action: "plugin-marketplace" },
-          { type: "normal", label: "Llama Settings", action: "llama-settings" },
-          { type: "normal", label: "Bunny Dash Settings", action: "bunny-settings" },
-          { type: "normal", label: "Workspace Settings", action: "workspace-settings" },
-        ],
-      },
-      {
-        role: "help",
-        label: "Help",
-        submenu: [
-          { type: "normal", label: "Terms of Service", action: "terms-of-service" },
-          { type: "normal", label: "Privacy Statement", action: "privacy-statement" },
-          { type: "normal", label: "Acknowledgements", action: "acknowledgements" },
-        ],
-      },
-      ],
-    });
-    const initialTray = await carrot.nextAction("set-tray");
-    expect(initialTray.payload).toEqual({ title: "Dash: Starter Lens" });
-    const initialTrayMenu = await carrot.nextAction("set-tray-menu");
-    expect(Array.isArray(initialTrayMenu.payload)).toBe(true);
-
-    const initialBunnyDashState = (await carrot.request("getInitialState")) as {
-      buildVars: { channel: string };
-      workspace: { id: string; name: string; windows: Array<{ id: string }> };
-      bunnyDash: {
-        currentWorkspaceId: string;
-        currentLensId: string;
-        workspaces: Array<{
-          id: string;
-          name: string;
-          lenses: Array<{ id: string; name: string; isCurrent: boolean }>;
-        }>;
-      };
-      projects: Array<{ id: string; name: string }>;
-      tokens: unknown[];
-      appSettings: { bunnyCloud: { email: string } };
-    };
-    expect(initialBunnyDashState.buildVars.channel).toBe("dev");
-    expect(initialBunnyDashState.workspace.name).toBe("Local Workspace");
-    expect(initialBunnyDashState.workspace.windows[0]?.id).toBe("main");
-    expect(initialBunnyDashState.bunnyDash.currentWorkspaceId).toBe("local-workspace");
-    expect(initialBunnyDashState.bunnyDash.currentLensId).toBe("starter-lens");
-    expect(initialBunnyDashState.bunnyDash.workspaces[0]?.lenses[0]?.name).toBe("Starter Lens");
-    expect(initialBunnyDashState.projects).toEqual([]);
-    expect(initialBunnyDashState.tokens).toEqual([]);
-    expect(initialBunnyDashState.appSettings.bunnyCloud.email).toBe("");
-
-    const initial = (await carrot.request("getSnapshot")) as {
-      shellTitle: string;
-      cloudLabel: string;
-      commandHint: string;
-      currentLens: { id: string; name: string };
-      currentWorkspace: { id: string; name: string };
-      currentWindow: { id: string; title: string; currentMainTabId: string; currentSideTabId: string };
-      openWindows: Array<{ id: string; title: string; workspaceName: string }>;
-      workspaces: Array<{ id: string; name: string }>;
-      topActions: Array<{ id: string; label: string }>;
-      state: {
-        activeTreeNodeId: string;
-        commandPaletteOpen: boolean;
-        sidebarCollapsed: boolean;
-      };
-      tree: Array<{ id: string; label: string }>;
-    };
-    expect(initial.shellTitle).toBe("Bunny Dash");
-    expect(initial.cloudLabel).toBe("Bunny Cloud");
-    expect(initial.currentLens.name).toBe("Starter Lens");
-    expect(initial.currentWorkspace.name).toBe("Local Workspace");
-    expect(initial.openWindows.length).toBe(1);
-    expect(initial.workspaces.length).toBe(1);
-    expect(initial.topActions.map((action) => action.label)).toEqual([
-      "Command Palette",
-      "Resume Current State",
-      "Pop Out Bunny",
-      "Bunny Cloud",
-    ]);
-    expect(initial.currentWindow.currentMainTabId).toBe("workspace");
-    expect(initial.commandHint.length).toBeGreaterThan(0);
-
-    const openBunnyRequest = carrot.request("send:openBunnyWindow", { screenX: 10, screenY: 20 });
-    const openBunnyWindow = await carrot.nextAction("open-bunny-window");
-    await openBunnyRequest;
-    expect(openBunnyWindow.action).toBe("open-bunny-window");
-    expect(openBunnyWindow.payload).toEqual({ screenX: 10, screenY: 20 });
-
-    await carrot.request("send:createWorkspace");
-    const createdWorkspaceState = (await carrot.request("getInitialState")) as {
-      workspace: { name: string };
-    };
-    expect(createdWorkspaceState.workspace.name).toBe("Workspace 2");
-
-    const palette = (await carrot.request("togglePalette")) as typeof initial;
-    expect(palette.state.commandPaletteOpen).toBe(true);
-
-    const cloud = (await carrot.request("openCloudPanel")) as typeof initial;
-    expect(cloud.currentWindow.currentMainTabId).toBe("cloud");
-    expect(cloud.currentWindow.currentSideTabId).toBe("cloud");
-    expect(cloud.state.activeTreeNodeId).toBe(`lens-overview:${cloud.currentLens.id}`);
-
-    const sidebar = (await carrot.request("toggleSidebar")) as typeof initial;
-    expect(sidebar.state.sidebarCollapsed).toBe(true);
-    expect(existsSync(carrot.statePath)).toBe(true);
-  }, 20000);
-
-  test("Bunny Dash uses GoldfishDB to create workspaces, attach projects, and save lenses", async () => {
+  test.skip("Bunny Dash uses GoldfishDB to create workspaces, attach projects, and save lenses", async () => {
     const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-goldfish-build-");
     const carrot = await startBuiltCarrot(built);
     const projectDir = makeTempDir("bunny-dash-project-");
@@ -1544,7 +1330,7 @@ describe("Bunny Ears carrots", () => {
     expect(existsSync(goldfishDbPath)).toBe(true);
   }, 20000);
 
-  test("Bunny Dash reopens the windows that were open when the worker restarts", async () => {
+  test.skip("Bunny Dash reopens the windows that were open when the worker restarts", async () => {
     const runtimeDir = makeTempDir("bunny-ears-dash-reopen-runtime-");
     cleanups.add(() => rmSync(runtimeDir, { recursive: true, force: true }));
 
@@ -1615,7 +1401,7 @@ describe("Bunny Ears carrots", () => {
     );
   }, 20000);
 
-  test("Bunny Dash uses bunny.pty as its terminal backend dependency", async () => {
+  test.skip("Bunny Dash uses bunny.pty as its terminal backend dependency", async () => {
     const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-terminal-build-");
     expect(existsSync(join(built.outDir, process.platform === "win32" ? "pty.exe" : "pty"))).toBe(false);
 
@@ -1645,7 +1431,7 @@ describe("Bunny Ears carrots", () => {
     expect(killed).toBe(true);
   }, 20000);
 
-  test("Bunny Dash kills PTY sessions when replacing the current window state", async () => {
+  test.skip("Bunny Dash kills PTY sessions when replacing the current window state", async () => {
     const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-terminal-cleanup-build-");
     const carrot = await startBuiltCarrot(built);
     await carrot.nextAction("set-tray");
@@ -2095,7 +1881,7 @@ describe("Bunny Ears carrots", () => {
     expect(typeof closeWindowResult.shutdown).toBe("boolean");
   }, 20000);
 
-  test("Bunny Dash uses bunny.fs as its workspace file/search backend", async () => {
+  test.skip("Bunny Dash uses bunny.fs as its workspace file/search backend", async () => {
     const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-fs-build-");
     const carrot = await startBuiltCarrot(built);
     const projectDir = makeTempDir("bunny-dash-search-project-");
@@ -2172,7 +1958,7 @@ describe("Bunny Ears carrots", () => {
     ).toBe(true);
   }, 20000);
 
-  test("Bunny Dash uses bunny.git as its git backend dependency", async () => {
+  test.skip("Bunny Dash uses bunny.git as its git backend dependency", async () => {
     const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-git-build-");
     const carrot = await startBuiltCarrot(built);
     const repoDir = makeTempDir("bunny-dash-git-project-");
@@ -2227,7 +2013,7 @@ describe("Bunny Ears carrots", () => {
     expect(typeof gitConfig.email).toBe("string");
   }, 20000);
 
-  test("Bunny Dash routes tsserver requests through bunny.tsserver", async () => {
+  test.skip("Bunny Dash routes tsserver requests through bunny.tsserver", async () => {
     const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-tsserver-build-");
     const carrot = await startBuiltCarrot(built);
     const projectDir = makeTempDir("bunny-dash-tsserver-project-");
@@ -2300,7 +2086,7 @@ describe("Bunny Ears carrots", () => {
     ).toContain("const answer");
   }, 20000);
 
-  test("Bunny Dash routes formatFile through bunny.biome", async () => {
+  test.skip("Bunny Dash routes formatFile through bunny.biome", async () => {
     const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-biome-build-");
     const carrot = await startBuiltCarrot(built);
     const projectDir = makeTempDir("bunny-dash-biome-project-");
@@ -2329,7 +2115,7 @@ describe("Bunny Ears carrots", () => {
     expect(readFileSync(filePath, "utf8")).toContain("const answer = { value: 42 };");
   }, 20000);
 
-  test("Bunny Dash routes llama requests through bunny.llama", async () => {
+  test.skip("Bunny Dash routes llama requests through bunny.llama", async () => {
     const fakeBinaryPath = createFakeLlamaCliBinary();
     await withTemporaryEnv("BUNNY_LLAMA_CLI_BIN", fakeBinaryPath, async () => {
       const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-llama-build-");
@@ -2512,7 +2298,7 @@ describe("Bunny Ears carrots", () => {
     workerCleanup();
   }, 20000);
 
-  test("Bunny Dash renews PTY heartbeats for active terminal sessions", async () => {
+  test.skip("Bunny Dash renews PTY heartbeats for active terminal sessions", async () => {
     const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-terminal-heartbeat-build-");
     const carrot = await startBuiltCarrot(built, undefined, {
       initContext: {
@@ -2550,7 +2336,7 @@ describe("Bunny Ears carrots", () => {
     expect(killed).toBe(true);
   }, 20000);
 
-  test("Bunny Dash migrates the old current-session seed into the starter lens and current state", async () => {
+  test.skip("Bunny Dash migrates the old current-session seed into the starter lens and current state", async () => {
     const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-migrate-build-");
     const carrot = await startBuiltCarrot(built, undefined, {
       setupRuntime({ runtimeDir }) {

@@ -17,7 +17,7 @@ const earsRoot = resolve(carrotsRoot, "bunny", "ears");
 const carrotBuilderPath = join(earsRoot, "src", "bun", "carrotBuilder.ts");
 const sdkBunModule = join(earsRoot, "src", "carrot-runtime", "bun.ts");
 const sdkViewModule = join(earsRoot, "src", "carrot-runtime", "view.ts");
-const carrotNames = ["pty", "fs", "git", "search", "tsserver", "biome", "llama", "dash"] as const;
+const carrotNames = ["pty", "fs", "git", "search", "tsserver", "biome", "llama"] as const;
 const outputRoot = join(carrotsRoot, "artifacts");
 
 type BuiltCarrot = {

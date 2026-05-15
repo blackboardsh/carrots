@@ -1,5 +1,5 @@
 import { Show, createMemo, createSignal, onMount } from "solid-js";
-import { join } from "../../../../dash/src/renderers/utils/pathUtils";
+import { join } from "../shared/pathUtils";
 import { GitHubRepoSelector } from "./GitHubRepoSelector";
 import { type GitHubRepository } from "./githubService";
 import { getQueryParam, invokeFsCarrot, invokeGitCarrot, sendToHost } from "../shared/bridge";

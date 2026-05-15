@@ -9,8 +9,8 @@ import {
 } from "solid-js";
 import { createStore, unwrap } from "solid-js/store";
 import { type Accessor } from "solid-js";
-import { Dialog } from "../../../../dash/src/renderers/lens/components/Dialog";
-import { dirname, join } from "../../../../dash/src/renderers/utils/pathUtils";
+import { Dialog } from "../shared/Dialog";
+import { dirname, join } from "../shared/pathUtils";
 import { electrobun, invokeFsCarrot, invokeGitCarrot, sendToHost } from "../shared/bridge";
 
 type FileChangeType = {
