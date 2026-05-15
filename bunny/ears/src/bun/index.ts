@@ -390,17 +390,7 @@ class CarrotInstance {
     }
 
     if (!(runtime as any).shutdownInProgress) {
-      if (this.carrot.manifest.id === "bunny-dash" && this.status === "running") {
-        try {
-          await this.invoke("hostWindowClosed", { windowId });
-        } catch (error) {
-          this.pushLog(
-            `hostWindowClosed failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        }
-      } else {
+      if (this.carrot.manifest.id !== "bunny-dash") {
         this.sendEvent("window-closed", { windowId });
       }
     }
@@ -977,12 +967,7 @@ class CarrotInstance {
         if (token) {
           (runtime as any).saveAuthToken(token);
           (runtime as any).registerInstanceWithToken(token).catch(() => {});
-          // Notify all running carrots about the new token
-          for (const carrot of runtime.carrots.values()) {
-            if (carrot.status === "running") {
-              carrot.sendEvent("auth-token-changed", { token });
-            }
-          }
+          (runtime as any).broadcastDashAuthTokenChanged(token);
         } else {
           (runtime as any).signOutFromCloud();
         }
@@ -1591,23 +1576,9 @@ class BunnyEarsRuntime {
     const cachePath = this.getDashHostCachePath();
     const cache = this.loadDashHostCache();
     const cachedWindows = Array.isArray(cache?.windows) ? cache.windows.length : 0;
-    if (cachedWindows > 0) {
-      return {
-        path: existsSync(cachePath) ? cachePath : null,
-        windowCount: cachedWindows,
-      };
-    }
-
-    const legacyWindows = this.loadLegacyDashWindowSummaries();
-    const legacyPath = this.carrots.get("bunny-dash")?.statePath || null;
     return {
-      path:
-        legacyWindows.length > 0
-          ? legacyPath
-          : existsSync(cachePath)
-            ? cachePath
-            : null,
-      windowCount: legacyWindows.length,
+      path: existsSync(cachePath) ? cachePath : null,
+      windowCount: cachedWindows,
     };
   }
 
@@ -2105,77 +2076,6 @@ class BunnyEarsRuntime {
     return path.join(this.getChannelStateDir(), "dash-host-cache.json");
   }
 
-  private loadLegacyDashWindowSummaries(): DashHostWindowCache[] {
-    const dashCarrot = this.carrots.get("bunny-dash");
-    const statePath = dashCarrot?.statePath;
-    if (!statePath || !existsSync(statePath)) {
-      return [];
-    }
-
-    try {
-      const parsed = JSON.parse(readFileSync(statePath, "utf8")) as {
-        currentState?: {
-          windows?: Array<{
-            id?: string;
-            title?: string;
-            workspaceId?: string;
-            lensId?: string;
-          }>;
-        };
-        sessionSnapshot?: {
-          windows?: Array<{
-            id?: string;
-            title?: string;
-            workspaceId?: string;
-            lensId?: string;
-          }>;
-        };
-        bunnyDash?: {
-          workspaces?: Record<
-            string,
-            {
-              windows?: Array<{
-                id?: string;
-                position?: {
-                  x?: number;
-                  y?: number;
-                  width?: number;
-                  height?: number;
-                };
-              }>;
-            }
-          >;
-        };
-      };
-
-      const windows = parsed.sessionSnapshot?.windows || parsed.currentState?.windows || [];
-      const positionedWindows = Object.values(parsed.bunnyDash?.workspaces || {}).flatMap(
-        (workspace) => workspace.windows || [],
-      );
-
-      return windows
-        .filter((window) => window && typeof window === "object" && window.id)
-        .map((window) => {
-          const positioned = positionedWindows.find((candidate) => candidate.id === window.id);
-          return {
-            windowId: String(window.id || ""),
-            title: String(window.title || "Dash"),
-            frame: {
-              x: Number(positioned?.position?.x || 120),
-              y: Number(positioned?.position?.y || 120),
-              width: Number(positioned?.position?.width || 1500),
-              height: Number(positioned?.position?.height || 900),
-            },
-            workspaceId: String(window.workspaceId || ""),
-            lensId: String(window.lensId || ""),
-            activeTreeNodeId: "",
-          };
-        });
-    } catch {
-      return [];
-    }
-  }
-
   private loadDashHostCache(): DashHostSummaryCache | null {
     const cachePath = this.getDashHostCachePath();
     if (!existsSync(cachePath)) {
@@ -2565,6 +2465,7 @@ class BunnyEarsRuntime {
         carrot.sendEvent("auth-token-cleared");
       }
     }
+    this.refreshDashViews();
 
     console.log("[bunny-ears] Bunny Cloud session cleared");
 
@@ -2653,6 +2554,15 @@ class BunnyEarsRuntime {
         connectedAt: cache?.account.connectedAt,
       },
     });
+    this.refreshDashViews();
+  }
+
+  private refreshDashViews() {
+    const dashCarrot = this.carrots.get("bunny-dash");
+    if (!dashCarrot || dashCarrot.status !== "running") {
+      return;
+    }
+    dashCarrot.emitViewMessage("refreshBunnyDashState", {}, { raw: true });
   }
 
   private broadcastDashAuthTokenChanged(token: string) {
@@ -2661,6 +2571,7 @@ class BunnyEarsRuntime {
         carrot.sendEvent("auth-token-changed", { token });
       }
     }
+    this.refreshDashViews();
   }
 
   private async getCurrentMachineInfoForDash(): Promise<BunnyCloudMachineInfo> {
@@ -2919,12 +2830,7 @@ class BunnyEarsRuntime {
       const token = data.accessToken || null;
       if (token) {
         this.saveAuthToken(token);
-        // Notify all running carrots about the refreshed token
-        for (const carrot of this.carrots.values()) {
-          if (carrot.status === "running") {
-            carrot.sendEvent("auth-token-changed", { token });
-          }
-        }
+        this.broadcastDashAuthTokenChanged(token);
         this.registerInstanceWithToken(token).catch(() => {});
       }
       return token;
@@ -2962,12 +2868,7 @@ class BunnyEarsRuntime {
               // Immediately re-register the instance so it shows online in Farm
               // without waiting for the next 60s heartbeat tick.
               this.registerInstanceWithToken(accessToken).catch(() => {});
-              // Notify all running carrots about the new token
-              for (const carrot of this.carrots.values()) {
-                if (carrot.status === "running") {
-                  carrot.sendEvent("auth-token-changed", { token: accessToken });
-                }
-              }
+              this.broadcastDashAuthTokenChanged(accessToken);
 
               // Keep the Farm window open — user can see their dashboard.
               // Resize to a comfortable dashboard size.
@@ -4027,7 +3928,7 @@ class BunnyEarsRuntime {
       const cachedWindows =
         Array.isArray(dashCache?.windows) && dashCache.windows.length > 0
           ? dashCache.windows
-          : this.loadLegacyDashWindowSummaries();
+          : [];
 
       if (dashCarrot.controllerWindows.size > 0) {
         const targetWindow =
