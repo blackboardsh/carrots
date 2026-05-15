@@ -4278,6 +4278,11 @@ class BunnyEarsRuntime {
       return;
     }
 
+    if (targetCarrotId === "dash-ui" || targetCarrotId === "bunny-dash") {
+      this.emitDashViewMessage(name, payload, options);
+      return;
+    }
+
     const target = this.carrots.get(targetCarrotId);
     if (!target) {
       return;
