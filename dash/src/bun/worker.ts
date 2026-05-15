@@ -1,22 +1,14 @@
 import {
   existsSync,
-  mkdirSync,
   readFileSync,
-  readdirSync,
-  statSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
-import { hostname } from "node:os";
+import { dirname, join } from "node:path";
 import {
   CloudApi,
   getApiBaseUrl,
-  type CloudInstance,
   type CloudWorkspace,
 } from "./cloudApi";
-import {
-  Carrots,
-  app,
-} from "electrobun/bun";
+import { app } from "electrobun/bun";
 import {
   createDashDb,
   type DashDb,
@@ -95,41 +87,6 @@ type BunnyAppSettings = {
 type PersistedBunnyDashState = {
   workspaces?: Record<string, BunnyWorkspace>;
   appSettings?: BunnyAppSettings;
-  tokens?: any[];
-};
-
-type BunnyCloudMachineInfo = {
-  machineId: string;
-  hostname: string;
-  platform: string;
-  instanceName: string;
-};
-
-type CachedCarrotSummary = {
-  id: string;
-  name: string;
-  description: string;
-  version: string;
-  mode: string;
-  permissions: string[];
-  status: string;
-  slateUIs?: Array<{
-    id: string;
-    name: string;
-    path: string;
-  }>;
-  contributions?: {
-    fileActivators?: Array<{
-      baseName?: string;
-      nodeType?: "file" | "dir" | "any";
-      slate: {
-        type: string;
-        name?: string;
-        icon?: string;
-        config?: Record<string, unknown>;
-      };
-    }>;
-  };
 };
 
 type CurrentState = {
@@ -154,87 +111,8 @@ type ProjectMountDoc = DashDocumentTypes["projectMounts"];
 type LensDoc = DashDocumentTypes["layouts"];
 type CurrentStateDoc = DashDocumentTypes["sessionSnapshots"];
 type UiSettingsDoc = DashDocumentTypes["uiSettings"];
-type TypeScriptPeerDependencyStatus = {
-  installed: boolean;
-  version: string;
-};
-type BiomePeerDependencyStatus = {
-  installed: boolean;
-  version: string;
-};
-
-type BunnyDashWorkspaceLensPayload = {
-  currentWorkspaceId: string;
-  currentLensId: string;
-  instances: Array<{
-    id: string;
-    name: string;
-    os: string;
-    status: string;
-    isCurrent: boolean;
-    carrots: Array<{ id: string; name: string; description: string; version: string; mode: string; permissions: string[]; status: string }>;
-  }>;
-  workspaces: Array<{
-    id: string;
-    name: string;
-    subtitle: string;
-    isCurrent: boolean;
-    currentLensId: string;
-    currentLensIsActive: boolean;
-    canExpand: boolean;
-    lenses: Array<{
-      id: string;
-      name: string;
-      description: string;
-      workspaceId: string;
-      isCurrent: boolean;
-      isDirty: boolean;
-    }>;
-  }>;
-  cloudWorkspaces: Array<{
-    id: string;
-    name: string;
-    subtitle: string;
-    runtimeWorkspaceId: string;
-    isCurrent: boolean;
-    canExpand: boolean;
-    lenses: Array<{
-      id: string;
-      name: string;
-      description: string;
-      workspaceId: string;
-      runtimeLensId: string;
-      isCurrent: boolean;
-    }>;
-    linkedInstances: Array<{
-      id: string;
-      name: string;
-      os: string;
-      status: string;
-      isCurrent: boolean;
-      mounts: Array<{
-        id: string;
-        workspaceId: string;
-        workspaceName: string;
-        instanceId: string;
-        path: string;
-        name: string;
-      }>;
-    }>;
-  }>;
-  knownLocalProjects: Array<{
-    id: string;
-    name: string;
-    path: string;
-    instanceId: string;
-    instanceLabel: string;
-    kind: string;
-    status: string;
-  }>;
-};
 
 let statePath = "";
-let permissions = new Set<string>();
 let dashDb: DashDb | null = null;
 let manifestVersion = "0.0.1";
 let runtimeChannel = "dev";
@@ -248,18 +126,6 @@ const LIVE_WINDOW_ID_SEPARATOR = "::";
 const WORKSPACE_CURRENT_LENS_PREFIX = "__workspace-current__:";
 const CLOUD_WORKSPACE_SHADOW_PREFIX = "__cloud_workspace__:";
 const CLOUD_LENS_SHADOW_PREFIX = "__cloud_lens__:";
-let typeScriptPeerDependencyStatus: TypeScriptPeerDependencyStatus = {
-  installed: false,
-  version: "",
-};
-let biomePeerDependencyStatus: BiomePeerDependencyStatus = {
-  installed: false,
-  version: "",
-};
-let gitPeerDependencyStatus: { installed: boolean; version: string } = {
-  installed: false,
-  version: "",
-};
 const LEGACY_CURRENT_SESSION_MAIN_TABS: WindowTabId[] = [
   "workspace",
   "projects",
@@ -318,16 +184,12 @@ const defaultBunnyAppSettings: BunnyAppSettings = {
 let bunnyDashState: PersistedBunnyDashState = {
   workspaces: {},
   appSettings: structuredClone(defaultBunnyAppSettings),
-  tokens: [],
 };
 const UNHANDLED_DASH_REQUEST = Symbol("unhandled-bunny-dash-request");
 
 // Cloud API state
 let cloudApi: CloudApi | null = null;
-let cloudInstances: CloudInstance[] = [];
 let cloudWorkspaces: CloudWorkspace[] = [];
-let cloudCurrentInstanceId: string | null = null;
-let cachedCarrotList: CachedCarrotSummary[] = [];
 
 function initCloudApi(): CloudApi | null {
   // Use auth token from Bunny Ears (passed via init context) or from persisted dash state
@@ -355,20 +217,10 @@ function initCloudApi(): CloudApi | null {
 
 async function refreshCloudData() {
   if (!cloudApi) return;
-  const [instances, workspaces, currentMachine] = await Promise.all([
-    cloudApi.getInstances().catch(() => []),
-    cloudApi.listWorkspaces().catch(() => []),
-    getCurrentMachineInfo().catch(() => null),
-  ]);
-  cloudInstances = instances;
+  const workspaces = await cloudApi.listWorkspaces().catch(() => []);
   cloudWorkspaces = workspaces;
-  cloudCurrentInstanceId = currentMachine?.machineId
-    ? instances.find((instance) => instance.machine_id === currentMachine.machineId)?.id || null
-    : null;
   syncCloudShadowState();
-  log(
-    `cloud: ${cloudInstances.length} instance(s), ${cloudWorkspaces.length} workspace(s)`,
-  );
+  log(`cloud: ${cloudWorkspaces.length} workspace(s)`);
 }
 
 function cloudShadowWorkspaceKey(cloudWorkspaceId: string) {
@@ -395,125 +247,8 @@ function cloudLensIdFromShadowKey(lensId: string) {
   return lensId.replace(CLOUD_LENS_SHADOW_PREFIX, "");
 }
 
-async function refreshCarrotList() {
-  try {
-    const list = await Carrots.list();
-    cachedCarrotList = (list || []).map((c: any) => ({
-      id: c.id,
-      name: c.name,
-      description: c.description || "",
-      version: c.version,
-      mode: c.mode,
-      permissions: c.permissions || [],
-      status: c.status,
-      slateUIs: c.slateUIs,
-      contributions: c.contributions,
-    }));
-  } catch {}
-}
-
 function getCloudChannel() {
   return runtimeChannel || app.channel || (manifestVersion === "0.0.1" ? "dev" : undefined);
-}
-
-async function getCurrentMachineInfo(): Promise<BunnyCloudMachineInfo> {
-  const info = await app.getMachineInfo().catch(() => ({
-    machineId: "",
-    hostname: "",
-    platform: "",
-  }));
-  const hostnameValue = info.hostname || hostname() || "Bunny Ears";
-  const platformValue = info.platform || process.platform;
-  return {
-    machineId: info.machineId || "",
-    hostname: hostnameValue,
-    platform: platformValue,
-    instanceName: platformValue ? `${hostnameValue} (${platformValue})` : hostnameValue,
-  };
-}
-
-function buildCloudWorkspacePayload(): BunnyDashWorkspaceLensPayload["cloudWorkspaces"] {
-  const instancesById = new Map(cloudInstances.map((instance) => [instance.id, instance]));
-  const activeRuntimeWindow =
-    runtimeWindows.find((window) => window.id === state.currentWindowId) || getCurrentWindowUnsafe();
-  const activeWorkspaceId = activeRuntimeWindow?.workspaceId || "";
-  const activeLensId = activeRuntimeWindow ? getLensIdForWindow(activeRuntimeWindow) : state.currentLayoutId;
-
-  return cloudWorkspaces
-    .slice()
-    .sort((left, right) => (left.sort_order || 0) - (right.sort_order || 0))
-    .map((workspace) => {
-    const runtimeWorkspaceId = cloudShadowWorkspaceKey(workspace.id);
-    const mountsByInstance = new Map<string, NonNullable<CloudWorkspace["mounts"]>>();
-    for (const mount of workspace.mounts || []) {
-      if (!mountsByInstance.has(mount.instance_id)) {
-        mountsByInstance.set(mount.instance_id, []);
-      }
-      mountsByInstance.get(mount.instance_id)!.push(mount);
-    }
-
-    const linkedInstances = Array.from(mountsByInstance.entries())
-      .map(([instanceId, mounts]) => {
-        const instance = instancesById.get(instanceId);
-        return {
-          id: instanceId,
-          name: instance?.name || "Linked Instance",
-          os: instance?.os || "",
-          status: instance?.status || "unknown",
-          isCurrent: instanceId === cloudCurrentInstanceId,
-          mounts: mounts
-            .slice()
-            .sort((left, right) => (left.sort_order || 0) - (right.sort_order || 0))
-            .map((mount) => ({
-              id: mount.id,
-              workspaceId: workspace.id,
-              workspaceName: workspace.name,
-              instanceId,
-              path: mount.path,
-              name: mount.name,
-            })),
-        };
-      })
-      .sort((left, right) => {
-        if (left.isCurrent !== right.isCurrent) {
-          return left.isCurrent ? -1 : 1;
-        }
-        return left.name.localeCompare(right.name);
-      });
-
-    const lenses = (workspace.lenses || [])
-      .slice()
-      .sort((left, right) => (left.sort_order || 0) - (right.sort_order || 0))
-      .map((lens) => ({
-        id: lens.id,
-        name: lens.name,
-        description: lens.description,
-        workspaceId: workspace.id,
-        runtimeLensId: cloudShadowLensKey(lens.id),
-        isCurrent:
-          runtimeWorkspaceId === activeWorkspaceId &&
-          cloudShadowLensKey(lens.id) === activeLensId,
-      }));
-
-    const subtitleParts = [
-      workspace.description || "",
-      lenses.length > 0 ? `${lenses.length} lens${lenses.length === 1 ? "" : "es"}` : "",
-      linkedInstances.length > 0
-        ? `${linkedInstances.length} instance${linkedInstances.length === 1 ? "" : "s"}`
-        : "",
-    ].filter(Boolean);
-
-      return {
-        id: workspace.id,
-        name: workspace.name,
-        subtitle: subtitleParts.join(" · "),
-        runtimeWorkspaceId,
-        isCurrent: runtimeWorkspaceId === activeWorkspaceId,
-        canExpand: lenses.length > 0 || linkedInstances.length > 0,
-        lenses,
-        linkedInstances,
-      };
-    });
 }
 
 const ACTIVE_INTERNAL_PREFIX = "__BUNNY_INTERNAL__";
@@ -575,120 +310,12 @@ function post(message: unknown) {
   self.postMessage(message);
 }
 
-function ensureHostDashWindow(windowId = state.currentWindowId, title?: string) {
-  const runtimeWindow = runtimeWindows.find((candidate) => candidate.id === windowId);
-  if (!runtimeWindow) {
-    throw new Error(`Unknown runtime window: ${windowId}`);
-  }
-
-  const nextTitle = title || runtimeWindow.title;
-  if (hostWindowIds.has(windowId)) {
-    post({
-      type: "action",
-      action: "window-set-title",
-      payload: { windowId, title: nextTitle },
-    });
-    return;
-  }
-
-  const bunnyWindow = getBunnyWindowForRuntimeWindow(windowId);
-  hostWindowIds.add(windowId);
-  post({
-    type: "action",
-    action: "window-create",
-    payload: {
-      windowId,
-      options: {
-        hidden: false,
-        title: nextTitle,
-        url: "views://lens/index.html",
-        titleBarStyle: "hiddenInset",
-        frame: {
-          x: bunnyWindow?.position.x ?? 120,
-          y: bunnyWindow?.position.y ?? 120,
-          width: bunnyWindow?.position.width ?? 1400,
-          height: bunnyWindow?.position.height ?? 920,
-        },
-      },
-    },
-  });
-}
-
-function focusWindow(windowId?: string, title?: string) {
-  const targetWindowId = windowId || state.currentWindowId;
-  ensureHostDashWindow(targetWindowId, title);
-  hostWindowIds.add(targetWindowId);
-  post({
-    type: "action",
-    action: "focus-window",
-    payload: { windowId: targetWindowId, title },
-  });
-}
-
-function closeWindow(windowId?: string) {
-  const targetWindowId = windowId || state.currentWindowId;
-  if (!hostWindowIds.has(targetWindowId)) {
-    return;
-  }
-  hostWindowIds.delete(targetWindowId);
-  post({
-    type: "action",
-    action: "close-window",
-    payload: { windowId: targetWindowId },
-  });
-}
-
-function sendRuntimeEventToDashWindow(windowId: string | undefined, name: string, payload?: unknown) {
-  const targetWindowId = windowId || state.currentWindowId;
-  post({ type: "action", action: "emit-view", payload: { name, payload, raw: true, windowId: targetWindowId } });
-}
-
 function broadcastRuntimeEventToDashWindows(name: string, payload?: unknown) {
   post({
     type: "action",
     action: "emit-view",
     payload: { raw: true, name, payload },
   });
-}
-
-function getUniqueLensNameForWorkspace(workspaceId: string, baseName = "Lens", excludeLensId?: string) {
-  const existingNames = new Set(
-    getLensesForWorkspace(workspaceId)
-      .filter((lens) => lens.key !== excludeLensId)
-      .map((lens) => lens.name.trim().toLowerCase()),
-  );
-
-  let index = 1;
-  while (existingNames.has(`${baseName} ${index}`.toLowerCase())) {
-    index += 1;
-  }
-
-  return `${baseName} ${index}`;
-}
-
-function getUniqueLensDisplayName(workspaceId: string, rawName: string, excludeLensId?: string) {
-  const trimmed = rawName.trim();
-  if (!trimmed) {
-    return getUniqueLensNameForWorkspace(workspaceId, "Lens", excludeLensId);
-  }
-
-  const existingNames = new Set(
-    getLensesForWorkspace(workspaceId)
-      .filter((lens) => lens.key !== excludeLensId)
-      .map((lens) => lens.name.trim().toLowerCase()),
-  );
-
-  if (!existingNames.has(trimmed.toLowerCase())) {
-    return trimmed;
-  }
-
-  let index = 2;
-  let candidate = `${trimmed} ${index}`;
-  while (existingNames.has(candidate.toLowerCase())) {
-    index += 1;
-    candidate = `${trimmed} ${index}`;
-  }
-  return candidate;
 }
 
 function ensureDb() {
@@ -700,7 +327,6 @@ function ensureDb() {
 
 function initializeRuntimeContext(message?: {
   context?: {
-    permissions?: string[];
     statePath?: string;
     authToken?: string | null;
     channel?: string;
@@ -708,10 +334,6 @@ function initializeRuntimeContext(message?: {
   manifest?: { version?: string };
 }) {
   const context = message?.context;
-  permissions = new Set(
-    context?.permissions ||
-      ((app.permissions as string[] | undefined) ?? []),
-  );
   statePath = context?.statePath || app.statePath || statePath;
   manifestVersion = message?.manifest?.version || app.manifest?.version || manifestVersion;
   runtimeChannel = context?.channel || app.channel || runtimeChannel || "dev";
@@ -735,12 +357,10 @@ function ensureBootPromise() {
       if (cloudApi) {
         await refreshCloudData();
       }
-      await refreshCarrotList();
 
       ensureRuntimeState();
       currentState = captureCurrentState();
       post({ type: "ready" });
-      emitSnapshot();
       log("bunny dash worker initialized");
     })();
   }
@@ -768,9 +388,7 @@ app.on("auth-token-changed", (payload) => {
 app.on("auth-token-cleared", () => {
   runtimeAuthToken = null;
   cloudApi = null;
-  cloudInstances = [];
   cloudWorkspaces = [];
-  cloudCurrentInstanceId = null;
   fallbackToVisibleLocalWorkspace();
   syncCloudShadowState();
   if (bunnyDashState.appSettings?.bunnyCloud) {
@@ -868,22 +486,6 @@ function listProjectMounts() {
   return [...(ensureDb().collection("projectMounts").query().data || [])].sort(
     (a, b) => a.sortOrder - b.sortOrder,
   );
-}
-
-function isIgnoredPath(path: string) {
-  const parts = path.split(/[\\/]+/);
-  return parts.includes("node_modules") || parts.includes(".git") || path.endsWith("/.DS_Store");
-}
-
-function scheduleRefresh() {
-  if (refreshTimer) {
-    clearTimeout(refreshTimer);
-  }
-
-  refreshTimer = setTimeout(() => {
-    refreshTimer = null;
-    emitSnapshot();
-  }, 80);
 }
 
 function listLenses() {
@@ -1085,17 +687,6 @@ function syncCloudShadowState() {
   }
 
   flushDb();
-}
-
-function getDashHomeDir() {
-  return dirname(statePath);
-}
-
-function getBunnyProjectsFolder() {
-  const workspace = getCurrentWorkspaceUnsafe() || listWorkspaces()[0];
-  const root = join(getDashHomeDir(), "projects", workspace?.key || "default");
-  mkdirSync(root, { recursive: true });
-  return root;
 }
 
 function makeDefaultBunnyWindow(id = "main"): BunnyWindow {
@@ -1356,87 +947,6 @@ function bunnyProjectsForWorkspace(workspaceId: string) {
   }));
 }
 
-function bunnyKnownLocalProjects() {
-  const dedupedByPath = new Map<string, ReturnType<typeof bunnyProjectsForWorkspace>[number]>();
-
-  for (const project of listProjectMounts()) {
-    if (!project.path || dedupedByPath.has(project.path)) {
-      continue;
-    }
-
-    dedupedByPath.set(project.path, {
-      id: project.key,
-      name: project.name,
-      path: project.path,
-      instanceId: project.instanceId || "host-machine",
-      instanceLabel: project.instanceLabel || "This Machine",
-      kind: project.kind || "code",
-      status: project.status || "ready",
-    });
-  }
-
-  return Array.from(dedupedByPath.values()).sort((left, right) =>
-    left.name.localeCompare(right.name)
-  );
-}
-
-function bunnyBuildVars() {
-  return {
-    channel: "dev",
-    version: manifestVersion,
-    hash: "bunny-dash",
-  };
-}
-
-function bunnyPaths() {
-  const bunPath = Bun.which("bun") || "";
-  const gitPath = Bun.which("git") || "";
-  return {
-    APP_PATH: getDashHomeDir(),
-    BUNNY_HOME_FOLDER: getDashHomeDir(),
-    BUNNY_PROJECTS_FOLDER: getBunnyProjectsFolder(),
-    BUNNY_DEPS_PATH: "",
-    BUNNY_ENV_PATH: "",
-    BUN_BINARY_PATH: bunPath,
-    BIOME_BINARY_PATH: "",
-    TSSERVER_PATH: "",
-    GIT_BINARY_PATH: gitPath,
-    BUN_PATH: bunPath,
-    BUN_DEPS_FOLDER: "",
-    TYPESCRIPT_PACKAGE_PATH: "",
-    BIOME_PACKAGE_PATH: "",
-  };
-}
-
-async function getWebBridgeOrigin() {
-  const port = await app.getWebBridgePort().catch(() => null);
-  if (!port) {
-    return "";
-  }
-  return `http://localhost:${port}`;
-}
-
-function bunnyPeerDependencies() {
-  return {
-    bun: {
-      installed: Boolean(Bun.which("bun")),
-      version: Bun.version,
-    },
-    typescript: {
-      installed: typeScriptPeerDependencyStatus.installed,
-      version: typeScriptPeerDependencyStatus.version,
-    },
-    biome: {
-      installed: biomePeerDependencyStatus.installed,
-      version: biomePeerDependencyStatus.version,
-    },
-    git: {
-      installed: gitPeerDependencyStatus.installed,
-      version: gitPeerDependencyStatus.version,
-    },
-  };
-}
-
 function emitViewMessage(name: string, payload?: unknown, windowId?: string) {
   const targetWindowId = windowId || state.currentWindowId;
   post({ type: "action", action: "emit-view", payload: { name, payload, raw: true, windowId: targetWindowId } });
@@ -1475,8 +985,6 @@ function handleFsFileWatchEvent(payload: unknown) {
       window.id,
     );
   }
-
-  scheduleRefresh();
 }
 
 function emitSetProjectsForWindow(windowId: string) {
@@ -1485,76 +993,13 @@ function emitSetProjectsForWindow(windowId: string) {
     return;
   }
 
-  const workspace = getOrCreateBunnyWorkspace(runtimeWindow.workspaceId);
-  ensureBunnyWorkspaceWindow(runtimeWindow);
   emitViewMessage(
     "setProjects",
     {
-      projects: bunnyProjectsForWorkspace(workspace.id),
-      tokens: bunnyDashState.tokens || [],
-      workspace,
-      appSettings: bunnyDashState.appSettings || defaultBunnyAppSettings,
-      bunnyDash: buildWorkspaceLensPayload(windowId),
+      projects: bunnyProjectsForWorkspace(runtimeWindow.workspaceId),
     },
     windowId,
   );
-}
-
-function buildWorkspaceLensPayload(windowId = state.currentWindowId): BunnyDashWorkspaceLensPayload {
-  const runtimeWindow = runtimeWindows.find((window) => window.id === windowId) || getCurrentWindowUnsafe();
-  const currentWorkspaceId = runtimeWindow?.workspaceId || getCurrentWorkspace().key;
-  const currentLensId = runtimeWindow ? getLensIdForWindow(runtimeWindow) : state.currentLayoutId;
-
-  return {
-    currentWorkspaceId,
-    currentLensId,
-    instances: [
-      // Current instance always first
-      {
-        id: "host-machine",
-        name: hostname() || "This Machine",
-        os: process.platform === "darwin" ? "macos" : process.platform,
-        status: "online" as const,
-        isCurrent: true,
-        carrots: cachedCarrotList,
-      },
-      // Other registered instances
-      ...cloudInstances.map((inst) => ({
-        id: inst.id,
-        name: inst.name,
-        os: inst.os,
-        status: inst.status,
-        isCurrent: false,
-        carrots: [] as typeof cachedCarrotList,
-      })),
-    ],
-    workspaces: listVisibleLocalWorkspaces().map((workspace) => ({
-      id: workspace.key,
-      name: workspace.name,
-      subtitle: workspace.subtitle,
-      isCurrent: workspace.key === currentWorkspaceId,
-      currentLensId: ensureWorkspaceCurrentLens(workspace.key).key,
-      currentLensIsActive:
-        workspace.key === currentWorkspaceId &&
-        ensureWorkspaceCurrentLens(workspace.key).key === currentLensId,
-      canExpand: getLensesForWorkspace(workspace.key).length > 0,
-      lenses: getLensesForWorkspace(workspace.key).map((lens) => ({
-        id: lens.key,
-        name: lens.name,
-        description: lens.description,
-        workspaceId: workspace.key,
-        isCurrent: workspace.key === currentWorkspaceId && lens.key === currentLensId,
-        isDirty:
-          workspace.key === currentWorkspaceId &&
-          lens.key === currentLensId &&
-          runtimeWindow != null
-            ? isLensDirtyInWindow(lens, runtimeWindow)
-            : false,
-      })),
-    })),
-    cloudWorkspaces: buildCloudWorkspacePayload(),
-    knownLocalProjects: bunnyKnownLocalProjects(),
-  };
 }
 
 function emitSetProjects(workspaceId?: string) {
@@ -1851,12 +1296,6 @@ function hydrateLensMetadata() {
   }
 }
 
-function snapshot() {
-  return null;
-}
-
-function emitSnapshot() {}
-
 function isKnownActiveTreeNodeId(nodeId: string) {
   if (!nodeId) {
     return false;
@@ -2034,7 +1473,6 @@ async function handleHostWindowClosed(closedWindowId: string) {
   syncActiveTreeNode();
   await saveState();
   emitSetProjects();
-  emitSnapshot();
 }
 
 async function loadState() {
@@ -2076,7 +1514,6 @@ async function loadState() {
         bunnyDashState = {
           workspaces: persistedDashState.workspaces || {},
           appSettings: persistedDashState.appSettings || structuredClone(defaultBunnyAppSettings),
-          tokens: persistedDashState.tokens || [],
         };
       }
     } catch (error) {
@@ -2260,9 +1697,8 @@ async function restoreLensInCurrentWindow(lensId: string) {
   state.activeTreeNodeId = `lens-overview:${lens.key}`;
   await saveState();
   emitSetProjectsForWindow(currentWindow.id);
-  emitSnapshot();
   log(`lens restored: ${lens.name}`);
-  return snapshot();
+  return null;
 }
 
 async function syncRuntimeWindowFrameFromHost(windowId = state.currentWindowId) {
@@ -2310,7 +1746,6 @@ self.onmessage = async (event) => {
 
     if (message.name === "boot") {
       await ensureBootPromise();
-      emitSnapshot();
       return;
     }
 
@@ -2336,7 +1771,6 @@ self.onmessage = async (event) => {
         hostWindowIds.add(windowId);
       }
       setActiveWindow(windowId);
-      emitSnapshot();
       return;
     }
 
