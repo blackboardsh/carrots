@@ -103,7 +103,7 @@ function extractSource(params: { __source?: InvocationSource } | null | undefine
 }
 
 function getSessionKey(owner: TsServerOwner) {
-  return owner.carrotId;
+  return `${owner.carrotId}:${owner.windowId || "global"}`;
 }
 
 function readTypescriptVersion() {

@@ -12,8 +12,10 @@ import {
   writeFileSync,
   type FSWatcher,
 } from "node:fs";
-import { basename, dirname, join, sep } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import Electrobun from "electrobun";
 
 type InvocationSource = {
   carrotId?: string;
@@ -62,15 +64,8 @@ type SearchSession<T> = {
   totalResultCount: number;
 };
 
-type FileWatchTarget = {
-  watchId: string;
-  workspaceId?: string | null;
-  path: string;
-};
-
 type FileWatchSubscription = {
   owner: SearchOwner;
-  targets: Map<string, FileWatchTarget>;
   lastSyncedAt: number;
 };
 
@@ -112,6 +107,7 @@ const findFilesSessions = new Map<string, SearchSession<string>>();
 const watchSubscriptions = new Map<string, FileWatchSubscription>();
 const directoryWatchers = new Map<string, ProjectDirectoryWatcher>();
 let watchSubscriptionPruneTimer: ReturnType<typeof setInterval> | null = null;
+let directoryWatcherRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 const WATCH_IGNORED_DIR_NAMES = new Set([
   ".cache",
@@ -198,6 +194,17 @@ function closeAllDirectoryWatchers() {
     }
   }
   directoryWatchers.clear();
+}
+
+function scheduleDirectoryWatcherRefresh() {
+  if (directoryWatcherRefreshTimer) {
+    return;
+  }
+
+  directoryWatcherRefreshTimer = setTimeout(() => {
+    directoryWatcherRefreshTimer = null;
+    syncDirectoryWatchers();
+  }, 150);
 }
 
 function pruneExpiredWatchSubscriptions() {
@@ -687,8 +694,9 @@ function readFile(path: string): FileReadResponse {
   };
 }
 
-function pathStartsWithPath(path: string, rootPath: string) {
-  return path === rootPath || path.startsWith(`${rootPath}${sep}`);
+function getDashProjectsRoot() {
+  const channel = Electrobun.channel || "dev";
+  return join(homedir(), ".dash", channel, "projects");
 }
 
 function isIgnoredPath(path: string) {
@@ -700,7 +708,7 @@ function isIgnoredWatchDirectory(path: string) {
   return WATCH_IGNORED_DIR_NAMES.has(basename(path)) || isIgnoredPath(path);
 }
 
-function emitFileWatchPayload(absolutePath: string, workspaceId?: string | null) {
+function emitFileWatchPayload(absolutePath: string) {
   const exists = existsSync(absolutePath);
   let isFile = false;
   let isDir = false;
@@ -717,7 +725,6 @@ function emitFileWatchPayload(absolutePath: string, workspaceId?: string | null)
 
   return {
     absolutePath,
-    workspaceId: workspaceId || undefined,
     exists,
     isDelete: !exists,
     isAdding: exists,
@@ -729,53 +736,18 @@ function emitFileWatchPayload(absolutePath: string, workspaceId?: string | null)
 function emitFileWatchForPath(absolutePath: string) {
   pruneExpiredWatchSubscriptions();
   for (const subscription of watchSubscriptions.values()) {
-    const workspaceIds = new Set<string>();
-
-    for (const target of subscription.targets.values()) {
-      if (!pathStartsWithPath(absolutePath, target.path)) {
-        continue;
-      }
-      if (target.workspaceId) {
-        workspaceIds.add(target.workspaceId);
-      }
-    }
-
-    if (workspaceIds.size === 0) {
-      const payload = emitFileWatchPayload(absolutePath);
-      if (!payload) {
-        continue;
-      }
-      post({
-        type: "action",
-        action: "emit-carrot-view-event",
-        payload: {
-          carrotId: subscription.owner.carrotId,
-          name: "fileWatchEvent",
-          payload,
-          raw: true,
-          windowId: subscription.owner.windowId ?? null,
-        },
-      });
-      continue;
-    }
-
-    for (const workspaceId of workspaceIds) {
-      const payload = emitFileWatchPayload(absolutePath, workspaceId);
-      if (!payload) {
-        continue;
-      }
-      post({
-        type: "action",
-        action: "emit-carrot-view-event",
-        payload: {
-          carrotId: subscription.owner.carrotId,
-          name: "fileWatchEvent",
-          payload,
-          raw: true,
-          windowId: subscription.owner.windowId ?? null,
-        },
-      });
-    }
+    const payload = emitFileWatchPayload(absolutePath);
+    post({
+      type: "action",
+      action: "emit-carrot-view-event",
+      payload: {
+        carrotId: subscription.owner.carrotId,
+        name: "fileWatchEvent",
+        payload,
+        raw: true,
+        windowId: subscription.owner.windowId ?? null,
+      },
+    });
   }
 }
 
@@ -891,12 +863,11 @@ function createProjectDirectoryWatcher(
 }
 
 function syncDirectoryWatchers() {
-  const nextRoots = new Set(
-    Array.from(watchSubscriptions.values())
-      .flatMap((subscription) => Array.from(subscription.targets.values()))
-      .map((project) => project.path)
-      .filter((projectPath) => existsSync(projectPath)),
-  );
+  const projectsRoot = getDashProjectsRoot();
+  const nextRoots =
+    watchSubscriptions.size > 0 && existsSync(projectsRoot)
+      ? new Set([projectsRoot])
+      : new Set<string>();
 
   for (const [rootPath, watcher] of directoryWatchers.entries()) {
     if (nextRoots.has(rootPath)) {
@@ -916,36 +887,23 @@ function syncDirectoryWatchers() {
         return;
       }
       emitFileWatchForPath(absolutePath);
+      scheduleDirectoryWatcherRefresh();
     });
     directoryWatchers.set(rootPath, watcher);
   }
 }
 
-function syncProjectWatchTargets(owner: SearchOwner, targets: FileWatchTarget[]) {
-  if (targets.length === 0) {
-    watchSubscriptions.delete(owner.key);
-    syncDirectoryWatchers();
-    return;
-  }
-
-  const subscription: FileWatchSubscription = {
-    owner,
-    targets: new Map<string, FileWatchTarget>(),
-    lastSyncedAt: Date.now(),
-  };
-
-  for (const target of targets) {
-    if (!target.watchId || !target.path) {
-      continue;
-    }
-    subscription.targets.set(target.watchId, {
-      watchId: target.watchId,
-      workspaceId: target.workspaceId ?? null,
-      path: target.path,
+function syncProjectWatchSubscription(owner: SearchOwner) {
+  const existing = watchSubscriptions.get(owner.key);
+  if (existing) {
+    existing.lastSyncedAt = Date.now();
+    watchSubscriptions.set(owner.key, existing);
+  } else {
+    watchSubscriptions.set(owner.key, {
+      owner,
+      lastSyncedAt: Date.now(),
     });
   }
-
-  watchSubscriptions.set(owner.key, subscription);
   ensureWatchSubscriptionPruneLoop();
   syncDirectoryWatchers();
 }
@@ -955,22 +913,9 @@ async function handleRequest(method: string, params: unknown) {
     case "syncProjectWatchers": {
       const request = (params ?? {}) as {
         __source?: InvocationSource;
-        projects?: Array<{ watchId?: string; workspaceId?: string; path?: string }>;
       };
       const owner = extractSource(request);
-      const targets = Array.isArray(request.projects)
-        ? request.projects
-            .filter(
-              (target): target is { watchId: string; workspaceId?: string; path: string } =>
-                Boolean(target && typeof target.watchId === "string" && typeof target.path === "string"),
-            )
-            .map((target) => ({
-              watchId: target.watchId,
-              workspaceId: typeof target.workspaceId === "string" ? target.workspaceId : undefined,
-              path: target.path,
-            }))
-        : [];
-      syncProjectWatchTargets(owner, targets);
+      syncProjectWatchSubscription(owner);
       return true;
     }
     case "getNode":
