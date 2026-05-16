@@ -5,17 +5,20 @@ type InvocationSource = {
   windowId?: string | null;
 };
 
-type CreateTerminalParams = {
+type BaseTerminalParams = {
+  __source?: InvocationSource;
+  __viewerId?: string;
+};
+
+type CreateTerminalParams = BaseTerminalParams & {
   cwd?: string;
   shell?: string;
   cols?: number;
   rows?: number;
-  __source?: InvocationSource;
 };
 
-type TerminalActionParams = {
+type TerminalActionParams = BaseTerminalParams & {
   terminalId?: string;
-  __source?: InvocationSource;
 };
 
 type WriteTerminalParams = TerminalActionParams & {
@@ -27,9 +30,8 @@ type ResizeTerminalParams = TerminalActionParams & {
   rows?: number;
 };
 
-type HeartbeatTerminalsParams = {
+type HeartbeatTerminalsParams = BaseTerminalParams & {
   terminalIds?: unknown;
-  __source?: InvocationSource;
 };
 
 type WorkerRuntimeContext = {
@@ -37,18 +39,50 @@ type WorkerRuntimeContext = {
     config?: {
       ptyHeartbeatTimeoutMs?: unknown;
       ptyHeartbeatSweepMs?: unknown;
+      ptySessionIdleTimeoutMs?: unknown;
     };
   };
 };
 
-type TerminalOwner = {
+type SessionRecipient = {
   carrotId: string;
   windowId?: string | null;
-  lastHeartbeatAt: number;
+  viewers: Map<string, number>;
+};
+
+type SharedTerminalSession = {
+  terminalId: string;
+  cwd: string;
+  currentCwd: string;
+  shell: string;
+  createdAt: number;
+  lastOutputAt: number | null;
+  status: "running" | "exited";
+  exitCode: number | null;
+  signal: number | null;
+  scrollback: string;
+  recipients: Map<string, SessionRecipient>;
+  lastDetachedAt: number | null;
+};
+
+type PtySessionSnapshot = {
+  terminalId: string;
+  cwd: string;
+  currentCwd: string;
+  shell: string;
+  createdAt: number;
+  lastOutputAt: number | null;
+  status: "running" | "exited";
+  exitCode: number | null;
+  signal: number | null;
+  viewerCount: number;
+  scrollback?: string;
 };
 
 const DEFAULT_TERMINAL_HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_TERMINAL_HEARTBEAT_SWEEP_MS = 30 * 1000;
+const DEFAULT_TERMINAL_SESSION_IDLE_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+const MAX_SCROLLBACK_CHARS = 200_000;
 
 function parseDurationMs(
   value: unknown,
@@ -72,8 +106,13 @@ let terminalHeartbeatSweepMs = parseDurationMs(
   DEFAULT_TERMINAL_HEARTBEAT_SWEEP_MS,
   250,
 );
+let terminalSessionIdleTimeoutMs = parseDurationMs(
+  process.env.BUNNY_PTY_SESSION_IDLE_TIMEOUT_MS,
+  DEFAULT_TERMINAL_SESSION_IDLE_TIMEOUT_MS,
+  60_000,
+);
 
-const terminalOwners = new Map<string, TerminalOwner>();
+const terminalSessions = new Map<string, SharedTerminalSession>();
 
 function post(message: unknown) {
   self.postMessage(message);
@@ -99,6 +138,21 @@ function extractSource(params: { __source?: InvocationSource } | null | undefine
   };
 }
 
+function extractViewerId(
+  params: { __viewerId?: string } | null | undefined,
+  source: { carrotId: string; windowId?: string | null },
+) {
+  return String(
+    params?.__viewerId ||
+      source.windowId ||
+      `${source.carrotId}:default`,
+  ).trim();
+}
+
+function makeRecipientKey(source: { carrotId: string; windowId?: string | null }) {
+  return `${source.carrotId}:${source.windowId || ""}`;
+}
+
 function emitToCarrotView(
   carrotId: string,
   name: string,
@@ -118,75 +172,212 @@ function emitToCarrotView(
   });
 }
 
-function emitToOwner(message: TerminalMessage) {
-  const owner = terminalOwners.get(message.terminalId);
-  if (!owner) {
-    log(`dropping terminal event for unknown owner: ${message.terminalId}`);
+function countSessionViewers(session: SharedTerminalSession) {
+  let count = 0;
+  for (const recipient of session.recipients.values()) {
+    count += recipient.viewers.size;
+  }
+  return count;
+}
+
+function appendSessionScrollback(session: SharedTerminalSession, data: string) {
+  if (!data) {
+    return;
+  }
+
+  session.lastOutputAt = Date.now();
+  session.scrollback += data;
+  if (session.scrollback.length > MAX_SCROLLBACK_CHARS) {
+    session.scrollback = session.scrollback.slice(
+      session.scrollback.length - MAX_SCROLLBACK_CHARS,
+    );
+  }
+}
+
+function attachViewer(
+  session: SharedTerminalSession,
+  source: { carrotId: string; windowId?: string | null },
+  viewerId: string,
+) {
+  const recipientKey = makeRecipientKey(source);
+  let recipient = session.recipients.get(recipientKey);
+  if (!recipient) {
+    recipient = {
+      carrotId: source.carrotId,
+      windowId: source.windowId ?? null,
+      viewers: new Map(),
+    };
+    session.recipients.set(recipientKey, recipient);
+  }
+  recipient.viewers.set(viewerId, Date.now());
+  session.lastDetachedAt = null;
+}
+
+function detachViewer(
+  session: SharedTerminalSession,
+  source: { carrotId: string; windowId?: string | null },
+  viewerId: string,
+) {
+  const recipientKey = makeRecipientKey(source);
+  const recipient = session.recipients.get(recipientKey);
+  if (!recipient) {
+    return false;
+  }
+
+  recipient.viewers.delete(viewerId);
+  if (recipient.viewers.size === 0) {
+    session.recipients.delete(recipientKey);
+  }
+
+  if (session.recipients.size === 0) {
+    session.lastDetachedAt = Date.now();
+  }
+
+  return true;
+}
+
+function refreshViewerLease(
+  terminalId: string,
+  source: { carrotId: string; windowId?: string | null },
+  viewerId: string,
+) {
+  const session = terminalSessions.get(terminalId);
+  if (!session) {
+    return false;
+  }
+
+  const recipient = session.recipients.get(makeRecipientKey(source));
+  if (!recipient || !recipient.viewers.has(viewerId)) {
+    return false;
+  }
+
+  recipient.viewers.set(viewerId, Date.now());
+  session.lastDetachedAt = null;
+  return true;
+}
+
+async function buildSessionSnapshot(
+  session: SharedTerminalSession,
+  options?: { includeScrollback?: boolean },
+): Promise<PtySessionSnapshot> {
+  if (session.status === "running") {
+    const currentCwd = await terminalManager.getTerminalCwd(session.terminalId);
+    if (currentCwd) {
+      session.currentCwd = currentCwd;
+    }
+  }
+
+  return {
+    terminalId: session.terminalId,
+    cwd: session.cwd,
+    currentCwd: session.currentCwd || session.cwd,
+    shell: session.shell,
+    createdAt: session.createdAt,
+    lastOutputAt: session.lastOutputAt,
+    status: session.status,
+    exitCode: session.exitCode,
+    signal: session.signal,
+    viewerCount: countSessionViewers(session),
+    ...(options?.includeScrollback ? { scrollback: session.scrollback } : {}),
+  };
+}
+
+async function listSessionSnapshots() {
+  const snapshots = await Promise.all(
+    Array.from(terminalSessions.values()).map((session) =>
+      buildSessionSnapshot(session),
+    ),
+  );
+  return snapshots.sort((left, right) => {
+    const leftTime = left.lastOutputAt || left.createdAt;
+    const rightTime = right.lastOutputAt || right.createdAt;
+    return rightTime - leftTime;
+  });
+}
+
+function emitToSessionRecipients(
+  session: SharedTerminalSession,
+  name: string,
+  payload?: unknown,
+) {
+  for (const recipient of session.recipients.values()) {
+    emitToCarrotView(recipient.carrotId, name, payload, {
+      windowId: recipient.windowId ?? null,
+    });
+  }
+}
+
+function handleTerminalMessage(message: TerminalMessage) {
+  const session = terminalSessions.get(message.terminalId);
+  if (!session) {
+    log(`dropping terminal event for unknown session: ${message.terminalId}`);
     return;
   }
 
   if (message.type === "terminalOutput") {
-    emitToCarrotView(owner.carrotId, "terminalOutput", {
+    appendSessionScrollback(session, message.data);
+    emitToSessionRecipients(session, "terminalOutput", {
       terminalId: message.terminalId,
       data: message.data,
-    }, {
-      windowId: owner.windowId ?? null,
     });
     return;
   }
 
   if (message.type === "terminalExit") {
-    emitToCarrotView(owner.carrotId, "terminalExit", {
+    session.status = "exited";
+    session.exitCode = message.exitCode;
+    session.signal = message.signal ?? 0;
+    session.lastOutputAt = Date.now();
+    emitToSessionRecipients(session, "terminalExit", {
       terminalId: message.terminalId,
       exitCode: message.exitCode,
       signal: message.signal ?? 0,
-    }, {
-      windowId: owner.windowId ?? null,
     });
-    log(`terminal exited ${message.terminalId} for ${owner.carrotId}`);
-    terminalOwners.delete(message.terminalId);
-  }
-}
-
-function refreshTerminalLease(terminalId: string) {
-  const owner = terminalOwners.get(terminalId);
-  if (!owner) {
-    return false;
-  }
-
-  owner.lastHeartbeatAt = Date.now();
-  return true;
-}
-
-function refreshTerminalLeases(terminalIds: string[]) {
-  let refreshedCount = 0;
-  for (const terminalId of terminalIds) {
-    if (refreshTerminalLease(terminalId)) {
-      refreshedCount += 1;
+    log(`terminal exited ${message.terminalId}`);
+    if (session.recipients.size === 0 && !session.lastDetachedAt) {
+      session.lastDetachedAt = Date.now();
     }
   }
-  return refreshedCount;
 }
 
 function sweepTerminalLeases() {
   const now = Date.now();
-  let killedCount = 0;
+  let cleanedCount = 0;
 
-  for (const [terminalId, owner] of terminalOwners.entries()) {
-    if (now - owner.lastHeartbeatAt <= terminalHeartbeatTimeoutMs) {
-      continue;
+  for (const [terminalId, session] of terminalSessions.entries()) {
+    for (const [recipientKey, recipient] of session.recipients.entries()) {
+      for (const [viewerId, lastHeartbeatAt] of recipient.viewers.entries()) {
+        if (now - lastHeartbeatAt > terminalHeartbeatTimeoutMs) {
+          recipient.viewers.delete(viewerId);
+          cleanedCount += 1;
+        }
+      }
+
+      if (recipient.viewers.size === 0) {
+        session.recipients.delete(recipientKey);
+      }
     }
 
-    log(`heartbeat timeout kill ${terminalId} for ${owner.carrotId}`);
-    if (terminalManager.killTerminal(terminalId)) {
-      killedCount += 1;
+    if (session.recipients.size === 0) {
+      if (!session.lastDetachedAt) {
+        session.lastDetachedAt = now;
+      }
+      if (now - session.lastDetachedAt > terminalSessionIdleTimeoutMs) {
+        if (session.status === "running") {
+          log(`idle timeout kill ${terminalId}`);
+          terminalManager.killTerminal(terminalId);
+        }
+        terminalSessions.delete(terminalId);
+      }
+    } else {
+      session.lastDetachedAt = null;
     }
   }
 
-  return killedCount;
+  return cleanedCount;
 }
 
-const terminalManager = new TerminalManager(emitToOwner);
+const terminalManager = new TerminalManager(handleTerminalMessage);
 let heartbeatSweepTimer: ReturnType<typeof setInterval> | null = null;
 
 function restartHeartbeatSweepTimer() {
@@ -207,6 +398,11 @@ function initializeRuntimeContext(message?: WorkerRuntimeContext) {
     terminalHeartbeatSweepMs,
     250,
   );
+  terminalSessionIdleTimeoutMs = parseDurationMs(
+    message?.context?.config?.ptySessionIdleTimeoutMs,
+    terminalSessionIdleTimeoutMs,
+    60_000,
+  );
   restartHeartbeatSweepTimer();
 }
 
@@ -217,22 +413,63 @@ async function handleRequest(method: string, params: unknown) {
     case "createTerminal": {
       const request = (params ?? {}) as CreateTerminalParams;
       const source = extractSource(request);
+      const viewerId = extractViewerId(request, source);
+      const cwd = String(request.cwd || process.cwd());
+      const shell = typeof request.shell === "string" ? request.shell : undefined;
       const terminalId = terminalManager.createTerminal(
-        String(request.cwd || process.cwd()),
-        typeof request.shell === "string" ? request.shell : undefined,
+        cwd,
+        shell,
         Number(request.cols || 80),
         Number(request.rows || 24),
       );
-      terminalOwners.set(terminalId, {
-        ...source,
-        lastHeartbeatAt: Date.now(),
-      });
+      const session: SharedTerminalSession = {
+        terminalId,
+        cwd,
+        currentCwd: cwd,
+        shell: shell || "",
+        createdAt: Date.now(),
+        lastOutputAt: null,
+        status: "running",
+        exitCode: null,
+        signal: null,
+        scrollback: "",
+        recipients: new Map(),
+        lastDetachedAt: null,
+      };
+      attachViewer(session, source, viewerId);
+      terminalSessions.set(terminalId, session);
       log(`created terminal ${terminalId} for ${source.carrotId}`);
       return terminalId;
     }
+    case "attachTerminal": {
+      const request = (params ?? {}) as TerminalActionParams;
+      const source = extractSource(request);
+      const viewerId = extractViewerId(request, source);
+      const terminalId = String(request.terminalId || "");
+      const session = terminalSessions.get(terminalId);
+      if (!session) {
+        throw new Error("Terminal session not found");
+      }
+      attachViewer(session, source, viewerId);
+      return await buildSessionSnapshot(session, { includeScrollback: true });
+    }
+    case "detachTerminal": {
+      const request = (params ?? {}) as TerminalActionParams;
+      const source = extractSource(request);
+      const viewerId = extractViewerId(request, source);
+      const session = terminalSessions.get(String(request.terminalId || ""));
+      if (!session) {
+        return false;
+      }
+      return detachViewer(session, source, viewerId);
+    }
+    case "listTerminalSessions":
+      return await listSessionSnapshots();
     case "writeToTerminal": {
       const request = (params ?? {}) as WriteTerminalParams;
-      refreshTerminalLease(String(request.terminalId || ""));
+      const source = extractSource(request);
+      const viewerId = extractViewerId(request, source);
+      refreshViewerLease(String(request.terminalId || ""), source, viewerId);
       return terminalManager.writeToTerminal(
         String(request.terminalId || ""),
         String(request.data || ""),
@@ -240,7 +477,9 @@ async function handleRequest(method: string, params: unknown) {
     }
     case "resizeTerminal": {
       const request = (params ?? {}) as ResizeTerminalParams;
-      refreshTerminalLease(String(request.terminalId || ""));
+      const source = extractSource(request);
+      const viewerId = extractViewerId(request, source);
+      refreshViewerLease(String(request.terminalId || ""), source, viewerId);
       return terminalManager.resizeTerminal(
         String(request.terminalId || ""),
         Number(request.cols || 80),
@@ -251,26 +490,39 @@ async function handleRequest(method: string, params: unknown) {
       const request = (params ?? {}) as TerminalActionParams;
       const terminalId = String(request.terminalId || "");
       log(`kill terminal ${terminalId}`);
-      terminalOwners.delete(terminalId);
+      terminalSessions.delete(terminalId);
       return terminalManager.killTerminal(terminalId);
     }
     case "getTerminalCwd": {
       const request = (params ?? {}) as TerminalActionParams;
-      refreshTerminalLease(String(request.terminalId || ""));
-      return terminalManager.getTerminalCwd(String(request.terminalId || ""));
+      const source = extractSource(request);
+      const viewerId = extractViewerId(request, source);
+      refreshViewerLease(String(request.terminalId || ""), source, viewerId);
+      const cwd = await terminalManager.getTerminalCwd(String(request.terminalId || ""));
+      const session = terminalSessions.get(String(request.terminalId || ""));
+      if (session && cwd) {
+        session.currentCwd = cwd;
+      }
+      return cwd;
     }
     case "heartbeatTerminals": {
       const request = (params ?? {}) as HeartbeatTerminalsParams;
+      const source = extractSource(request);
+      const viewerId = extractViewerId(request, source);
       const terminalIds = Array.isArray(request.terminalIds)
         ? request.terminalIds.map((terminalId) => String(terminalId || "")).filter(Boolean)
         : [];
-      return {
-        refreshedCount: refreshTerminalLeases(terminalIds),
-      };
+      let refreshedCount = 0;
+      for (const terminalId of terminalIds) {
+        if (refreshViewerLease(terminalId, source, viewerId)) {
+          refreshedCount += 1;
+        }
+      }
+      return { refreshedCount };
     }
     case "sweepExpiredTerminals":
       return {
-        killedCount: sweepTerminalLeases(),
+        cleanedCount: sweepTerminalLeases(),
       };
     default:
       return undefined;
@@ -329,6 +581,7 @@ process.on("exit", () => {
     clearInterval(heartbeatSweepTimer);
   }
   terminalManager.cleanup();
+  terminalSessions.clear();
 });
 
 self.postMessage({ type: "ready" });
