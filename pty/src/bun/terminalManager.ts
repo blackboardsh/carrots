@@ -27,6 +27,8 @@ type TerminalSession = {
   ready: boolean;
   currentCwd?: string;
   inputBuffer: string;
+  pendingWrites: string[];
+  pendingResize: { cols: number; rows: number } | null;
   stdoutReader?: ReadableStreamDefaultReader<Uint8Array>;
   stderrReader?: ReadableStreamDefaultReader<Uint8Array>;
 };
@@ -130,6 +132,8 @@ export class TerminalManager {
       ready: false,
       currentCwd: cwd,
       inputBuffer: "",
+      pendingWrites: [],
+      pendingResize: null,
     };
 
     this.terminals.set(terminalId, terminal);
@@ -164,7 +168,7 @@ export class TerminalManager {
 
   writeToTerminal(terminalId: string, data: string): boolean {
     const terminal = this.terminals.get(terminalId);
-    if (!terminal || !terminal.ready) {
+    if (!terminal) {
       return false;
     }
 
@@ -187,6 +191,11 @@ export class TerminalManager {
         terminal.inputBuffer += nextData;
       }
 
+      if (!terminal.ready) {
+        terminal.pendingWrites.push(nextData);
+        return true;
+      }
+
       const MAX_CHUNK_SIZE = 2048;
       for (let index = 0; index < nextData.length; index += MAX_CHUNK_SIZE) {
         this.sendPtyMessage(terminalId, {
@@ -205,11 +214,17 @@ export class TerminalManager {
   }
 
   resizeTerminal(terminalId: string, cols: number, rows: number): boolean {
-    if (!this.terminals.has(terminalId)) {
+    const terminal = this.terminals.get(terminalId);
+    if (!terminal) {
       return false;
     }
 
     try {
+      if (!terminal.ready) {
+        terminal.pendingResize = { cols, rows };
+        return true;
+      }
+
       this.sendPtyMessage(terminalId, {
         type: "resize",
         resize: { cols, rows },
@@ -373,6 +388,19 @@ export class TerminalManager {
     switch (response.type) {
       case "ready":
         terminal.ready = true;
+        if (terminal.pendingResize) {
+          this.sendPtyMessage(terminalId, {
+            type: "resize",
+            resize: terminal.pendingResize,
+          });
+          terminal.pendingResize = null;
+        }
+        if (terminal.pendingWrites.length > 0) {
+          const pendingWrites = terminal.pendingWrites.splice(0);
+          for (const pendingWrite of pendingWrites) {
+            this.writeToTerminal(terminalId, pendingWrite);
+          }
+        }
         break;
       case "data":
         if (response.data) {

@@ -1,5 +1,4 @@
 import Electrobun, { Electroview } from "electrobun/view";
-import type { CarrotPermissionConsentRequest } from "../carrot-runtime/types";
 
 type CarrotInfo = {
   id: string;
@@ -7,7 +6,6 @@ type CarrotInfo = {
   description: string;
   version: string;
   mode: "window" | "background";
-  permissions: string[];
   status: "stopped" | "starting" | "running";
   installStatus: "installed" | "broken";
   devMode: boolean;
@@ -20,7 +18,6 @@ type CarrotInfo = {
 type DashboardState = {
   installRoot: string;
   carrots: CarrotInfo[];
-  pendingConsent: CarrotPermissionConsentRequest | null;
 };
 
 type DashboardRPC = {
@@ -40,10 +37,6 @@ type DashboardRPC = {
       };
       reinstallCarrot: {
         params: { id: string };
-        response: { ok: boolean; id?: string; error?: string; reason?: string };
-      };
-      respondToConsent: {
-        params: { requestId: string; approved: boolean };
         response: { ok: boolean; id?: string; error?: string; reason?: string };
       };
       uninstallCarrot: {
@@ -82,21 +75,6 @@ const carrotCount = document.getElementById("carrot-count") as HTMLElement;
 const installRoot = document.getElementById("install-root") as HTMLElement;
 const installSourceButton = document.getElementById("install-carrot-source") as HTMLButtonElement;
 const installArtifactButton = document.getElementById("install-carrot-artifact") as HTMLButtonElement;
-const consentBackdrop = document.getElementById("consent-backdrop") as HTMLDivElement;
-const consentTitle = document.getElementById("consent-title") as HTMLElement;
-const consentMessage = document.getElementById("consent-message") as HTMLElement;
-const consentVersion = document.getElementById("consent-version") as HTMLElement;
-const consentSource = document.getElementById("consent-source") as HTMLElement;
-const consentIsolation = document.getElementById("consent-isolation") as HTMLElement;
-const consentHostList = document.getElementById("consent-host-list") as HTMLDivElement;
-const consentBunList = document.getElementById("consent-bun-list") as HTMLDivElement;
-const consentChangedSection = document.getElementById("consent-changed-section") as HTMLDivElement;
-const consentChangedList = document.getElementById("consent-changed-list") as HTMLDivElement;
-const consentCancelButton = document.getElementById("consent-cancel") as HTMLButtonElement;
-const consentApproveButton = document.getElementById("consent-approve") as HTMLButtonElement;
-
-let currentConsentRequestId: string | null = null;
-let consentPending = false;
 
 const rpc = Electroview.defineRPC<DashboardRPC>({
   maxRequestTime: 300000,
@@ -116,14 +94,6 @@ installArtifactButton.addEventListener("click", async () => {
   await electroview.rpc!.request.installCarrotArtifactFromDisk({});
 });
 
-consentCancelButton.addEventListener("click", async () => {
-  await respondToConsent(false);
-});
-
-consentApproveButton.addEventListener("click", async () => {
-  await respondToConsent(true);
-});
-
 void bootstrap();
 
 async function bootstrap() {
@@ -134,8 +104,6 @@ async function bootstrap() {
 function render(state: DashboardState) {
   carrotCount.textContent = `${state.carrots.length} Carrots`;
   installRoot.textContent = state.installRoot;
-
-  renderConsent(state.pendingConsent);
 
   if (state.carrots.length === 0) {
     const empty = document.createElement("article");
@@ -149,46 +117,6 @@ function render(state: DashboardState) {
   }
 
   grid.replaceChildren(...state.carrots.map(renderCarrot));
-}
-
-function renderConsent(consent: CarrotPermissionConsentRequest | null) {
-  currentConsentRequestId = consent?.requestId ?? null;
-  consentPending = false;
-
-  if (!consent) {
-    consentBackdrop.dataset.open = "false";
-    consentBackdrop.setAttribute("aria-hidden", "true");
-    consentChangedSection.hidden = true;
-    consentHostList.replaceChildren();
-    consentBunList.replaceChildren();
-    consentChangedList.replaceChildren();
-    consentCancelButton.disabled = false;
-    consentApproveButton.disabled = false;
-    consentApproveButton.textContent = "Approve";
-    return;
-  }
-
-  consentBackdrop.dataset.open = "true";
-  consentBackdrop.setAttribute("aria-hidden", "false");
-  consentTitle.textContent = `${consent.carrotName} wants these permissions`;
-  consentMessage.textContent = consent.message;
-  consentVersion.textContent = consent.version;
-  consentSource.textContent = consent.sourceLabel;
-  consentIsolation.textContent = formatIsolation(consent.isolation);
-  consentApproveButton.textContent = consent.confirmLabel;
-
-  consentHostList.replaceChildren(...renderPermissionChips(consent.hostPermissions, "host"));
-  consentBunList.replaceChildren(...renderPermissionChips(consent.bunPermissions, "bun"));
-
-  if (consent.changedPermissions.length > 0) {
-    consentChangedSection.hidden = false;
-    consentChangedList.replaceChildren(
-      ...renderPermissionChips(consent.changedPermissions, "tag"),
-    );
-  } else {
-    consentChangedSection.hidden = true;
-    consentChangedList.replaceChildren();
-  }
 }
 
 function renderCarrot(carrot: CarrotInfo) {
@@ -237,10 +165,7 @@ function renderCarrot(carrot: CarrotInfo) {
       ${sourceMeta}
     </div>
 
-    <div class="permission-wrap">
-      ${modeChips}
-      ${carrot.permissions.map((permission) => `<span class="permission-chip">${escapeHtml(permission)}</span>`).join("")}
-    </div>
+    <div class="permission-wrap">${modeChips}</div>
 
     ${buildError}
     <ul class="log-list">${logs}</ul>
@@ -287,68 +212,6 @@ function renderCarrot(carrot: CarrotInfo) {
   });
 
   return card;
-}
-
-async function respondToConsent(approved: boolean) {
-  if (!currentConsentRequestId || consentPending) {
-    return;
-  }
-
-  consentPending = true;
-  consentCancelButton.disabled = true;
-  consentApproveButton.disabled = true;
-
-  try {
-    await electroview.rpc!.request.respondToConsent({
-      requestId: currentConsentRequestId,
-      approved,
-    });
-  } finally {
-    consentPending = false;
-  }
-}
-
-function renderPermissionChips(values: string[], kind: "host" | "bun" | "tag") {
-  const normalizedValues = values.length > 0 ? values : ["none"];
-  return normalizedValues.map((value) => {
-    const chip = document.createElement("span");
-    chip.className = `permission-chip consent-chip ${kind}-chip`;
-    chip.textContent = formatPermissionValue(value);
-    return chip;
-  });
-}
-
-function formatPermissionValue(value: string) {
-  switch (value) {
-    case "windows":
-      return "host.windows";
-    case "tray":
-      return "host.tray";
-    case "notifications":
-      return "host.notifications";
-    case "storage":
-      return "host.storage";
-    case "read":
-      return "bun.read";
-    case "write":
-      return "bun.write";
-    case "env":
-      return "bun.env";
-    case "run":
-      return "bun.run";
-    case "ffi":
-      return "bun.ffi";
-    case "addons":
-      return "bun.addons";
-    case "worker":
-      return "bun.worker";
-    default:
-      return value;
-  }
-}
-
-function formatIsolation(value: string) {
-  return value.replace("-", " ");
 }
 
 function escapeHtml(value: string) {

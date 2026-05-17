@@ -1,9 +1,5 @@
 import Electrobun, { Electroview } from "electrobun/view";
-import type {
-  CarrotPermissionGrant,
-  CarrotPermissionTag,
-  CarrotViewRPC,
-} from "./types";
+import type { CarrotViewRPC } from "./types";
 
 type RuntimeEventHandler = (payload: unknown) => void;
 
@@ -12,8 +8,6 @@ export function createCarrotClient() {
   let bootInfo: {
     id: string;
     name: string;
-    permissions: CarrotPermissionTag[];
-    grantedPermissions: CarrotPermissionGrant;
     mode: "window" | "background";
   } | null = null;
 
@@ -44,9 +38,6 @@ export function createCarrotClient() {
     electroview,
     get bootInfo() {
       return bootInfo;
-    },
-    hasPermission(permission: CarrotPermissionTag) {
-      return bootInfo?.permissions.includes(permission) ?? false;
     },
     invoke<T = unknown>(method: string, params?: unknown): Promise<T> {
       return electroview.rpc!.request.invoke({ method, params }) as Promise<T>;

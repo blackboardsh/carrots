@@ -69,8 +69,6 @@ type InitMessage = {
   context?: {
     statePath?: string;
     logsPath?: string;
-    permissions?: string[];
-    grantedPermissions?: Record<string, unknown>;
   };
 };
 
@@ -94,6 +92,51 @@ type EventHandler = (payload: unknown) => void;
 
 function postRuntimeMessage(message: unknown) {
   self.postMessage(message);
+}
+
+function summarizeBridgeValue(value: unknown, depth = 0): unknown {
+  if (value == null) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    if (value.length <= 120) {
+      return value;
+    }
+    return `${value.slice(0, 120)}… (${value.length} chars)`;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return {
+      type: "array",
+      length: value.length,
+      sample:
+        depth >= 1
+          ? undefined
+          : value
+              .slice(0, 3)
+              .map((entry) => summarizeBridgeValue(entry, depth + 1)),
+    };
+  }
+
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    const summary: Record<string, unknown> = {};
+    for (const [key, entryValue] of entries.slice(0, 8)) {
+      summary[key] =
+        depth >= 1 ? typeof entryValue : summarizeBridgeValue(entryValue, depth + 1);
+    }
+    if (entries.length > 8) {
+      summary.__truncatedKeys = entries.length - 8;
+    }
+    return summary;
+  }
+
+  return typeof value;
 }
 
 function readBootstrapState() {
@@ -139,6 +182,8 @@ class CarrotRuntimeBridge {
   private pendingHostRequests = new Map<
     number,
     {
+      method: string;
+      startedAt: number;
       resolve: (payload: unknown) => void;
       reject: (error: Error) => void;
     }
@@ -202,6 +247,12 @@ class CarrotRuntimeBridge {
 
   requestHost<T = unknown>(method: string, params?: unknown): Promise<T> {
     const requestId = this.requestId++;
+    console.log("[carrot-runtime:bridge] host request:start", {
+      carrotId: this.manifest?.id || "",
+      requestId,
+      method,
+      params: summarizeBridgeValue(params),
+    });
     postRuntimeMessage({
       type: "host-request",
       requestId,
@@ -211,6 +262,8 @@ class CarrotRuntimeBridge {
 
     return new Promise<T>((resolve, reject) => {
       this.pendingHostRequests.set(requestId, {
+        method,
+        startedAt: Date.now(),
         resolve: (payload) => resolve(payload as T),
         reject,
       });
@@ -225,12 +278,31 @@ class CarrotRuntimeBridge {
     if (message.type === "host-response") {
       const pending = this.pendingHostRequests.get(message.requestId);
       if (!pending) {
+        console.warn("[carrot-runtime:bridge] host response:orphan", {
+          carrotId: this.manifest?.id || "",
+          requestId: message.requestId,
+          success: Boolean(message.success),
+        });
         return;
       }
       this.pendingHostRequests.delete(message.requestId);
       if (message.success) {
+        console.log("[carrot-runtime:bridge] host request:ok", {
+          carrotId: this.manifest?.id || "",
+          requestId: message.requestId,
+          method: pending.method,
+          durationMs: Date.now() - pending.startedAt,
+          payload: summarizeBridgeValue(message.payload),
+        });
         pending.resolve(message.payload);
       } else {
+        console.warn("[carrot-runtime:bridge] host request:error", {
+          carrotId: this.manifest?.id || "",
+          requestId: message.requestId,
+          method: pending.method,
+          durationMs: Date.now() - pending.startedAt,
+          error: message.error || "Unknown host error",
+        });
         pending.reject(new Error(message.error || "Unknown host error"));
       }
       return;
@@ -556,7 +628,6 @@ export const Carrots = {
       description: string;
       version: string;
       mode: string;
-      permissions: string[];
       status: string;
       devMode: boolean;
     }>>("list-carrots");
@@ -625,12 +696,6 @@ export const app = {
   },
   get manifest() {
     return carrotRuntime.manifest;
-  },
-  get permissions() {
-    return carrotRuntime.context?.permissions ?? [];
-  },
-  get grantedPermissions() {
-    return carrotRuntime.context?.grantedPermissions ?? {};
   },
   get statePath() {
     return carrotRuntime.context?.statePath ?? "";

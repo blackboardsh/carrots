@@ -10,7 +10,6 @@ import {
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { CarrotManifest } from "../carrot-runtime/types";
-import { normalizeCarrotPermissions } from "../carrot-runtime/types";
 
 type CarrotAuthoringConfig = {
   bunny?: {
@@ -207,12 +206,10 @@ function readManifest(sourceDir: string) {
   const manifestPath = join(sourceDir, "carrot.json");
   if (existsSync(manifestPath)) {
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as CarrotManifest & {
-      permissions?: CarrotManifest["permissions"] | string[];
+      permissions?: unknown;
     };
-    return {
-      ...manifest,
-      permissions: normalizeCarrotPermissions(manifest.permissions),
-    } satisfies CarrotManifest;
+    const { permissions: _legacyPermissions, ...normalized } = manifest;
+    return normalized satisfies CarrotManifest;
   }
 
   // No carrot.json — will be constructed from electrobun.config.ts in buildCarrotSource
@@ -487,11 +484,11 @@ export async function buildCarrotSource(sourceDir: string, outDir: string) {
       throw new Error(`Built carrot is missing carrot.json at ${builtManifestPath}`);
     }
 
-    const builtManifest = JSON.parse(readFileSync(builtManifestPath, "utf8")) as CarrotManifest;
-    return {
-      ...builtManifest,
-      permissions: normalizeCarrotPermissions(builtManifest.permissions),
-    } satisfies CarrotManifest;
+    const builtManifest = JSON.parse(readFileSync(builtManifestPath, "utf8")) as CarrotManifest & {
+      permissions?: unknown;
+    };
+    const { permissions: _legacyPermissions, ...normalized } = builtManifest;
+    return normalized satisfies CarrotManifest;
   }
 
   // Legacy path: carrot.json + old build system
@@ -508,11 +505,11 @@ export async function buildCarrotSource(sourceDir: string, outDir: string) {
 
   const builtManifestPath = join(outDir, "carrot.json");
   if (existsSync(builtManifestPath)) {
-    const builtManifest = JSON.parse(readFileSync(builtManifestPath, "utf8")) as CarrotManifest;
-    return {
-      ...builtManifest,
-      permissions: normalizeCarrotPermissions(builtManifest.permissions),
-    } satisfies CarrotManifest;
+    const builtManifest = JSON.parse(readFileSync(builtManifestPath, "utf8")) as CarrotManifest & {
+      permissions?: unknown;
+    };
+    const { permissions: _legacyPermissions, ...normalized } = builtManifest;
+    return normalized satisfies CarrotManifest;
   }
 
   return manifest;

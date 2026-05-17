@@ -18,10 +18,8 @@ import type {
   CarrotInstallRecord,
   CarrotInstallSource,
   CarrotManifest,
-  CarrotPermissionGrant,
   CarrotRegistry,
 } from "../carrot-runtime/types";
-import { flattenCarrotPermissions, normalizeCarrotPermissions } from "../carrot-runtime/types";
 
 const INSTALLED_CARROTS_ROOT =
   process.env.BUNNY_EARS_CARROT_ROOT || join(Utils.paths.userData, "carrots");
@@ -50,7 +48,7 @@ export type PreparedCarrotInstall = {
   devMode: boolean;
   lastBuildAt: number | null;
   currentHash: string | null;
-  install: (permissionsGranted?: CarrotPermissionGrant) => Promise<InstalledCarrot>;
+  install: () => Promise<InstalledCarrot>;
   cleanup: () => void;
 };
 
@@ -65,7 +63,6 @@ type CarrotPaths = {
 type InstallPreparedCarrotOptions = {
   source: CarrotInstallSource;
   currentHash?: string | null;
-  permissionsGranted?: CarrotPermissionGrant;
   previousInstall?: CarrotInstallRecord;
   devMode?: boolean;
   lastBuildAt?: number | null;
@@ -138,22 +135,22 @@ function normalizeInstallSource(
 
 function readManifestAt(manifestPath: string): CarrotManifest {
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as CarrotManifest & {
-    permissions?: CarrotManifest["permissions"] | string[];
+    permissions?: unknown;
   };
-  return {
-    ...manifest,
-    permissions: normalizeCarrotPermissions(manifest.permissions),
-  };
+  const { permissions: _legacyPermissions, ...normalized } = manifest;
+  return normalized;
 }
 
 function normalizeInstallRecord(record: CarrotInstallRecord): CarrotInstallRecord {
+  const { permissionsGranted: _legacyPermissionsGranted, ...normalized } = record as CarrotInstallRecord & {
+    permissionsGranted?: unknown;
+  };
   return {
-    ...record,
-    source: normalizeInstallSource(record.source, record.currentHash),
-    permissionsGranted: normalizeCarrotPermissions(record.permissionsGranted as any),
-    devMode: record.devMode ?? false,
-    lastBuildAt: record.lastBuildAt ?? null,
-    lastBuildError: record.lastBuildError ?? null,
+    ...normalized,
+    source: normalizeInstallSource(normalized.source, normalized.currentHash),
+    devMode: normalized.devMode ?? false,
+    lastBuildAt: normalized.lastBuildAt ?? null,
+    lastBuildError: normalized.lastBuildError ?? null,
   };
 }
 
@@ -190,7 +187,6 @@ function toViewsUrl(relativePath: string) {
 function writeWorkerBootstrap(
   currentDir: string,
   manifest: CarrotManifest,
-  install: CarrotInstallRecord,
   bundleWorkerPath: string,
   stateDir: string,
 ) {
@@ -213,8 +209,6 @@ function writeWorkerBootstrap(
           currentDir,
           statePath: join(stateDir, "state.json"),
           logsPath: join(stateDir, "logs.txt"),
-          permissions: flattenCarrotPermissions(install.permissionsGranted),
-          grantedPermissions: install.permissionsGranted,
         },
       })};`,
       `await import(${JSON.stringify(workerImportPath)});`,
@@ -272,6 +266,16 @@ function writeRegistry(registry: CarrotRegistry) {
   writeFileSync(REGISTRY_PATH, JSON.stringify(registry, null, 2));
 }
 
+function removeRegistryRecord(id: string) {
+  const registry = readRegistry();
+  if (!registry.carrots[id]) {
+    return false;
+  }
+  delete registry.carrots[id];
+  writeRegistry(registry);
+  return true;
+}
+
 function loadInstalledCarrot(record: CarrotInstallRecord): InstalledCarrot | null {
   const paths = getCarrotPaths(record.id);
   const manifestPath = join(paths.currentDir, "carrot.json");
@@ -300,7 +304,6 @@ function loadInstalledCarrot(record: CarrotInstallRecord): InstalledCarrot | nul
   const workerPath = writeWorkerBootstrap(
     paths.currentDir,
     manifest,
-    record,
     bundleWorkerPath,
     paths.stateDir,
   );
@@ -417,9 +420,6 @@ function installPreparedCarrot(
     currentHash: options.currentHash ?? previousInstall?.currentHash ?? null,
     installedAt: previousInstall?.installedAt ?? Date.now(),
     updatedAt: Date.now(),
-    permissionsGranted: normalizeCarrotPermissions(
-      options.permissionsGranted ?? manifest.permissions,
-    ),
     devMode: options.devMode ?? previousInstall?.devMode ?? false,
     lastBuildAt: options.lastBuildAt ?? previousInstall?.lastBuildAt ?? null,
     lastBuildError: null,
@@ -555,7 +555,6 @@ async function installDependencyTree(
         source: preparedDependency.source,
         currentHash: preparedDependency.currentHash ?? existing?.currentHash ?? null,
         previousInstall: existing ?? preparedDependency.previousInstall ?? undefined,
-        permissionsGranted: existing?.permissionsGranted,
         devMode: preparedDependency.devMode,
         lastBuildAt: preparedDependency.lastBuildAt,
       });
@@ -587,14 +586,13 @@ function createPreparedInstall(
     devMode: options.devMode ?? false,
     lastBuildAt: options.lastBuildAt ?? null,
     currentHash: options.currentHash ?? previousInstall?.currentHash ?? null,
-    install: async (permissionsGranted) => {
+    install: async () => {
       const visited = new Set<string>([manifest.id]);
       await installDependencyTree(manifest, options.source, visited);
       return installPreparedCarrot(preparedDir, {
         source: options.source,
         currentHash: options.currentHash ?? previousInstall?.currentHash ?? null,
         previousInstall: previousInstall ?? undefined,
-        permissionsGranted,
         devMode: options.devMode ?? false,
         lastBuildAt: options.lastBuildAt ?? null,
       });
@@ -679,23 +677,20 @@ export async function prepareArtifactCarrotInstall(
  */
 export function installPrebuiltCarrot(
   artifactDir: string,
-  permissionsGranted?: CarrotPermissionGrant,
 ) {
   const { manifest } = assertPreparedCarrotPayload(artifactDir);
   return installPreparedCarrot(artifactDir, {
     source: { kind: "artifact" as const, location: artifactDir },
-    permissionsGranted: permissionsGranted ?? manifest.permissions,
     devMode: false,
   });
 }
 
 export async function installDevCarrotFromSource(
   sourceDir: string,
-  permissionsGranted?: CarrotPermissionGrant,
 ) {
   const prepared = await prepareDevCarrotInstallFromSource(sourceDir);
   try {
-    return await prepared.install(permissionsGranted);
+    return await prepared.install();
   } finally {
     prepared.cleanup();
   }
@@ -721,7 +716,6 @@ async function prepareReinstall(record: CarrotInstallRecord) {
 
 export async function reinstallInstalledCarrot(
   id: string,
-  permissionsGranted?: CarrotPermissionGrant,
 ) {
   const record = readInstalledRecord(id);
   if (!record) {
@@ -730,7 +724,7 @@ export async function reinstallInstalledCarrot(
 
   const prepared = await prepareReinstall(record);
   try {
-    return await prepared.install(permissionsGranted ?? record.permissionsGranted);
+    return await prepared.install();
   } finally {
     prepared.cleanup();
   }
@@ -743,7 +737,7 @@ export async function rebuildInstalledDevCarrot(id: string) {
   }
 
   try {
-    return await reinstallInstalledCarrot(id, existing.permissionsGranted);
+    return await reinstallInstalledCarrot(id);
   } catch (error) {
     updateInstallRecord(id, (record) => ({
       ...record,
@@ -767,10 +761,31 @@ export async function refreshTrackedDevCarrots(skipIds: Iterable<string> = []) {
       continue;
     }
 
+    if (!existsSync(record.source.path) || !statSync(record.source.path).isDirectory()) {
+      console.log("[bunny-ears:startup] removing missing tracked dev carrot", {
+        id: record.id,
+        path: record.source.path,
+      });
+      rmSync(getCarrotPaths(record.id).rootDir, { recursive: true, force: true });
+      removeRegistryRecord(record.id);
+      continue;
+    }
+
     try {
-      await installDevCarrotFromSource(record.source.path, record.permissionsGranted);
+      console.log("[bunny-ears:startup] rebuilding tracked dev carrot", {
+        id: record.id,
+        path: record.source.path,
+      });
+      await installDevCarrotFromSource(record.source.path);
+      console.log("[bunny-ears:startup] rebuilt tracked dev carrot", {
+        id: record.id,
+      });
     } catch (error) {
       const message = normalizeBuildError(error);
+      console.error("[bunny-ears:startup] failed tracked dev carrot rebuild", {
+        id: record.id,
+        error: message,
+      });
       errors.push({ id: record.id, error: message });
       updateInstallRecord(record.id, (current) => ({
         ...current,
@@ -785,12 +800,11 @@ export async function refreshTrackedDevCarrots(skipIds: Iterable<string> = []) {
 
 export function uninstallInstalledCarrot(id: string) {
   const record = readInstalledRecord(id);
-  if (!record) {
-    return null;
-  }
-
   rmSync(getCarrotPaths(id).rootDir, { recursive: true, force: true });
-  loadAllInstallRecords();
+  const removedFromRegistry = removeRegistryRecord(id);
+  if (record || removedFromRegistry) {
+    loadAllInstallRecords();
+  }
   return record;
 }
 

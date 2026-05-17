@@ -172,6 +172,12 @@ function emitToCarrotView(
   });
 }
 
+function emitTerminalSessionsChanged() {
+  emitToCarrotView("dash-ui", "terminalSessionsChanged", {}, {
+    windowId: null,
+  });
+}
+
 function countSessionViewers(session: SharedTerminalSession) {
   let count = 0;
   for (const recipient of session.recipients.values()) {
@@ -333,6 +339,7 @@ function handleTerminalMessage(message: TerminalMessage) {
       exitCode: message.exitCode,
       signal: message.signal ?? 0,
     });
+    emitTerminalSessionsChanged();
     log(`terminal exited ${message.terminalId}`);
     if (session.recipients.size === 0 && !session.lastDetachedAt) {
       session.lastDetachedAt = Date.now();
@@ -368,6 +375,7 @@ function sweepTerminalLeases() {
           terminalManager.killTerminal(terminalId);
         }
         terminalSessions.delete(terminalId);
+        emitTerminalSessionsChanged();
       }
     } else {
       session.lastDetachedAt = null;
@@ -438,6 +446,7 @@ async function handleRequest(method: string, params: unknown) {
       };
       attachViewer(session, source, viewerId);
       terminalSessions.set(terminalId, session);
+      emitTerminalSessionsChanged();
       log(`created terminal ${terminalId} for ${source.carrotId}`);
       return terminalId;
     }
@@ -451,6 +460,7 @@ async function handleRequest(method: string, params: unknown) {
         throw new Error("Terminal session not found");
       }
       attachViewer(session, source, viewerId);
+      emitTerminalSessionsChanged();
       return await buildSessionSnapshot(session, { includeScrollback: true });
     }
     case "detachTerminal": {
@@ -461,7 +471,11 @@ async function handleRequest(method: string, params: unknown) {
       if (!session) {
         return false;
       }
-      return detachViewer(session, source, viewerId);
+      const detached = detachViewer(session, source, viewerId);
+      if (detached) {
+        emitTerminalSessionsChanged();
+      }
+      return detached;
     }
     case "listTerminalSessions":
       return await listSessionSnapshots();
@@ -491,6 +505,7 @@ async function handleRequest(method: string, params: unknown) {
       const terminalId = String(request.terminalId || "");
       log(`kill terminal ${terminalId}`);
       terminalSessions.delete(terminalId);
+      emitTerminalSessionsChanged();
       return terminalManager.killTerminal(terminalId);
     }
     case "getTerminalCwd": {

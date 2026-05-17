@@ -12,16 +12,9 @@ import {
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type {
-  CarrotPermissionConsentRequest,
   CarrotContributions,
-  CarrotPermissionGrant,
-  CarrotPermissionTag,
   CarrotViewRPC,
   CarrotWorkerMessage,
-} from "../carrot-runtime/types";
-import {
-  flattenCarrotPermissions,
-  hasHostPermission,
 } from "../carrot-runtime/types";
 import {
   getInstalledCarrotsRoot,
@@ -36,11 +29,7 @@ import {
   type InstalledCarrot,
   type PreparedCarrotInstall,
 } from "./carrotStore";
-import {
-  buildCarrotPermissionConsentRequest,
-  requestCarrotUninstallConsent,
-} from "./carrotConsent";
-import { toBunWorkerPermissions } from "./workerPermissions";
+import { requestCarrotUninstallConsent } from "./carrotConsent";
 import {
   CloudApi,
   getApiBaseUrl,
@@ -51,7 +40,10 @@ import {
 } from "./cloudApi";
 
 const DEBUG_BUNNY_EARS_BOOT = process.env.BUNNY_EARS_BOOT_DEBUG === "1";
+const DEBUG_BUNNY_EARS_BRIDGE = process.env.BUNNY_EARS_BRIDGE_DEBUG !== "0";
 const DEFAULT_DASH_WORKSPACE_ID = "local-workspace";
+const SHOULD_REFRESH_TRACKED_DEV_CARROTS =
+  process.env.BUNNY_EARS_REFRESH_TRACKED_DEV_CARROTS === "1";
 
 function bootLog(message: string, details?: unknown) {
   if (!DEBUG_BUNNY_EARS_BOOT) {
@@ -62,6 +54,62 @@ function bootLog(message: string, details?: unknown) {
     return;
   }
   console.log(`[bunny-ears:boot] ${message}`, details);
+}
+
+function summarizeBridgeValue(value: unknown, depth = 0): unknown {
+  if (value == null) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    if (value.length <= 120) {
+      return value;
+    }
+    return `${value.slice(0, 120)}… (${value.length} chars)`;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return {
+      type: "array",
+      length: value.length,
+      sample:
+        depth >= 1
+          ? undefined
+          : value
+              .slice(0, 3)
+              .map((entry) => summarizeBridgeValue(entry, depth + 1)),
+    };
+  }
+
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    const summary: Record<string, unknown> = {};
+    for (const [key, entryValue] of entries.slice(0, 8)) {
+      summary[key] =
+        depth >= 1 ? typeof entryValue : summarizeBridgeValue(entryValue, depth + 1);
+    }
+    if (entries.length > 8) {
+      summary.__truncatedKeys = entries.length - 8;
+    }
+    return summary;
+  }
+
+  return typeof value;
+}
+
+function bridgeLog(message: string, details?: unknown) {
+  if (!DEBUG_BUNNY_EARS_BRIDGE) {
+    return;
+  }
+  if (details === undefined) {
+    console.log(`[bunny-ears:bridge] ${message}`);
+    return;
+  }
+  console.log(`[bunny-ears:bridge] ${message}`, details);
 }
 
 const dashBuiltInShortcuts: Array<{
@@ -126,7 +174,6 @@ type CarrotInfo = {
   description: string;
   version: string;
   mode: "window" | "background";
-  permissions: CarrotPermissionTag[];
   status: CarrotStatus;
   installStatus: "installed" | "broken";
   devMode: boolean;
@@ -181,7 +228,6 @@ type DashHostSummaryCache = {
 type DashboardState = {
   installRoot: string;
   carrots: CarrotInfo[];
-  pendingConsent: CarrotPermissionConsentRequest | null;
 };
 
 type DashboardRPC = {
@@ -201,10 +247,6 @@ type DashboardRPC = {
       };
       reinstallCarrot: {
         params: { id: string };
-        response: { ok: boolean; id?: string; error?: string; reason?: string };
-      };
-      respondToConsent: {
-        params: { requestId: string; approved: boolean };
         response: { ok: boolean; id?: string; error?: string; reason?: string };
       };
       uninstallCarrot: {
@@ -260,7 +302,6 @@ type BunnyCloudOverview = {
     description: string;
     version: string;
     mode: string;
-    permissions: string[];
     status: string;
     slateUIs?: Array<{ id: string; name: string; path: string }>;
     contributions?: CarrotContributions;
@@ -328,7 +369,6 @@ class CarrotInstance {
       description: this.carrot.manifest.description,
       version: this.carrot.manifest.version,
       mode: this.carrot.manifest.mode,
-      permissions: flattenCarrotPermissions(this.carrot.install.permissionsGranted),
       status: this.status,
       installStatus: this.carrot.install.status,
       devMode: this.carrot.install.devMode === true,
@@ -412,21 +452,12 @@ class CarrotInstance {
       id: this.carrot.manifest.id,
       mode: this.carrot.manifest.mode,
       workerPath: this.carrot.workerPath,
-      permissions: flattenCarrotPermissions(this.carrot.install.permissionsGranted),
     });
     runtime.notifyDashboardChanged();
-
-    if (
-      this.carrot.manifest.mode === "window" &&
-      !hasHostPermission(this.carrot.install.permissionsGranted, "windows")
-    ) {
-      throw new Error(`${this.carrot.manifest.name} is missing the host.windows permission`);
-    }
 
     bootLog("creating carrot worker", { id: this.carrot.manifest.id });
     this.worker = new Worker(this.carrot.workerPath, {
       type: "module",
-      permissions: toBunWorkerPermissions(this.carrot.install.permissionsGranted),
     });
     this.worker.onmessage = (event: MessageEvent<CarrotWorkerMessage>) => {
       void this.handleWorkerMessage(event.data);
@@ -440,7 +471,7 @@ class CarrotInstance {
       void this.stop();
     };
 
-    // Send init context to the worker so it has statePath, permissions, etc.
+    // Send init context to the worker so it has statePath and app config.
     const channel = await Updater.localInfo.channel().catch(() => "dev");
     this.worker!.postMessage({
       type: "init",
@@ -448,8 +479,6 @@ class CarrotInstance {
       context: {
         statePath: this.statePath,
         logsPath: this.logsPath,
-        permissions: flattenCarrotPermissions(this.carrot.install.permissionsGranted),
-        grantedPermissions: this.carrot.install.permissionsGranted,
         authToken: runtime.authToken || null,
         channel: channel || "dev",
       },
@@ -509,10 +538,6 @@ class CarrotInstance {
       };
     },
   ) {
-    if (!hasHostPermission(this.carrot.install.permissionsGranted, "windows")) {
-      return;
-    }
-
     if (this.status !== "running") {
       await this.start();
     }
@@ -563,6 +588,14 @@ class CarrotInstance {
     }
 
     const requestId = this.requestId++;
+    const startedAt = Date.now();
+    bridgeLog("carrot worker request:start", {
+      carrotId: this.carrot.manifest.id,
+      requestId,
+      method,
+      windowId: windowId || "",
+      params: summarizeBridgeValue(params),
+    });
     const promise = new Promise<unknown>((resolve, reject) => {
       this.pending.set(requestId, { resolve, reject });
     });
@@ -575,7 +608,27 @@ class CarrotInstance {
       windowId,
     } satisfies CarrotWorkerMessage);
 
-    return promise;
+    return promise
+      .then((result) => {
+        bridgeLog("carrot worker request:ok", {
+          carrotId: this.carrot.manifest.id,
+          requestId,
+          method,
+          durationMs: Date.now() - startedAt,
+          result: summarizeBridgeValue(result),
+        });
+        return result;
+      })
+      .catch((error) => {
+        bridgeLog("carrot worker request:error", {
+          carrotId: this.carrot.manifest.id,
+          requestId,
+          method,
+          durationMs: Date.now() - startedAt,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      });
   }
 
   sendEvent(name: string, payload?: unknown) {
@@ -764,8 +817,6 @@ class CarrotInstance {
       (win.webview.rpc as any)?.send?.carrotBoot({
         id: this.carrot.manifest.id,
         name: this.carrot.manifest.name,
-        permissions: flattenCarrotPermissions(this.carrot.install.permissionsGranted),
-        grantedPermissions: this.carrot.install.permissionsGranted,
         mode: this.carrot.manifest.mode,
       });
     });
@@ -821,8 +872,21 @@ class CarrotInstance {
       }
       case "response": {
         const pending = this.pending.get(message.requestId);
-        if (!pending) break;
+        if (!pending) {
+          bridgeLog("carrot worker response:orphan", {
+            carrotId: this.carrot.manifest.id,
+            requestId: message.requestId,
+            success: Boolean(message.success),
+          });
+          break;
+        }
         this.pending.delete(message.requestId);
+        bridgeLog("carrot worker response", {
+          carrotId: this.carrot.manifest.id,
+          requestId: message.requestId,
+          success: Boolean(message.success),
+          error: message.success ? undefined : message.error || "Unknown worker error",
+        });
         if (message.success) {
           pending.resolve(message.payload);
         } else {
@@ -835,19 +899,44 @@ class CarrotInstance {
         break;
       }
       case "host-request": {
+        const startedAt = Date.now();
+        bridgeLog("carrot host request:start", {
+          carrotId: this.carrot.manifest.id,
+          requestId: message.requestId,
+          method: message.method,
+          params: summarizeBridgeValue(message.params),
+        });
         const response = await this.handleHostRequest(message.method, message.params)
-          .then((payload) => ({
-            type: "host-response" as const,
-            requestId: message.requestId,
-            success: true,
-            payload,
-          }))
-          .catch((error: unknown) => ({
-            type: "host-response" as const,
-            requestId: message.requestId,
-            success: false,
-            error: error instanceof Error ? error.message : String(error),
-          }));
+          .then((payload) => {
+            bridgeLog("carrot host request:ok", {
+              carrotId: this.carrot.manifest.id,
+              requestId: message.requestId,
+              method: message.method,
+              durationMs: Date.now() - startedAt,
+              result: summarizeBridgeValue(payload),
+            });
+            return {
+              type: "host-response" as const,
+              requestId: message.requestId,
+              success: true,
+              payload,
+            };
+          })
+          .catch((error: unknown) => {
+            bridgeLog("carrot host request:error", {
+              carrotId: this.carrot.manifest.id,
+              requestId: message.requestId,
+              method: message.method,
+              durationMs: Date.now() - startedAt,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return {
+              type: "host-response" as const,
+              requestId: message.requestId,
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          });
         this.worker?.postMessage(response);
         break;
       }
@@ -988,20 +1077,12 @@ class CarrotInstance {
   private async handleHostAction(action: string, payload: unknown) {
     switch (action) {
       case "notify": {
-        if (!hasHostPermission(this.carrot.install.permissionsGranted, "notifications")) {
-          this.pushLog("notification denied by permissions");
-          return;
-        }
         const notification = payload as { title: string; body?: string };
         Utils.showNotification({ title: notification.title, body: notification.body });
         this.pushLog(`notification: ${notification.title}`);
         break;
       }
       case "set-tray": {
-        if (!hasHostPermission(this.carrot.install.permissionsGranted, "tray")) {
-          this.pushLog("tray denied by permissions");
-          return;
-        }
         const trayPayload = payload as { title?: string };
         if (!this.tray) {
           this.tray = new Tray({ title: trayPayload.title || this.carrot.manifest.name });
@@ -1016,9 +1097,6 @@ class CarrotInstance {
         break;
       }
       case "set-tray-menu": {
-        if (!hasHostPermission(this.carrot.install.permissionsGranted, "tray")) {
-          return;
-        }
         if (this.tray) {
           this.tray.setMenu(payload as any);
         }
@@ -1185,6 +1263,14 @@ class CarrotInstance {
                 windowId?: string | null;
               })
             : {};
+        bridgeLog("carrot action emit-carrot-view-event", {
+          sourceCarrotId: this.carrot.manifest.id,
+          targetCarrotId: String(eventPayload.carrotId || ""),
+          name: String(eventPayload.name || ""),
+          windowId:
+            typeof eventPayload.windowId === "string" ? eventPayload.windowId : "",
+          payload: summarizeBridgeValue(eventPayload.payload),
+        });
         (runtime as any).emitCarrotViewEventFrom(
           this.carrot.manifest.id,
           String(eventPayload.carrotId || ""),
@@ -1340,13 +1426,6 @@ class BunnyEarsRuntime {
   activeContextMenuOwnerId: string | null = null;
   shutdownInProgress = false;
   updateStatus: "idle" | "checking" | "downloading" | "update-ready" | "error" = "idle";
-  pendingConsent: {
-    request: CarrotPermissionConsentRequest;
-    prepared: PreparedCarrotInstall;
-    grantedPermissions: CarrotPermissionGrant;
-    options: { preserveRunningState?: boolean };
-  } | null = null;
-  nextConsentRequestId = 1;
 
   constructor() {
     for (const carrot of loadInstalledCarrots()) {
@@ -1430,32 +1509,116 @@ class BunnyEarsRuntime {
   }
 
   private createDashViewRpc(windowId: string) {
+    const assertLocalInstanceMachineId = (machineId: unknown) => {
+      const normalizedMachineId = String(machineId || "").trim();
+      const localMachineId = String(this.getMachineId() || "").trim();
+      if (!normalizedMachineId) {
+        throw new Error("Missing target machine id");
+      }
+      if (!localMachineId || normalizedMachineId !== localMachineId) {
+        throw new Error(`Local instance bridge cannot target machine ${normalizedMachineId}`);
+      }
+    };
+
     return BrowserView.defineRPC({
       maxRequestTime: 10000,
       handlers: {
         requests: {
-          invokeCarrot: async (payload: any) =>
-            this.invokeCarrotFrom(
+          invokeLocalInstanceBridgeCarrot: async (payload: any) => {
+            assertLocalInstanceMachineId(payload?.machineId);
+            return this.invokeCarrotFrom(
               "dash-ui",
               String(payload?.carrotId || ""),
               String(payload?.method || ""),
               payload?.params,
               typeof payload?.windowId === "string" ? payload.windowId : windowId,
-            ),
+            );
+          },
+          requestLocalInstanceBridgeHost: async (payload: any) => {
+            assertLocalInstanceMachineId(payload?.machineId);
+            const direct = await this.handleDirectDashRequest(
+              String(payload?.method || ""),
+              payload?.params,
+              typeof payload?.windowId === "string" ? payload.windowId : windowId,
+            );
+            if (direct?.handled) {
+              return direct.result;
+            }
+            throw new Error(
+              `Unknown local instance bridge host request: ${String(payload?.method || "")}`,
+            );
+          },
+          invokeCarrot: async (payload: any) => {
+            const startedAt = Date.now();
+            bridgeLog("dash host rpc invokeCarrot:start", {
+              windowId,
+              carrotId: String(payload?.carrotId || ""),
+              method: String(payload?.method || ""),
+              params: summarizeBridgeValue(payload?.params),
+            });
+            try {
+              const result = await this.invokeCarrotFrom(
+                "dash-ui",
+                String(payload?.carrotId || ""),
+                String(payload?.method || ""),
+                payload?.params,
+                typeof payload?.windowId === "string" ? payload.windowId : windowId,
+              );
+              bridgeLog("dash host rpc invokeCarrot:ok", {
+                windowId,
+                carrotId: String(payload?.carrotId || ""),
+                method: String(payload?.method || ""),
+                durationMs: Date.now() - startedAt,
+              });
+              return result;
+            } catch (error) {
+              bridgeLog("dash host rpc invokeCarrot:error", {
+                windowId,
+                carrotId: String(payload?.carrotId || ""),
+                method: String(payload?.method || ""),
+                durationMs: Date.now() - startedAt,
+                error: error instanceof Error ? error.message : String(error),
+              });
+              throw error;
+            }
+          },
           _: async (method: string, params: unknown) => {
+            const startedAt = Date.now();
+            bridgeLog("dash host rpc request:start", {
+              windowId,
+              method: String(method),
+              params: summarizeBridgeValue(params),
+            });
             const direct = await this.handleDirectDashRequest(
               String(method),
               params,
               windowId,
             );
             if (direct?.handled) {
+              bridgeLog("dash host rpc request:ok", {
+                windowId,
+                method: String(method),
+                durationMs: Date.now() - startedAt,
+                result: summarizeBridgeValue(direct.result),
+              });
               return direct.result;
             }
+            bridgeLog("dash host rpc request:error", {
+              windowId,
+              method: String(method),
+              durationMs: Date.now() - startedAt,
+              error: "Unknown Dash UI host request",
+            });
             throw new Error(`Unknown Dash UI host request: ${String(method)}`);
           },
         },
         messages: {
           "*": (messageName: string, payload: unknown) => {
+            bridgeLog("dash host rpc message", {
+              windowId,
+              name: String(messageName),
+              payload: summarizeBridgeValue(payload),
+            });
             void (async () => {
               const direct = await this.handleDirectDashSend(
                 String(messageName),
@@ -1486,6 +1649,43 @@ class BunnyEarsRuntime {
         this.restoreDefaultApplicationMenu();
       }
     });
+  }
+
+  private sendDashInitStateSnapshot(windowId: string, win: BrowserWindow) {
+    const hostBoot = this.buildDashHostBootState(windowId);
+    const payload = {
+      windowId: hostBoot.windowId,
+      buildVars: hostBoot.buildVars,
+      paths: hostBoot.paths,
+      peerDependencies: hostBoot.peerDependencies,
+      webBridgeOrigin: hostBoot.webBridgeOrigin,
+      currentInstance: hostBoot.currentInstance,
+    };
+
+    try {
+      (win.webview.rpc as any)?.send?.initState?.(payload);
+      bridgeLog("dash initState snapshot:sent", {
+        windowId,
+        currentInstance: summarizeBridgeValue(hostBoot.currentInstance),
+      });
+    } catch (error) {
+      bridgeLog("dash initState snapshot:error", {
+        windowId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private scheduleDashInitStateSnapshot(windowId: string, win: BrowserWindow) {
+    const delays = [0, 50, 150, 350];
+    for (const delay of delays) {
+      setTimeout(() => {
+        if (this.dashWindows.get(windowId) !== win) {
+          return;
+        }
+        this.sendDashInitStateSnapshot(windowId, win);
+      }, delay);
+    }
   }
 
   private async openDashWindow(
@@ -1526,6 +1726,7 @@ class BunnyEarsRuntime {
       },
     });
     this.setDashWindow(windowId, win);
+    this.scheduleDashInitStateSnapshot(windowId, win);
     this.activeApplicationMenuOwnerId = "dash-ui";
     this.restoreDefaultApplicationMenu();
     win.activate();
@@ -1549,9 +1750,29 @@ class BunnyEarsRuntime {
       windowId?: string;
     },
   ) {
+    const exactDashWindow = options?.windowId
+      ? this.dashWindows.get(options.windowId) || null
+      : null;
     const targets = options?.windowId
-      ? [this.getDashWindow(options.windowId)].filter(Boolean)
+      ? [exactDashWindow].filter(Boolean)
       : Array.from(this.dashWindows.values());
+    const hasNativeDashWindowTarget = Boolean(
+      options?.windowId && exactDashWindow,
+    );
+    bridgeLog("dash view emit", {
+      name,
+      windowId: options?.windowId || "",
+      raw: Boolean(options?.raw),
+      hasNativeDashWindowTarget,
+      dashWindowTargets: targets.length,
+      webClientTargets: options?.windowId
+        ? Array.from(this.dashWebClients.values()).filter((client) => client.windowId === options.windowId).length
+        : this.dashWebClients.size,
+      hopTargets: options?.windowId
+        ? Array.from(this.dashHopBrowserIds.values()).filter((browserState) => browserState.windowId === options.windowId).length
+        : this.dashHopBrowserIds.size,
+      payload: summarizeBridgeValue(payload),
+    });
 
     for (const target of targets) {
       if (options?.raw) {
@@ -1559,6 +1780,10 @@ class BunnyEarsRuntime {
       } else {
         (target?.webview.rpc as any)?.send?.runtimeEvent({ name, payload });
       }
+    }
+
+    if (hasNativeDashWindowTarget) {
+      return;
     }
 
     for (const client of this.dashWebClients.values()) {
@@ -2583,6 +2808,7 @@ class BunnyEarsRuntime {
 
   private listDashKnownLocalProjects() {
     this.ensureDashProjectStorageMigrated();
+    const currentInstance = this.buildCurrentDashInstanceSummary();
     const projects = new Map<string, {
       id: string;
       name: string;
@@ -2634,8 +2860,8 @@ class BunnyEarsRuntime {
               id: fullPath,
               name: entry.name,
               path: fullPath,
-              instanceId: "host-machine",
-              instanceLabel: "This Machine",
+              instanceId: currentInstance.id,
+              instanceLabel: currentInstance.name,
               kind: "project",
               status: "available",
             });
@@ -2686,8 +2912,12 @@ class BunnyEarsRuntime {
 
   private buildCurrentDashInstanceSummary() {
     const os = require("node:os");
+    const machineId = this.getMachineId() || "";
+    const stableLocalInstanceId =
+      this.instanceId || (machineId ? `local:${machineId}` : "local:this-instance");
     return {
-      id: "host-machine",
+      id: stableLocalInstanceId,
+      machineId,
       name: os.hostname() || "This Machine",
       os: process.platform === "darwin" ? "macos" : process.platform,
       status: "online",
@@ -2708,6 +2938,7 @@ class BunnyEarsRuntime {
       cache?.currentWorkspaceId ||
       DEFAULT_DASH_WORKSPACE_ID;
     const knownLocalProjects = this.listDashKnownLocalProjects();
+    const currentInstanceSummary = this.buildCurrentDashInstanceSummary();
     const dashCache: DashHostSummaryCache = {
       version: 1,
       updatedAt: cache?.updatedAt || 0,
@@ -2729,7 +2960,12 @@ class BunnyEarsRuntime {
         userId: "",
         emailVerified: false,
       },
-      currentInstance: cache?.currentInstance || this.buildCurrentDashInstanceSummary(),
+      currentInstance: {
+        ...(cache?.currentInstance && typeof cache.currentInstance === "object"
+          ? cache.currentInstance
+          : {}),
+        ...currentInstanceSummary,
+      },
     };
 
     return {
@@ -2757,7 +2993,12 @@ class BunnyEarsRuntime {
       webBridgeOrigin: this.getDashWebBridgeOrigin(),
       dashCache,
       windowTarget,
-      currentInstance: dashCache.currentInstance || this.buildCurrentDashInstanceSummary(),
+      currentInstance: {
+        ...(dashCache.currentInstance && typeof dashCache.currentInstance === "object"
+          ? dashCache.currentInstance
+          : {}),
+        ...currentInstanceSummary,
+      },
     };
   }
 
@@ -3009,7 +3250,6 @@ class BunnyEarsRuntime {
       description: carrot.summary.description,
       version: carrot.summary.version,
       mode: carrot.summary.mode,
-      permissions: [...carrot.summary.permissions],
       status: carrot.summary.status,
       slateUIs: carrot.summary.slateUIs,
       contributions: carrot.summary.contributions,
@@ -3131,6 +3371,21 @@ class BunnyEarsRuntime {
     };
   }
 
+  private async completeDashCloudSignIn(accessToken: string) {
+    await this.registerInstanceWithToken(accessToken).catch(() => {});
+
+    const deviceToken = await this.createDashDeviceToken(accessToken).catch(() => null);
+    if (deviceToken?.token) {
+      this.saveDeviceToken(deviceToken.token, deviceToken.id);
+      try { this.hopWs?.close(); } catch {}
+      this.hopWs = null;
+      this.connectToHop();
+      this.refreshAccessTokenFromDevice().catch(() => {});
+    }
+
+    this.refreshDashViews();
+  }
+
   private async loginDashBunnyCloud(params: {
     mode: "login" | "register";
     email: string;
@@ -3172,23 +3427,25 @@ class BunnyEarsRuntime {
         emailVerified: Boolean(data.user.email_verified),
       },
     });
-    await this.registerInstanceWithToken(data.accessToken).catch(() => {});
     this.broadcastDashAuthTokenChanged(data.accessToken);
+    void this.completeDashCloudSignIn(data.accessToken);
 
-    const deviceToken = await this.createDashDeviceToken(data.accessToken).catch(() => null);
-    if (deviceToken?.token) {
-      this.saveDeviceToken(deviceToken.token, deviceToken.id);
-      try { this.hopWs?.close(); } catch {}
-      this.hopWs = null;
-      this.connectToHop();
-      this.refreshAccessTokenFromDevice().catch(() => {});
-    }
-
-    return this.buildDashBunnyCloudOverview();
+    return {
+      connected: true,
+      currentMachine: await this.getCurrentMachineInfoForDash(),
+      user: data.user,
+      instances: [],
+      workspaces: [],
+      devices: [],
+      currentInstanceId: this.instanceId || null,
+      currentDeviceTokenId: this.deviceTokenId || null,
+      currentCarrots: this.buildCurrentDashCarrotSummaries(),
+    };
   }
 
-  private async registerDashCurrentInstance() {
-    const accessToken = await this.ensureDashCloudAccessToken();
+  private async registerDashCurrentInstance(accessTokenOverride?: string) {
+    const accessToken =
+      accessTokenOverride || (await this.ensureDashCloudAccessToken());
     if (!accessToken) {
       throw new Error("Sign in to Bunny Cloud first");
     }
@@ -3490,6 +3747,14 @@ class BunnyEarsRuntime {
                 const msg = JSON.parse(String(data));
 
                 if (msg.type === "request") {
+                  const startedAt = Date.now();
+                  bridgeLog("dash web bridge request:start", {
+                    clientId: id,
+                    requestId:
+                      typeof msg.id === "number" ? msg.id : String(msg.id || ""),
+                    method: String(msg.method || ""),
+                    params: summarizeBridgeValue(msg.params),
+                  });
                   try {
                     self.setDashWebClientWindowId(
                       id,
@@ -3518,12 +3783,28 @@ class BunnyEarsRuntime {
                           : (() => {
                               throw new Error(`Unknown Dash UI bridge request: ${String(msg.method || "")}`);
                             })();
+                    bridgeLog("dash web bridge request:ok", {
+                      clientId: id,
+                      requestId:
+                        typeof msg.id === "number" ? msg.id : String(msg.id || ""),
+                      method: String(msg.method || ""),
+                      durationMs: Date.now() - startedAt,
+                      result: summarizeBridgeValue(result),
+                    });
                     ws.send(JSON.stringify({
                       type: "response",
                       id: msg.id,
                       result,
                     }));
                   } catch (err) {
+                    bridgeLog("dash web bridge request:error", {
+                      clientId: id,
+                      requestId:
+                        typeof msg.id === "number" ? msg.id : String(msg.id || ""),
+                      method: String(msg.method || ""),
+                      durationMs: Date.now() - startedAt,
+                      error: err instanceof Error ? err.message : String(err),
+                    });
                     ws.send(JSON.stringify({
                       type: "response",
                       id: msg.id,
@@ -3533,6 +3814,11 @@ class BunnyEarsRuntime {
                 }
 
                 if (msg.type === "message") {
+                  bridgeLog("dash web bridge message", {
+                    clientId: id,
+                    name: String(msg.name || ""),
+                    payload: summarizeBridgeValue(msg.payload),
+                  });
                   self.setDashWebClientWindowId(
                     id,
                     typeof msg?.payload?.windowId === "string" ? msg.payload.windowId : undefined,
@@ -3574,7 +3860,6 @@ class BunnyEarsRuntime {
     return {
       installRoot: getInstalledCarrotsRoot(),
       carrots: this.summaries(),
-      pendingConsent: this.pendingConsent?.request ?? null,
     };
   }
 
@@ -3879,6 +4164,14 @@ class BunnyEarsRuntime {
           handled: true,
           result: await this.buildDashBunnyCloudOverview(),
         };
+      case "getDashHostBootState":
+        console.log("[bunny-ears] getDashHostBootState request", {
+          sourceWindowId: sourceWindowId || "",
+        });
+        return {
+          handled: true,
+          result: this.buildDashHostBootState(sourceWindowId),
+        };
       case "loginBunnyCloud": {
         try {
           const request = (params || {}) as {
@@ -3911,11 +4204,16 @@ class BunnyEarsRuntime {
       }
       case "registerCurrentBunnyCloudInstance": {
         try {
+          const request = (params || {}) as {
+            accessToken?: string;
+          };
           return {
             handled: true,
             result: {
               ok: true,
-              overview: await this.registerDashCurrentInstance(),
+              overview: await this.registerDashCurrentInstance(
+                typeof request.accessToken === "string" ? request.accessToken : undefined,
+              ),
             },
           };
         } catch (error) {
@@ -4001,11 +4299,6 @@ class BunnyEarsRuntime {
           },
         };
       }
-      case "getDashHostBootState":
-        return {
-          handled: true,
-          result: this.buildDashHostBootState(sourceWindowId),
-        };
       case "openFileDialog": {
         const options = (params || {}) as {
           startingFolder?: string;
@@ -4226,9 +4519,25 @@ class BunnyEarsRuntime {
     if (!method) {
       throw new Error("Missing target carrot method");
     }
+    const startedAt = Date.now();
+    bridgeLog("invokeCarrotFrom:start", {
+      sourceCarrotId,
+      targetCarrotId,
+      method,
+      sourceWindowId: sourceWindowId || "",
+      params: summarizeBridgeValue(params),
+    });
 
     const target = this.carrots.get(targetCarrotId);
     if (!target) {
+      bridgeLog("invokeCarrotFrom:error", {
+        sourceCarrotId,
+        targetCarrotId,
+        method,
+        sourceWindowId: sourceWindowId || "",
+        durationMs: Date.now() - startedAt,
+        error: `Target carrot not installed: ${targetCarrotId}`,
+      });
       throw new Error(`Target carrot not installed: ${targetCarrotId}`);
     }
 
@@ -4240,10 +4549,31 @@ class BunnyEarsRuntime {
       }
     }
 
-    return target.invoke(
-      method,
-      this.withSourceEnvelope(sourceCarrotId, sourceWindowId, params),
-    );
+    try {
+      const result = await target.invoke(
+        method,
+        this.withSourceEnvelope(sourceCarrotId, sourceWindowId, params),
+      );
+      bridgeLog("invokeCarrotFrom:ok", {
+        sourceCarrotId,
+        targetCarrotId,
+        method,
+        sourceWindowId: sourceWindowId || "",
+        durationMs: Date.now() - startedAt,
+        result: summarizeBridgeValue(result),
+      });
+      return result;
+    } catch (error) {
+      bridgeLog("invokeCarrotFrom:error", {
+        sourceCarrotId,
+        targetCarrotId,
+        method,
+        sourceWindowId: sourceWindowId || "",
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
   }
 
   emitCarrotEventFrom(
@@ -4277,6 +4607,14 @@ class BunnyEarsRuntime {
     if (!targetCarrotId || !name) {
       return;
     }
+
+    bridgeLog("emitCarrotViewEventFrom", {
+      targetCarrotId,
+      name,
+      windowId: options?.windowId || "",
+      raw: Boolean(options?.raw),
+      payload: summarizeBridgeValue(payload),
+    });
 
     if (targetCarrotId === "dash-ui") {
       this.emitDashViewMessage(name, payload, options);
@@ -4460,11 +4798,10 @@ class BunnyEarsRuntime {
 
   private async installPreparedCarrot(
     prepared: PreparedCarrotInstall,
-    grantedPermissions: CarrotPermissionGrant,
     options: { preserveRunningState?: boolean } = {},
   ) {
     try {
-      const installed = await prepared.install(grantedPermissions);
+      const installed = await prepared.install();
       await this.upsertInstalledCarrot(installed, {
         openWindow: installed.manifest.mode === "window",
         preserveRunningState: options.preserveRunningState,
@@ -4479,78 +4816,7 @@ class BunnyEarsRuntime {
     prepared: PreparedCarrotInstall,
     options: { preserveRunningState?: boolean } = {},
   ) {
-    if (this.pendingConsent) {
-      prepared.cleanup();
-      this.openManagerWindow();
-      return {
-        ok: false,
-        error: "Another Carrot install is already waiting for permission approval.",
-      };
-    }
-
-    const requestId = `consent-${Date.now()}-${this.nextConsentRequestId++}`;
-    const consentPlan = buildCarrotPermissionConsentRequest(prepared, requestId);
-
-    if (!consentPlan.request) {
-      return await this.installPreparedCarrot(prepared, consentPlan.grantedPermissions, options);
-    }
-
-    this.pendingConsent = {
-      request: consentPlan.request,
-      prepared,
-      grantedPermissions: consentPlan.grantedPermissions,
-      options,
-    };
-    this.openManagerWindow();
-    this.notifyDashboardChanged();
-
-    return {
-      ok: false,
-      id: prepared.manifest.id,
-      reason: "awaiting-consent",
-    };
-  }
-
-  private clearPendingConsent() {
-    const pending = this.pendingConsent;
-    if (!pending) {
-      return;
-    }
-
-    this.pendingConsent = null;
-    pending.prepared.cleanup();
-  }
-
-  private async respondToConsent(requestId: string, approved: boolean) {
-    const pending = this.pendingConsent;
-    if (!pending || pending.request.requestId !== requestId) {
-      return { ok: false, error: "Consent request not found." };
-    }
-
-    this.pendingConsent = null;
-    this.notifyDashboardChanged();
-
-    if (!approved) {
-      pending.prepared.cleanup();
-      return { ok: false, reason: "canceled" };
-    }
-
-    try {
-      return await this.installPreparedCarrot(
-        pending.prepared,
-        pending.grantedPermissions,
-        pending.options,
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await Utils.showMessageBox({
-        type: "error",
-        title: "Carrot install failed",
-        message,
-      });
-      this.refreshInstalledCarrot(pending.request.carrotId);
-      return { ok: false, error: message };
-    }
+    return await this.installPreparedCarrot(prepared, options);
   }
 
   private async installCarrotSourceFromDisk() {
@@ -4762,8 +5028,6 @@ class BunnyEarsRuntime {
           installCarrotSourceFromDisk: async () => this.installCarrotSourceFromDisk(),
           installCarrotArtifactFromDisk: async () => this.installCarrotArtifactFromDisk(),
           reinstallCarrot: async ({ id }) => this.reinstallCarrot(id),
-          respondToConsent: async ({ requestId, approved }) =>
-            this.respondToConsent(requestId, approved),
           uninstallCarrot: async ({ id }) => this.uninstallCarrot(id),
           revealCarrot: async ({ id }) => this.revealCarrot(id),
           launchCarrot: async ({ id }) => {
@@ -4943,23 +5207,43 @@ async function installFoundationCarrotsFromR2(channel: string, forceReinstall: b
 }
 
 pruneLegacyPrototypeCarrots();
+console.log("[bunny-ears:startup] pruneLegacyPrototypeCarrots complete");
 uninstallInstalledCarrot("bunny-dash");
 uninstallInstalledCarrot("bunny.search");
+console.log("[bunny-ears:startup] legacy carrot uninstall complete");
 
 // In dev mode, rebuild carrots from source. In staging/prod, download pre-built artifacts.
+console.log("[bunny-ears:startup] resolving updater channel...");
 const channel = await Updater.localInfo.channel().catch(() => "dev");
+console.log("[bunny-ears:startup] updater channel resolved", { channel });
 if (channel === "dev") {
-  const refreshErrors = await refreshTrackedDevCarrots(FOUNDATION_CARROT_IDS);
-  if (refreshErrors.length > 0) {
-    console.error("[bunny-ears] dev carrot refresh failures", refreshErrors);
+  if (SHOULD_REFRESH_TRACKED_DEV_CARROTS) {
+    console.log("[bunny-ears:startup] refreshing tracked dev carrots...");
+    const refreshErrors = await refreshTrackedDevCarrots(FOUNDATION_CARROT_IDS);
+    console.log("[bunny-ears:startup] tracked dev carrots refreshed", {
+      refreshErrorCount: refreshErrors.length,
+    });
+    if (refreshErrors.length > 0) {
+      console.error("[bunny-ears] dev carrot refresh failures", refreshErrors);
+    }
+  } else {
+    console.log(
+      "[bunny-ears:startup] skipping tracked dev carrot refresh; set BUNNY_EARS_REFRESH_TRACKED_DEV_CARROTS=1 to enable",
+    );
   }
 
+  console.log("[bunny-ears:startup] ensuring dev foundation carrots...");
   await ensureDevFoundationCarrotsInstalled();
+  console.log("[bunny-ears:startup] dev foundation carrots ensured");
 } else {
+  console.log("[bunny-ears:startup] installing foundation carrots from R2...");
   await installFoundationCarrotsFromR2(channel, false);
+  console.log("[bunny-ears:startup] foundation carrots installed from R2");
 }
 
+console.log("[bunny-ears:startup] constructing runtime...");
 const runtime = new BunnyEarsRuntime();
+console.log("[bunny-ears:startup] runtime constructed");
 const handleShutdownSignal = (signal: string) => {
   console.log(`[bunny-ears] ${signal} received, shutting down...`);
   void runtime.shutdown(0);
@@ -4967,4 +5251,6 @@ const handleShutdownSignal = (signal: string) => {
 
 process.once("SIGINT", () => handleShutdownSignal("SIGINT"));
 process.once("SIGTERM", () => handleShutdownSignal("SIGTERM"));
+console.log("[bunny-ears:startup] calling runtime.boot()");
 await runtime.boot();
+console.log("[bunny-ears:startup] runtime.boot() complete");
