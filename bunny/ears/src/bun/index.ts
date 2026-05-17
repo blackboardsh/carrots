@@ -40,7 +40,7 @@ import {
 } from "./cloudApi";
 
 const DEBUG_BUNNY_EARS_BOOT = process.env.BUNNY_EARS_BOOT_DEBUG === "1";
-const DEBUG_BUNNY_EARS_BRIDGE = process.env.BUNNY_EARS_BRIDGE_DEBUG !== "0";
+const DEBUG_BUNNY_EARS_BRIDGE = process.env.BUNNY_EARS_BRIDGE_DEBUG === "1";
 const DEFAULT_DASH_WORKSPACE_ID = "local-workspace";
 const SHOULD_REFRESH_TRACKED_DEV_CARROTS =
   process.env.BUNNY_EARS_REFRESH_TRACKED_DEV_CARROTS === "1";
