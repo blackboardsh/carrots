@@ -1509,45 +1509,10 @@ class BunnyEarsRuntime {
   }
 
   private createDashViewRpc(windowId: string) {
-    const assertLocalInstanceMachineId = (machineId: unknown) => {
-      const normalizedMachineId = String(machineId || "").trim();
-      const localMachineId = String(this.getMachineId() || "").trim();
-      if (!normalizedMachineId) {
-        throw new Error("Missing target machine id");
-      }
-      if (!localMachineId || normalizedMachineId !== localMachineId) {
-        throw new Error(`Local instance bridge cannot target machine ${normalizedMachineId}`);
-      }
-    };
-
     return BrowserView.defineRPC({
       maxRequestTime: 10000,
       handlers: {
         requests: {
-          invokeLocalInstanceBridgeCarrot: async (payload: any) => {
-            assertLocalInstanceMachineId(payload?.machineId);
-            return this.invokeCarrotFrom(
-              "dash-ui",
-              String(payload?.carrotId || ""),
-              String(payload?.method || ""),
-              payload?.params,
-              typeof payload?.windowId === "string" ? payload.windowId : windowId,
-            );
-          },
-          requestLocalInstanceBridgeHost: async (payload: any) => {
-            assertLocalInstanceMachineId(payload?.machineId);
-            const direct = await this.handleDirectDashRequest(
-              String(payload?.method || ""),
-              payload?.params,
-              typeof payload?.windowId === "string" ? payload.windowId : windowId,
-            );
-            if (direct?.handled) {
-              return direct.result;
-            }
-            throw new Error(
-              `Unknown local instance bridge host request: ${String(payload?.method || "")}`,
-            );
-          },
           invokeCarrot: async (payload: any) => {
             const startedAt = Date.now();
             bridgeLog("dash host rpc invokeCarrot:start", {
