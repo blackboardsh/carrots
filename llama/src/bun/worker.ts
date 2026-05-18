@@ -173,9 +173,24 @@ function getModelsDir() {
 }
 
 function getLlamaCliPath() {
-  const binaryPath = llamaBinaryPathOverride || join(import.meta.dir, LLAMA_BINARY_NAME);
-  if (!existsSync(binaryPath)) {
-    throw new Error(`Missing bundled llama-cli at ${binaryPath}`);
+  const candidates = [
+    llamaBinaryPathOverride,
+    process.env.BUNNY_LLAMA_CLI_BIN,
+    join(import.meta.dir, LLAMA_BINARY_NAME),
+    join(process.cwd(), "carrots", "llama", "llama-cli", "zig-out", "bin", LLAMA_BINARY_NAME),
+    join(process.cwd(), "llama-cli", "zig-out", "bin", LLAMA_BINARY_NAME),
+  ]
+    .filter((value): value is string => typeof value === "string" && value.length > 0);
+
+  const binaryPath = candidates.find((candidate) => existsSync(candidate));
+  if (!binaryPath) {
+    throw new Error(
+      [
+        "Missing runnable llama-cli binary for bunny.llama.",
+        `Searched: ${candidates.join(", ")}`,
+        "Build and bundle carrots/llama/llama-cli, or set BUNNY_LLAMA_CLI_BIN to a runnable llama-cli path.",
+      ].join(" "),
+    );
   }
   return binaryPath;
 }

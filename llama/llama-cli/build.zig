@@ -15,9 +15,22 @@ pub fn build(b: *std.Build) void {
     exe.linkLibC();
     exe.linkLibCpp();
     
+    const has_metal_backend = blk: {
+        std.fs.cwd().access(
+            "deps/llama.cpp/build/ggml/src/ggml-metal/libggml-metal.a",
+            .{},
+        ) catch break :blk false;
+        break :blk true;
+    };
+
     // Link system frameworks (macOS)
     if (target.result.os.tag == .macos) {
         exe.linkFramework("Accelerate");
+        if (has_metal_backend) {
+            exe.linkFramework("Metal");
+            exe.linkFramework("Foundation");
+            exe.linkFramework("QuartzCore");
+        }
     }
     
     // Add include paths
@@ -32,6 +45,9 @@ pub fn build(b: *std.Build) void {
     exe.addObjectFile(b.path("deps/llama.cpp/build/ggml/src/libggml-cpu.a"));
     exe.addObjectFile(b.path("deps/llama.cpp/build/common/libcommon.a"));
     exe.addObjectFile(b.path("deps/llama.cpp/build/ggml/src/ggml-blas/libggml-blas.a"));
+    if (has_metal_backend) {
+        exe.addObjectFile(b.path("deps/llama.cpp/build/ggml/src/ggml-metal/libggml-metal.a"));
+    }
     
     // Platform-specific optimizations  
     const target_info = target.result;
