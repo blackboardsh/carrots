@@ -3938,10 +3938,6 @@ class BunnyEarsRuntime {
       await this.sendDashViewMessage("closeCurrentWindow", {});
       return;
     }
-    if (action === "llama-settings") {
-      await this.sendDashViewMessage("openSettings", { settingsType: "llama-settings" });
-      return;
-    }
     if (action === "bunny-settings") {
       await this.sendDashViewMessage("openSettings", { settingsType: "global-settings" });
       return;
@@ -4067,11 +4063,6 @@ class BunnyEarsRuntime {
       {
         label: "Settings",
         submenu: [
-          {
-            type: "normal",
-            label: "Llama Settings",
-            action: "llama-settings",
-          },
           {
             type: "normal",
             label: "Dash Settings",

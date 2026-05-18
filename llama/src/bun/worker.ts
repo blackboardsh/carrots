@@ -1,9 +1,12 @@
 import { spawn } from "bun";
 import { dirname, join, basename } from "node:path";
+import { homedir } from "node:os";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   readdirSync,
+  renameSync,
   statSync,
   unlinkSync,
 } from "node:fs";
@@ -34,6 +37,7 @@ type DownloadStatus = {
 
 type WorkerRuntimeContext = {
   context?: {
+    statePath?: unknown;
     config?: {
       llamaBinaryPath?: unknown;
       llamaModelsDir?: unknown;
@@ -48,6 +52,8 @@ const activeProcesses = new Map<number, ReturnType<typeof spawn>>();
 const modelDownloads = new Map<string, DownloadStatus>();
 let llamaBinaryPathOverride: string | null = null;
 let modelsDirOverride: string | null = null;
+let statePathOverride: string | null = null;
+let preparedDefaultModelsDir = false;
 let minModelBytes = parsePositiveNumber(
   process.env.BUNNY_LLAMA_MIN_MODEL_BYTES,
   MIN_MODEL_BYTES,
@@ -74,6 +80,13 @@ function parsePositiveNumber(value: unknown, fallback: number, minimum: number) 
 }
 
 function initializeRuntimeContext(message: WorkerRuntimeContext) {
+  if (
+    typeof message.context?.statePath === "string" &&
+    message.context.statePath.length > 0
+  ) {
+    statePathOverride = message.context.statePath;
+  }
+
   const config = message.context?.config;
   if (!config) {
     return;
@@ -98,11 +111,63 @@ function initializeRuntimeContext(message: WorkerRuntimeContext) {
   }
 }
 
+function getDefaultModelsDir() {
+  return join(homedir(), ".dash", "models");
+}
+
+function getLegacyModelsDir() {
+  const resolvedStatePath =
+    statePathOverride || app.statePath || join(import.meta.dir, "state.json");
+  return join(dirname(resolvedStatePath), "models");
+}
+
+function migrateLegacyModelsToDefaultDir(defaultModelsDir: string) {
+  if (preparedDefaultModelsDir) {
+    return;
+  }
+  preparedDefaultModelsDir = true;
+
+  const legacyModelsDir = getLegacyModelsDir();
+  if (
+    !legacyModelsDir ||
+    legacyModelsDir === defaultModelsDir ||
+    !existsSync(legacyModelsDir)
+  ) {
+    return;
+  }
+
+  const legacyFiles = readdirSync(legacyModelsDir).filter((file) =>
+    file.endsWith(".gguf"),
+  );
+
+  for (const file of legacyFiles) {
+    const sourcePath = join(legacyModelsDir, file);
+    const destinationPath = join(defaultModelsDir, file);
+
+    if (existsSync(destinationPath)) {
+      continue;
+    }
+
+    try {
+      renameSync(sourcePath, destinationPath);
+    } catch {
+      copyFileSync(sourcePath, destinationPath);
+      try {
+        unlinkSync(sourcePath);
+      } catch {
+        // Best effort cleanup after copy fallback.
+      }
+    }
+  }
+}
+
 function getModelsDir() {
-  const modelsDir =
-    modelsDirOverride || join(dirname(app.statePath || join(import.meta.dir, "state.json")), "models");
+  const modelsDir = modelsDirOverride || getDefaultModelsDir();
   if (!existsSync(modelsDir)) {
     mkdirSync(modelsDir, { recursive: true });
+  }
+  if (!modelsDirOverride) {
+    migrateLegacyModelsToDefaultDir(modelsDir);
   }
   return modelsDir;
 }
