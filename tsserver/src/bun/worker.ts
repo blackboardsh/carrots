@@ -41,6 +41,14 @@ type TsServerSession = {
   buffer: Buffer;
   expectedContentLength: number | null;
   requestMetadataBySeq: Map<number, TsServerClientMetadata>;
+  pendingResponseBySeq: Map<
+    number,
+    {
+      resolve: (message: ParsedTsServerMessage) => void;
+      reject: (error: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >;
   fileMetadataByPath: Map<string, TsServerClientMetadata>;
   editorMetadataById: Map<string, TsServerClientMetadata>;
   editorOpenFilesById: Map<string, Set<string>>;
@@ -295,6 +303,19 @@ function tryParseBufferedMessages(session: TsServerSession) {
 
     try {
       const parsedMessage = JSON.parse(bodyBuffer.toString("utf8")) as ParsedTsServerMessage;
+      if (parsedMessage.type === "response") {
+        const requestSeq = Number(parsedMessage.request_seq || 0);
+        if (requestSeq) {
+          const pendingResponse = session.pendingResponseBySeq.get(requestSeq);
+          if (pendingResponse) {
+            clearTimeout(pendingResponse.timer);
+            session.pendingResponseBySeq.delete(requestSeq);
+            session.requestMetadataBySeq.delete(requestSeq);
+            pendingResponse.resolve(parsedMessage);
+            continue;
+          }
+        }
+      }
       emitTsServerMessage(session, metadataForMessage(session, parsedMessage), parsedMessage);
     } catch {
       // Ignore malformed messages from tsserver rather than poisoning the stream.
@@ -323,6 +344,7 @@ function createSession(owner: TsServerOwner) {
     buffer: Buffer.alloc(0),
     expectedContentLength: null,
     requestMetadataBySeq: new Map(),
+    pendingResponseBySeq: new Map(),
     fileMetadataByPath: new Map(),
     editorMetadataById: new Map(),
     editorOpenFilesById: new Map(),
@@ -393,6 +415,31 @@ function writeRequest(session: TsServerSession, command: string, args: any, meta
       arguments: args,
     }) + "\n",
   );
+
+  return seq;
+}
+
+function writeRequestForResponse(
+  session: TsServerSession,
+  command: string,
+  args: any,
+  metadata: TsServerClientMetadata,
+  timeoutMs = 10_000,
+) {
+  const seq = writeRequest(session, command, args, metadata);
+  return new Promise<ParsedTsServerMessage>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      session.pendingResponseBySeq.delete(seq);
+      session.requestMetadataBySeq.delete(seq);
+      reject(new Error(`Timed out waiting for tsserver response: ${command}`));
+    }, timeoutMs);
+
+    session.pendingResponseBySeq.set(seq, {
+      resolve,
+      reject,
+      timer,
+    });
+  });
 }
 
 function shutdownSession(session: TsServerSession) {
@@ -492,6 +539,24 @@ async function handleRequest(method: string, params: unknown) {
         metadata,
       );
       return true;
+    }
+    case "tsServerRequestResponse": {
+      const request = (params ?? {}) as TsServerRequestParams;
+      const owner = extractSource(request);
+      const metadata = request.metadata;
+
+      if (!metadata?.workspaceId || !metadata?.windowId || !metadata?.editorId) {
+        throw new Error(
+          "tsserver request/response requires workspaceId, windowId, and editorId metadata",
+        );
+      }
+
+      return await writeRequestForResponse(
+        ensureSession(owner),
+        String(request.command || ""),
+        request.args ?? {},
+        metadata,
+      );
     }
     case "getTypeScriptVersion":
       return readTypescriptVersion();
