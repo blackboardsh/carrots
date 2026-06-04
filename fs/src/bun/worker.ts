@@ -66,6 +66,7 @@ type SearchSession<T> = {
 
 type FileWatchSubscription = {
   owner: SearchOwner;
+  projectRoots: string[];
   lastSyncedAt: number;
 };
 
@@ -88,6 +89,8 @@ const MAX_FIND_ALL_RESULTS = 1_000;
 const MAX_FIND_FILES_RESULTS = 500;
 const WATCH_SUBSCRIPTION_TTL_MS = 45_000;
 const WATCH_SUBSCRIPTION_PRUNE_MS = 15_000;
+const DEFAULT_DASH_WORKSPACE_ID = "local-workspace";
+const CLOUD_WORKSPACE_SHADOW_PREFIX = "__cloud_workspace__:";
 const workerDir = dirname(fileURLToPath(import.meta.url));
 const FD_BINARY_PATH = resolveBinary([
   process.env.BUNNY_FS_FD_PATH || "",
@@ -694,9 +697,23 @@ function readFile(path: string): FileReadResponse {
   };
 }
 
-function getDashProjectsRoot() {
+function normalizeDashWorkspaceId(workspaceId?: string | null) {
+  const resolvedWorkspaceId = String(workspaceId || DEFAULT_DASH_WORKSPACE_ID).trim() || DEFAULT_DASH_WORKSPACE_ID;
+  return resolvedWorkspaceId.startsWith(CLOUD_WORKSPACE_SHADOW_PREFIX)
+    ? resolvedWorkspaceId.slice(CLOUD_WORKSPACE_SHADOW_PREFIX.length)
+    : resolvedWorkspaceId;
+}
+
+function getDashProjectsRoot(workspaceId?: string | null) {
   const channel = Electrobun.channel || "dev";
-  return join(homedir(), ".dash", channel, "projects");
+  return join(
+    homedir(),
+    ".dash",
+    channel,
+    "workspaces",
+    normalizeDashWorkspaceId(workspaceId),
+    "projects",
+  );
 }
 
 function isIgnoredPath(path: string) {
@@ -863,11 +880,14 @@ function createProjectDirectoryWatcher(
 }
 
 function syncDirectoryWatchers() {
-  const projectsRoot = getDashProjectsRoot();
-  const nextRoots =
-    watchSubscriptions.size > 0 && existsSync(projectsRoot)
-      ? new Set([projectsRoot])
-      : new Set<string>();
+  const nextRoots = new Set<string>();
+  for (const subscription of watchSubscriptions.values()) {
+    for (const projectRoot of subscription.projectRoots) {
+      if (projectRoot && existsSync(projectRoot)) {
+        nextRoots.add(projectRoot);
+      }
+    }
+  }
 
   for (const [rootPath, watcher] of directoryWatchers.entries()) {
     if (nextRoots.has(rootPath)) {
@@ -893,14 +913,26 @@ function syncDirectoryWatchers() {
   }
 }
 
-function syncProjectWatchSubscription(owner: SearchOwner) {
+function syncProjectWatchSubscription(
+  owner: SearchOwner,
+  params?: {
+    workspaceId?: string;
+    projectRoots?: string[];
+  },
+) {
+  const projectRoots =
+    params?.projectRoots && params.projectRoots.length > 0
+      ? params.projectRoots
+      : [getDashProjectsRoot(params?.workspaceId)];
   const existing = watchSubscriptions.get(owner.key);
   if (existing) {
     existing.lastSyncedAt = Date.now();
+    existing.projectRoots = projectRoots;
     watchSubscriptions.set(owner.key, existing);
   } else {
     watchSubscriptions.set(owner.key, {
       owner,
+      projectRoots,
       lastSyncedAt: Date.now(),
     });
   }
@@ -912,10 +944,12 @@ async function handleRequest(method: string, params: unknown) {
   switch (method) {
     case "syncProjectWatchers": {
       const request = (params ?? {}) as {
+        workspaceId?: string;
+        projectRoots?: string[];
         __source?: InvocationSource;
       };
       const owner = extractSource(request);
-      syncProjectWatchSubscription(owner);
+      syncProjectWatchSubscription(owner, request);
       return true;
     }
     case "getNode":

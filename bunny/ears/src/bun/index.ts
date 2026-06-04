@@ -9,7 +9,7 @@ import {
   type RPCSchema,
   Updater,
 } from "electrobun/bun";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type {
   CarrotContributions,
@@ -42,6 +42,7 @@ import {
 const DEBUG_BUNNY_EARS_BOOT = process.env.BUNNY_EARS_BOOT_DEBUG === "1";
 const DEBUG_BUNNY_EARS_BRIDGE = process.env.BUNNY_EARS_BRIDGE_DEBUG === "1";
 const DEFAULT_DASH_WORKSPACE_ID = "local-workspace";
+const CLOUD_WORKSPACE_SHADOW_PREFIX = "__cloud_workspace__:";
 const DASH_TRAY_ICON = "views://assets/Dash-tray.png";
 const SHOULD_REFRESH_TRACKED_DEV_CARROTS =
   process.env.BUNNY_EARS_REFRESH_TRACKED_DEV_CARROTS === "1";
@@ -2651,156 +2652,39 @@ class BunnyEarsRuntime {
     return join(os.homedir(), ".dash", this.channel);
   }
 
-  private getLegacyDashHomeDir() {
-    return join(Utils.paths.userData, "carrots", "bunny-dash", "data");
+  private getDashWorkspacesDir() {
+    return join(this.getDashHomeDir(), "workspaces");
   }
 
-  private listDashProjectWorkspaceRoots(workspaceId?: string) {
+  private getDashWorkspaceProjectsDir(workspaceId?: string) {
+    const resolvedWorkspaceId = this.normalizeDashProjectWorkspaceId(workspaceId);
+    return join(this.getDashWorkspacesDir(), resolvedWorkspaceId, "projects");
+  }
+
+  private normalizeDashProjectWorkspaceId(workspaceId?: string) {
     const resolvedWorkspaceId = workspaceId || DEFAULT_DASH_WORKSPACE_ID;
-    const currentRoot = join(this.getDashHomeDir(), "projects", resolvedWorkspaceId);
-    const legacyRoot = join(this.getLegacyDashHomeDir(), "projects", resolvedWorkspaceId);
-    return Array.from(new Set([currentRoot, legacyRoot]));
+    return resolvedWorkspaceId.startsWith(CLOUD_WORKSPACE_SHADOW_PREFIX)
+      ? resolvedWorkspaceId.slice(CLOUD_WORKSPACE_SHADOW_PREFIX.length)
+      : resolvedWorkspaceId;
   }
 
-  private listDashProjectContainerRoots() {
-    const currentRoot = join(this.getDashHomeDir(), "projects");
-    const legacyRoot = join(this.getLegacyDashHomeDir(), "projects");
-    return Array.from(new Set([currentRoot, legacyRoot]));
-  }
-
-  private ensureDashProjectStorageMigrated() {
-    const currentProjectsRoot = join(this.getDashHomeDir(), "projects");
-    const legacyProjectsRoot = join(this.getLegacyDashHomeDir(), "projects");
-
-    mkdirSync(currentProjectsRoot, { recursive: true });
-
-    if (!existsSync(legacyProjectsRoot)) {
-      return;
-    }
-
-    try {
-      for (const workspaceEntry of readdirSync(legacyProjectsRoot, { withFileTypes: true })) {
-        if (workspaceEntry.name.startsWith(".")) {
-          continue;
-        }
-        const legacyWorkspaceRoot = join(legacyProjectsRoot, workspaceEntry.name);
-        let isWorkspaceDirectory = workspaceEntry.isDirectory();
-        if (!isWorkspaceDirectory && workspaceEntry.isSymbolicLink()) {
-          try {
-            isWorkspaceDirectory = statSync(legacyWorkspaceRoot).isDirectory();
-          } catch {
-            isWorkspaceDirectory = false;
-          }
-        }
-        if (!isWorkspaceDirectory) {
-          continue;
-        }
-
-        const nextWorkspaceRoot = join(currentProjectsRoot, workspaceEntry.name);
-        mkdirSync(nextWorkspaceRoot, { recursive: true });
-
-        for (const projectEntry of readdirSync(legacyWorkspaceRoot, { withFileTypes: true })) {
-          if (projectEntry.name.startsWith(".")) {
-            continue;
-          }
-          const legacyProjectRoot = join(legacyWorkspaceRoot, projectEntry.name);
-          let isProjectDirectory = projectEntry.isDirectory();
-          if (!isProjectDirectory && projectEntry.isSymbolicLink()) {
-            try {
-              isProjectDirectory = statSync(legacyProjectRoot).isDirectory();
-            } catch {
-              isProjectDirectory = false;
-            }
-          }
-          if (!isProjectDirectory) {
-            continue;
-          }
-
-          const nextProjectRoot = join(nextWorkspaceRoot, projectEntry.name);
-          if (existsSync(nextProjectRoot)) {
-            continue;
-          }
-
-          cpSync(legacyProjectRoot, nextProjectRoot, {
-            recursive: true,
-            errorOnExist: false,
-            force: false,
-          });
-        }
+  private listDashProjectWorkspaceRootEntries() {
+    const roots = new Map<string, { workspaceId: string; root: string }>();
+    const addRoot = (workspaceId: string, root: string) => {
+      if (!workspaceId || roots.has(root)) {
+        return;
       }
-    } catch (error) {
-      console.warn(
-        "[bunny-ears] Failed to migrate legacy Dash projects:",
-        error instanceof Error ? error.message : error,
-      );
-    }
-  }
+      roots.set(root, { workspaceId, root });
+    };
 
-  private folderHasProjectEntries(root: string) {
-    if (!existsSync(root)) {
-      return false;
-    }
-    try {
-      if (!statSync(root).isDirectory()) {
-        return false;
-      }
-      return readdirSync(root, { withFileTypes: true }).some((entry) => {
-        if (entry.name.startsWith(".")) {
-          return false;
-        }
-        if (entry.isDirectory()) {
-          return true;
-        }
-        if (entry.isSymbolicLink()) {
-          try {
-            return statSync(join(root, entry.name)).isDirectory();
-          } catch {
-            return false;
-          }
-        }
-        return false;
-      });
-    } catch {
-      return false;
-    }
-  }
-
-  private getDashProjectsFolder(workspaceId?: string) {
-    this.ensureDashProjectStorageMigrated();
-    const [currentRoot, legacyRoot] = this.listDashProjectWorkspaceRoots(workspaceId);
-    if (this.folderHasProjectEntries(currentRoot)) {
-      return currentRoot;
-    }
-    if (this.folderHasProjectEntries(legacyRoot)) {
-      return legacyRoot;
-    }
-    mkdirSync(currentRoot, { recursive: true });
-    return currentRoot;
-  }
-
-  private listDashKnownLocalProjects() {
-    this.ensureDashProjectStorageMigrated();
-    const currentInstance = this.buildCurrentDashInstanceSummary();
-    const projects = new Map<string, {
-      id: string;
-      name: string;
-      path: string;
-      instanceId: string;
-      instanceLabel: string;
-      kind: string;
-      status: string;
-    }>();
-
-    for (const containerRoot of this.listDashProjectContainerRoots()) {
-      if (!existsSync(containerRoot)) {
-        continue;
-      }
+    const currentWorkspacesRoot = this.getDashWorkspacesDir();
+    if (existsSync(currentWorkspacesRoot)) {
       try {
-        for (const workspaceEntry of readdirSync(containerRoot, { withFileTypes: true })) {
+        for (const workspaceEntry of readdirSync(currentWorkspacesRoot, { withFileTypes: true })) {
           if (workspaceEntry.name.startsWith(".")) {
             continue;
           }
-          const workspaceRoot = join(containerRoot, workspaceEntry.name);
+          const workspaceRoot = join(currentWorkspacesRoot, workspaceEntry.name);
           let isWorkspaceDirectory = workspaceEntry.isDirectory();
           if (!isWorkspaceDirectory && workspaceEntry.isSymbolicLink()) {
             try {
@@ -2809,35 +2693,66 @@ class BunnyEarsRuntime {
               isWorkspaceDirectory = false;
             }
           }
-          if (!isWorkspaceDirectory) {
+          if (isWorkspaceDirectory) {
+            addRoot(workspaceEntry.name, join(workspaceRoot, "projects"));
+          }
+        }
+      } catch {}
+    }
+
+    return Array.from(roots.values());
+  }
+
+  private getDashProjectsFolder(workspaceId?: string) {
+    const currentRoot = this.getDashWorkspaceProjectsDir(workspaceId);
+    mkdirSync(currentRoot, { recursive: true });
+    return currentRoot;
+  }
+
+  private listDashKnownLocalProjects() {
+    const currentInstance = this.buildCurrentDashInstanceSummary();
+    const projects = new Map<string, {
+      id: string;
+      name: string;
+      path: string;
+      workspaceId: string;
+      instanceId: string;
+      instanceLabel: string;
+      kind: string;
+      status: string;
+    }>();
+
+    for (const { workspaceId, root: workspaceRoot } of this.listDashProjectWorkspaceRootEntries()) {
+      if (!existsSync(workspaceRoot)) {
+        continue;
+      }
+      try {
+        for (const entry of readdirSync(workspaceRoot, { withFileTypes: true })) {
+          if (entry.name.startsWith(".")) {
             continue;
           }
-          for (const entry of readdirSync(workspaceRoot, { withFileTypes: true })) {
-            if (entry.name.startsWith(".")) {
-              continue;
+          const fullPath = join(workspaceRoot, entry.name);
+          let isDirectory = entry.isDirectory();
+          if (!isDirectory && entry.isSymbolicLink()) {
+            try {
+              isDirectory = statSync(fullPath).isDirectory();
+            } catch {
+              isDirectory = false;
             }
-            const fullPath = join(workspaceRoot, entry.name);
-            let isDirectory = entry.isDirectory();
-            if (!isDirectory && entry.isSymbolicLink()) {
-              try {
-                isDirectory = statSync(fullPath).isDirectory();
-              } catch {
-                isDirectory = false;
-              }
-            }
-            if (!isDirectory) {
-              continue;
-            }
-            projects.set(fullPath, {
-              id: fullPath,
-              name: entry.name,
-              path: fullPath,
-              instanceId: currentInstance.id,
-              instanceLabel: currentInstance.name,
-              kind: "project",
-              status: "available",
-            });
           }
+          if (!isDirectory) {
+            continue;
+          }
+          projects.set(fullPath, {
+            id: fullPath,
+            name: entry.name,
+            path: fullPath,
+            workspaceId,
+            instanceId: currentInstance.id,
+            instanceLabel: currentInstance.name,
+            kind: "project",
+            status: "available",
+          });
         }
       } catch {}
     }
@@ -2882,7 +2797,7 @@ class BunnyEarsRuntime {
     return `http://localhost:${this.webBridgePort}`;
   }
 
-  private buildCurrentDashInstanceSummary() {
+  private buildCurrentDashInstanceSummary(workspaceId?: string) {
     const os = require("node:os");
     const machineId = this.getMachineId() || "";
     const stableLocalInstanceId =
@@ -2890,6 +2805,7 @@ class BunnyEarsRuntime {
     return {
       id: stableLocalInstanceId,
       machineId,
+      projectRoot: workspaceId ? this.getDashProjectsFolder(workspaceId) : "",
       name: os.hostname() || "This Machine",
       os: process.platform === "darwin" ? "macos" : process.platform,
       status: "online",
@@ -2898,7 +2814,7 @@ class BunnyEarsRuntime {
     };
   }
 
-  private buildDashHostBootState(sourceWindowId?: string) {
+  private buildDashHostBootState(sourceWindowId?: string, workspaceIdOverride?: string) {
     const cache = this.loadDashHostCache();
     const targetWindowId = sourceWindowId || cache?.currentWindow?.windowId || "main";
     const windowTarget =
@@ -2906,11 +2822,12 @@ class BunnyEarsRuntime {
       cache?.currentWindow ||
       null;
     const workspaceId =
+      workspaceIdOverride ||
       windowTarget?.workspaceId ||
       cache?.currentWorkspaceId ||
       DEFAULT_DASH_WORKSPACE_ID;
     const knownLocalProjects = this.listDashKnownLocalProjects();
-    const currentInstanceSummary = this.buildCurrentDashInstanceSummary();
+    const currentInstanceSummary = this.buildCurrentDashInstanceSummary(workspaceId);
     const dashCache: DashHostSummaryCache = {
       version: 1,
       updatedAt: cache?.updatedAt || 0,
@@ -4130,10 +4047,14 @@ class BunnyEarsRuntime {
       case "getDashHostBootState":
         console.log("[bunny-ears] getDashHostBootState request", {
           sourceWindowId: sourceWindowId || "",
+          workspaceId: String((params as { workspaceId?: string } | null)?.workspaceId || ""),
         });
         return {
           handled: true,
-          result: this.buildDashHostBootState(sourceWindowId),
+          result: this.buildDashHostBootState(
+            sourceWindowId,
+            String((params as { workspaceId?: string } | null)?.workspaceId || ""),
+          ),
         };
       case "loginBunnyCloud": {
         try {
