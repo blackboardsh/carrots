@@ -42,6 +42,7 @@ import {
 const DEBUG_BUNNY_EARS_BOOT = process.env.BUNNY_EARS_BOOT_DEBUG === "1";
 const DEBUG_BUNNY_EARS_BRIDGE = process.env.BUNNY_EARS_BRIDGE_DEBUG === "1";
 const DEFAULT_DASH_WORKSPACE_ID = "local-workspace";
+const DASH_TRAY_ICON = "views://assets/Dash-tray.png";
 const SHOULD_REFRESH_TRACKED_DEV_CARROTS =
   process.env.BUNNY_EARS_REFRESH_TRACKED_DEV_CARROTS === "1";
 
@@ -1433,7 +1434,13 @@ class BunnyEarsRuntime {
     }
 
     // Bunny Ears owns the system tray.
-    this.tray = new Tray({ title: "Dash" });
+    this.tray = new Tray({
+      title: "Dash",
+      image: DASH_TRAY_ICON,
+      template: false,
+      width: 18,
+      height: 18,
+    });
     this.tray.setMenu(this.buildTrayMenu());
     this.tray.on("tray-clicked", (event: any) => {
       const action = event.data?.action;
@@ -4380,15 +4387,6 @@ class BunnyEarsRuntime {
         this.upsertDashHostCache(cachePayload);
         return { handled: true };
       }
-      case "fullyDeleteNodeFromDisk":
-        await this.invokeCarrotFrom(
-          "dash-ui",
-          "bunny.fs",
-          "safeDeleteFileOrFolder",
-          { path: String((payload as { nodePath?: string } | undefined)?.nodePath || "") },
-          sourceWindowId,
-        );
-        return { handled: true };
       case "installUpdateNow":
         Updater.applyUpdate();
         return { handled: true };
