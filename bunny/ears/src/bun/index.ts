@@ -1051,9 +1051,6 @@ class CarrotInstance {
       case "list-carrots": {
         return runtime.summaries();
       }
-      case "get-web-bridge-port": {
-        return { port: runtime.webBridgePort };
-      }
       case "start-carrot": {
         const id = String((params as any)?.id || "");
         const carrot = runtime.carrots.get(id);
@@ -1421,7 +1418,6 @@ class BunnyEarsRuntime {
   tray: Tray | null;
   managerWindow: BrowserWindow | null = null;
   hopWs: WebSocket | null = null;
-  webBridgePort: number | null = null;
   channel: string = "dev";
   carrots = new Map<string, CarrotInstance>();
   activeApplicationMenuOwnerId: string | null = null;
@@ -1502,7 +1498,6 @@ class BunnyEarsRuntime {
   instanceId: string | null = null;
   farmWindow: BrowserWindow | null = null;
   dashWindows = new Map<string, BrowserWindow>();
-  dashWebClients = new Map<string, { send: (data: string) => void; windowId: string | null }>();
   dashHopBrowserIds = new Map<string, { windowId: string | null }>();
 
   private getDashWindow(windowId?: string | null) {
@@ -1514,98 +1509,6 @@ class BunnyEarsRuntime {
 
   private getPrimaryDashWindowId() {
     return this.dashWindows.keys().next().value ?? "main";
-  }
-
-  private createDashViewRpc(windowId: string) {
-    return BrowserView.defineRPC({
-      maxRequestTime: 10000,
-      handlers: {
-        requests: {
-          invokeCarrot: async (payload: any) => {
-            const startedAt = Date.now();
-            bridgeLog("dash host rpc invokeCarrot:start", {
-              windowId,
-              carrotId: String(payload?.carrotId || ""),
-              method: String(payload?.method || ""),
-              params: summarizeBridgeValue(payload?.params),
-            });
-            try {
-              const result = await this.invokeCarrotFrom(
-                "dash-ui",
-                String(payload?.carrotId || ""),
-                String(payload?.method || ""),
-                payload?.params,
-                typeof payload?.windowId === "string" ? payload.windowId : windowId,
-              );
-              bridgeLog("dash host rpc invokeCarrot:ok", {
-                windowId,
-                carrotId: String(payload?.carrotId || ""),
-                method: String(payload?.method || ""),
-                durationMs: Date.now() - startedAt,
-              });
-              return result;
-            } catch (error) {
-              bridgeLog("dash host rpc invokeCarrot:error", {
-                windowId,
-                carrotId: String(payload?.carrotId || ""),
-                method: String(payload?.method || ""),
-                durationMs: Date.now() - startedAt,
-                error: error instanceof Error ? error.message : String(error),
-              });
-              throw error;
-            }
-          },
-          _: async (method: string, params: unknown) => {
-            const startedAt = Date.now();
-            bridgeLog("dash host rpc request:start", {
-              windowId,
-              method: String(method),
-              params: summarizeBridgeValue(params),
-            });
-            const direct = await this.handleDirectDashRequest(
-              String(method),
-              params,
-              windowId,
-            );
-            if (direct?.handled) {
-              bridgeLog("dash host rpc request:ok", {
-                windowId,
-                method: String(method),
-                durationMs: Date.now() - startedAt,
-                result: summarizeBridgeValue(direct.result),
-              });
-              return direct.result;
-            }
-            bridgeLog("dash host rpc request:error", {
-              windowId,
-              method: String(method),
-              durationMs: Date.now() - startedAt,
-              error: "Unknown Dash UI host request",
-            });
-            throw new Error(`Unknown Dash UI host request: ${String(method)}`);
-          },
-        },
-        messages: {
-          "*": (messageName: string, payload: unknown) => {
-            bridgeLog("dash host rpc message", {
-              windowId,
-              name: String(messageName),
-              payload: summarizeBridgeValue(payload),
-            });
-            void (async () => {
-              const direct = await this.handleDirectDashSend(
-                String(messageName),
-                payload,
-                windowId,
-              );
-              if (!direct?.handled) {
-                console.warn(`[dash-ui] unhandled host message: ${String(messageName)}`);
-              }
-            })();
-          },
-        },
-      },
-    });
   }
 
   private setDashWindow(windowId: string, win: BrowserWindow) {
@@ -1622,43 +1525,6 @@ class BunnyEarsRuntime {
         this.restoreDefaultApplicationMenu();
       }
     });
-  }
-
-  private sendDashInitStateSnapshot(windowId: string, win: BrowserWindow) {
-    const hostBoot = this.buildDashHostBootState(windowId);
-    const payload = {
-      windowId: hostBoot.windowId,
-      buildVars: hostBoot.buildVars,
-      paths: hostBoot.paths,
-      peerDependencies: hostBoot.peerDependencies,
-      webBridgeOrigin: hostBoot.webBridgeOrigin,
-      currentInstance: hostBoot.currentInstance,
-    };
-
-    try {
-      (win.webview.rpc as any)?.send?.initState?.(payload);
-      bridgeLog("dash initState snapshot:sent", {
-        windowId,
-        currentInstance: summarizeBridgeValue(hostBoot.currentInstance),
-      });
-    } catch (error) {
-      bridgeLog("dash initState snapshot:error", {
-        windowId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  private scheduleDashInitStateSnapshot(windowId: string, win: BrowserWindow) {
-    const delays = [0, 50, 150, 350];
-    for (const delay of delays) {
-      setTimeout(() => {
-        if (this.dashWindows.get(windowId) !== win) {
-          return;
-        }
-        this.sendDashInitStateSnapshot(windowId, win);
-      }, delay);
-    }
   }
 
   private async openDashWindow(
@@ -1679,7 +1545,7 @@ class BunnyEarsRuntime {
       return existing;
     }
 
-    const url = await this.getDashUiUrl();
+    const url = await this.getDashUiUrl(windowId);
     if (!url) {
       throw new Error("Dash UI URL is unavailable");
     }
@@ -1688,7 +1554,6 @@ class BunnyEarsRuntime {
       id: `dash-ui:${windowId}`,
       title: options?.title || "Dash",
       url,
-      rpc: this.createDashViewRpc(windowId),
       titleBarStyle: "hidden",
       transparent: true,
       frame: {
@@ -1699,7 +1564,6 @@ class BunnyEarsRuntime {
       },
     });
     this.setDashWindow(windowId, win);
-    this.scheduleDashInitStateSnapshot(windowId, win);
     this.activeApplicationMenuOwnerId = "dash-ui";
     this.restoreDefaultApplicationMenu();
     win.activate();
@@ -1723,54 +1587,15 @@ class BunnyEarsRuntime {
       windowId?: string;
     },
   ) {
-    const exactDashWindow = options?.windowId
-      ? this.dashWindows.get(options.windowId) || null
-      : null;
-    const targets = options?.windowId
-      ? [exactDashWindow].filter(Boolean)
-      : Array.from(this.dashWindows.values());
-    const hasNativeDashWindowTarget = Boolean(
-      options?.windowId && exactDashWindow,
-    );
     bridgeLog("dash view emit", {
       name,
       windowId: options?.windowId || "",
       raw: Boolean(options?.raw),
-      hasNativeDashWindowTarget,
-      dashWindowTargets: targets.length,
-      webClientTargets: options?.windowId
-        ? Array.from(this.dashWebClients.values()).filter((client) => client.windowId === options.windowId).length
-        : this.dashWebClients.size,
       hopTargets: options?.windowId
         ? Array.from(this.dashHopBrowserIds.values()).filter((browserState) => browserState.windowId === options.windowId).length
         : this.dashHopBrowserIds.size,
       payload: summarizeBridgeValue(payload),
     });
-
-    for (const target of targets) {
-      if (options?.raw) {
-        (target?.webview.rpc as any)?.send?.[name]?.(payload);
-      } else {
-        (target?.webview.rpc as any)?.send?.runtimeEvent({ name, payload });
-      }
-    }
-
-    if (hasNativeDashWindowTarget) {
-      return;
-    }
-
-    for (const client of this.dashWebClients.values()) {
-      if (options?.windowId && client.windowId !== options.windowId) {
-        continue;
-      }
-      try {
-        client.send(JSON.stringify({
-          type: "message",
-          name,
-          payload,
-        }));
-      } catch {}
-    }
 
     if (this.hopWs && this.dashHopBrowserIds.size > 0) {
       for (const [browserId, browserState] of this.dashHopBrowserIds.entries()) {
@@ -1794,14 +1619,6 @@ class BunnyEarsRuntime {
         }
       }
     }
-  }
-
-  private setDashWebClientWindowId(clientId: string, windowId?: string | null) {
-    const client = this.dashWebClients.get(clientId);
-    if (!client) {
-      return;
-    }
-    client.windowId = typeof windowId === "string" && windowId ? windowId : null;
   }
 
   private setDashHopBrowserWindowId(browserId: string, windowId?: string | null) {
@@ -1835,8 +1652,6 @@ class BunnyEarsRuntime {
         });
       }
     }
-
-    this.startWebBridge();
 
     // Auth + instance registration — non-blocking, doesn't gate carrots
     this.loadAuthToken();
@@ -2052,11 +1867,7 @@ class BunnyEarsRuntime {
       return;
     }
 
-    const hopBaseUrl = this.channel === "stable"
-      ? "wss://hop.electrobunny.ai"
-      : this.channel === "dev"
-        ? "ws://localhost:8788"
-        : "wss://staging-hop.electrobunny.ai";
+    const hopBaseUrl = this.getHopWsBaseUrl();
 
     const machineId = this.getMachineId();
     if (!machineId || !this.deviceToken) {
@@ -2147,14 +1958,14 @@ class BunnyEarsRuntime {
                 ? ((messagePayload as { windowId: string }).windowId)
                 : undefined,
             );
-            const direct = await this.handleDirectDashSend(
+            const dashHopMessage = await this.handleDashHopSend(
               String(messageName || ""),
               messagePayload,
               typeof (messagePayload as { windowId?: unknown } | undefined)?.windowId === "string"
                 ? ((messagePayload as { windowId: string }).windowId)
                 : undefined,
             );
-            if (!direct.handled) {
+            if (!dashHopMessage.handled) {
               console.warn(`[hop] Unhandled Dash UI message: ${String(messageName || "")}`);
             }
           } else {
@@ -2197,19 +2008,19 @@ class BunnyEarsRuntime {
               ? ((params as { windowId?: string }).windowId)
               : undefined,
           );
-          this.handleDirectDashRequest(
+          this.handleDashHopRequest(
             String(method || ""),
             params,
             typeof (params as { windowId?: unknown } | undefined)?.windowId === "string"
               ? ((params as { windowId?: string }).windowId)
               : undefined,
           )
-          .then((direct) => {
-            if (direct.handled) {
-              return direct.result;
+          .then((dashHopRequest) => {
+            if (dashHopRequest.handled) {
+              return dashHopRequest.result;
             }
             if (method === "invokeCarrot") {
-              return this.invokeCarrotFrom(
+              return this.deliverCarrotInvokeFrom(
                 "dash-ui",
                 String((params as any)?.carrotId || ""),
                 String((params as any)?.method || ""),
@@ -2254,7 +2065,7 @@ class BunnyEarsRuntime {
         Promise.resolve()
           .then(() => {
             if (method === "invokeCarrot") {
-              return this.invokeCarrotFrom(
+              return this.deliverCarrotInvokeFrom(
                 carrotId,
                 String((params as any)?.carrotId || ""),
                 String((params as any)?.method || ""),
@@ -2287,7 +2098,7 @@ class BunnyEarsRuntime {
 
   private handleHopFileRequest(message: { requestId: number; carrotId: string; path: string }) {
     const { requestId, carrotId, path: filePath } = message;
-    const resolved = this.resolveCarrotFile(carrotId, filePath);
+    const resolved = this.resolveHopCarrotFile(carrotId, filePath);
 
     if (!resolved.ok) {
       this.hopWs?.send(JSON.stringify({
@@ -2308,6 +2119,23 @@ class BunnyEarsRuntime {
       contentType: resolved.contentType,
       body: base64,
     }));
+  }
+
+  private resolveHopCarrotFile(carrotId: string, filePath: string) {
+    const segments = filePath.replace(/^\/+/, "").split("/").filter(Boolean);
+    const uiKind = segments[0] || "";
+    const uiId = segments[1] || "";
+    const restPath = segments.slice(2);
+
+    if (uiKind === "remote-ui" && uiId) {
+      return this.resolveCarrotRemoteUIFile(carrotId, uiId, restPath);
+    }
+
+    if (uiKind === "slate-ui" && uiId) {
+      return this.resolveCarrotSlateUIFile(carrotId, uiId, restPath);
+    }
+
+    return this.resolveCarrotFile(carrotId, filePath);
   }
 
   private getContentTypeForPath(fullPath: string) {
@@ -2443,6 +2271,45 @@ class BunnyEarsRuntime {
 
     try {
       switch (method) {
+        case "invokeCarrot": {
+          const request = params && typeof params === "object" ? (params as any) : {};
+          this.deliverCarrotInvokeFrom(
+            String(request.sourceCarrotId || "bunny-ears"),
+            String(request.targetCarrotId || request.carrotId || ""),
+            String(request.method || ""),
+            request.params,
+            typeof request.windowId === "string" ? request.windowId : undefined,
+          )
+            .then(sendResult)
+            .catch((e) => sendError(e instanceof Error ? e.message : String(e)));
+          break;
+        }
+        case "emitCarrotEvent": {
+          const request = params && typeof params === "object" ? (params as any) : {};
+          this.deliverCarrotEventFrom(
+            String(request.sourceCarrotId || "bunny-ears"),
+            String(request.targetCarrotId || request.carrotId || ""),
+            String(request.name || ""),
+            request.payload,
+          );
+          sendResult({ ok: true });
+          break;
+        }
+        case "emitCarrotViewEvent": {
+          const request = params && typeof params === "object" ? (params as any) : {};
+          this.deliverCarrotViewEventFrom(
+            String(request.sourceCarrotId || "bunny-ears"),
+            String(request.targetCarrotId || request.carrotId || ""),
+            String(request.name || ""),
+            request.payload,
+            {
+              raw: Boolean(request.raw),
+              windowId: typeof request.windowId === "string" ? request.windowId : undefined,
+            },
+          );
+          sendResult({ ok: true });
+          break;
+        }
         case "list-carrots":
           sendResult(this.summaries());
           break;
@@ -2790,11 +2657,20 @@ class BunnyEarsRuntime {
     };
   }
 
+  private getHopWsBaseUrl() {
+    if (this.channel === "stable") return "wss://hop.electrobunny.ai";
+    if (this.channel === "dev") return "ws://localhost:8788";
+    return "wss://staging-hop.electrobunny.ai";
+  }
+
+  private getHopHttpBaseUrl() {
+    return this.getHopWsBaseUrl()
+      .replace(/^ws:\/\//, "http://")
+      .replace(/^wss:\/\//, "https://");
+  }
+
   private getDashWebBridgeOrigin() {
-    if (!this.webBridgePort) {
-      return "";
-    }
-    return `http://localhost:${this.webBridgePort}`;
+    return this.getHopHttpBaseUrl();
   }
 
   private buildCurrentDashInstanceSummary(workspaceId?: string) {
@@ -3402,17 +3278,42 @@ class BunnyEarsRuntime {
     return "https://farm.electrobunny.ai";
   }
 
-  async getDashUiUrl(): Promise<string | null> {
+  async getDashUiUrl(windowId?: string): Promise<string | null> {
     try {
       const channel = await Updater.localInfo.channel();
+      let baseUrl = "https://dash.electrobunny.ai";
       if (channel === "dev") {
-        return "http://localhost:5174";
+        baseUrl = "http://localhost:5174";
+      } else if (channel === "canary") {
+        baseUrl = "https://staging-dash.electrobunny.ai";
       }
-      if (channel === "canary") {
-        return "https://staging-dash.electrobunny.ai";
-      }
-    } catch {}
-    return "https://dash.electrobunny.ai";
+      return await this.buildDashUiUrlWithHopBridge(baseUrl, windowId);
+    } catch {
+      return await this.buildDashUiUrlWithHopBridge("https://dash.electrobunny.ai", windowId);
+    }
+  }
+
+  private async buildDashUiUrlWithHopBridge(baseUrl: string, windowId?: string): Promise<string> {
+    const url = new URL(baseUrl);
+    const accessToken = await this.ensureDashCloudAccessToken();
+    const machineId = this.getMachineId() || "";
+    url.searchParams.set("env", this.channel);
+    if (windowId) {
+      url.searchParams.set("dashWindowId", windowId);
+    }
+    if (accessToken && machineId) {
+      url.searchParams.set("dashBridgeAccessToken", accessToken);
+      url.searchParams.set("dashBridgeInstanceId", machineId);
+      url.searchParams.set("dashBridgeCarrotId", "dash-ui");
+    } else {
+      console.warn(
+        "[bunny-ears] Opening Dash without Hop bridge credentials; Ears communication will be unavailable until Bunny Cloud is connected.",
+      );
+    }
+    if (this.deviceToken && !this.hopWs) {
+      this.connectToHop();
+    }
+    return url.toString();
   }
 
   private async openFarmForLogin(): Promise<void> {
@@ -3567,174 +3468,6 @@ class BunnyEarsRuntime {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[bunny-ears] Instance registration failed: ${msg}`);
       return { ok: false, error: msg };
-    }
-  }
-
-
-  /**
-   * WebSocket bridge for browser-hosted Dash UI sessions and other web clients.
-   */
-  private startWebBridge() {
-    const self = this;
-    let clientId = 0;
-    const candidatePorts = Array.from({ length: 20 }, (_, index) => 9333 + index);
-
-    for (const port of candidatePorts) {
-      try {
-        Bun.serve({
-          port,
-          fetch(req, server) {
-            const url = new URL(req.url);
-
-            if (url.pathname.startsWith("/carrot/")) {
-              const segments = url.pathname.split("/").filter(Boolean);
-              const carrotId = segments[1] || "";
-              const uiKind = segments[2] || "";
-              const uiId = segments[3] || "";
-              const restPath = segments.slice(4);
-              const resolved =
-                uiKind === "remote-ui"
-                  ? self.resolveCarrotRemoteUIFile(carrotId, uiId, restPath)
-                  : uiKind === "slate-ui"
-                    ? self.resolveCarrotSlateUIFile(carrotId, uiId, restPath)
-                    : self.resolveCarrotRemoteUIFile(carrotId, uiKind, segments.slice(3));
-              if (!resolved.ok) {
-                return new Response(resolved.error, { status: resolved.status });
-              }
-              return new Response(resolved.body, {
-                status: 200,
-                headers: {
-                  "Content-Type": resolved.contentType,
-                  "Cache-Control": "no-store",
-                  "Access-Control-Allow-Origin": "*",
-                },
-              });
-            }
-
-            if (server.upgrade(req, { data: { id: `web-${++clientId}` } })) {
-              return;
-            }
-            return new Response("Bunny Ears Web Bridge", { status: 200 });
-          },
-          websocket: {
-            open(ws) {
-              const id = (ws.data as any).id as string;
-              console.log(`[web-bridge] Client connected: ${id}`);
-              self.dashWebClients.set(id, {
-                send: (sendData: string) => {
-                  try { ws.send(sendData); } catch {}
-                },
-                windowId: null,
-              });
-            },
-            async message(ws, data) {
-              const id = (ws.data as any).id as string;
-              try {
-                const msg = JSON.parse(String(data));
-
-                if (msg.type === "request") {
-                  const startedAt = Date.now();
-                  bridgeLog("dash web bridge request:start", {
-                    clientId: id,
-                    requestId:
-                      typeof msg.id === "number" ? msg.id : String(msg.id || ""),
-                    method: String(msg.method || ""),
-                    params: summarizeBridgeValue(msg.params),
-                  });
-                  try {
-                    self.setDashWebClientWindowId(
-                      id,
-                      typeof msg?.params?.windowId === "string" ? msg.params.windowId : undefined,
-                    );
-                    const direct = await self.handleDirectDashRequest(
-                      String(msg.method || ""),
-                      msg.params,
-                      typeof msg?.params?.windowId === "string"
-                        ? msg.params.windowId
-                        : undefined,
-                    );
-                    const result =
-                      direct.handled
-                        ? direct.result
-                        : msg.method === "invokeCarrot"
-                          ? await self.invokeCarrotFrom(
-                              "dash-ui",
-                              String(msg?.params?.carrotId || ""),
-                              String(msg?.params?.method || ""),
-                              msg?.params?.params,
-                              typeof msg?.params?.windowId === "string"
-                                ? msg.params.windowId
-                                : undefined,
-                            )
-                          : (() => {
-                              throw new Error(`Unknown Dash UI bridge request: ${String(msg.method || "")}`);
-                            })();
-                    bridgeLog("dash web bridge request:ok", {
-                      clientId: id,
-                      requestId:
-                        typeof msg.id === "number" ? msg.id : String(msg.id || ""),
-                      method: String(msg.method || ""),
-                      durationMs: Date.now() - startedAt,
-                      result: summarizeBridgeValue(result),
-                    });
-                    ws.send(JSON.stringify({
-                      type: "response",
-                      id: msg.id,
-                      result,
-                    }));
-                  } catch (err) {
-                    bridgeLog("dash web bridge request:error", {
-                      clientId: id,
-                      requestId:
-                        typeof msg.id === "number" ? msg.id : String(msg.id || ""),
-                      method: String(msg.method || ""),
-                      durationMs: Date.now() - startedAt,
-                      error: err instanceof Error ? err.message : String(err),
-                    });
-                    ws.send(JSON.stringify({
-                      type: "response",
-                      id: msg.id,
-                      error: err instanceof Error ? err.message : String(err),
-                    }));
-                  }
-                }
-
-                if (msg.type === "message") {
-                  bridgeLog("dash web bridge message", {
-                    clientId: id,
-                    name: String(msg.name || ""),
-                    payload: summarizeBridgeValue(msg.payload),
-                  });
-                  self.setDashWebClientWindowId(
-                    id,
-                    typeof msg?.payload?.windowId === "string" ? msg.payload.windowId : undefined,
-                  );
-                  const direct = await self.handleDirectDashSend(
-                    String(msg.name || ""),
-                    msg.payload,
-                    typeof msg?.payload?.windowId === "string" ? msg.payload.windowId : undefined,
-                  );
-                  if (!direct.handled) {
-                    console.warn(`[web-bridge] Unhandled Dash UI message: ${String(msg.name || "")}`);
-                  }
-                }
-              } catch (err) {
-                console.error("[web-bridge] Failed to handle message:", err);
-              }
-            },
-            close(ws) {
-              const id = (ws.data as any).id as string;
-              console.log(`[web-bridge] Client disconnected: ${id}`);
-              self.dashWebClients.delete(id);
-            },
-          },
-        });
-        this.webBridgePort = port;
-        console.log(`[web-bridge] Listening on ws://localhost:${port}`);
-        return;
-      } catch (err) {
-        console.error(`[web-bridge] Failed to start on port ${port}:`, err);
-      }
     }
   }
 
@@ -4024,13 +3757,13 @@ class BunnyEarsRuntime {
     ApplicationMenu.setApplicationMenu(menu);
   }
 
-  private async handleDirectDashRequest(
+  private async handleDashHopRequest(
     method: string,
     params: unknown,
     sourceWindowId?: string,
   ): Promise<{ handled: boolean; result?: unknown }> {
     const invokeFs = (fsMethod: string) =>
-      this.invokeCarrotFrom("dash-ui", "bunny.fs", fsMethod, params, sourceWindowId);
+      this.deliverCarrotInvokeFrom("dash-ui", "bunny.fs", fsMethod, params, sourceWindowId);
 
     switch (method) {
       case "logoutBunnyCloud":
@@ -4229,7 +3962,7 @@ class BunnyEarsRuntime {
     }
   }
 
-  private async handleDirectDashSend(
+  private async handleDashHopSend(
     name: string,
     payload: unknown,
     sourceWindowId?: string,
@@ -4378,7 +4111,107 @@ class BunnyEarsRuntime {
     };
   }
 
+  private async sendHopRuntimeRequest<T = unknown>(
+    targetMachineId: string,
+    method: string,
+    params?: unknown,
+  ): Promise<T> {
+    const normalizedMachineId = String(targetMachineId || "").trim();
+    if (!normalizedMachineId) {
+      throw new Error("Missing target Hop instance id");
+    }
+
+    const accessToken = await this.ensureDashCloudAccessToken();
+    if (this.channel !== "dev" && !accessToken) {
+      throw new Error("Hop access token unavailable");
+    }
+
+    const url = `${this.getHopWsBaseUrl()}/ws/${encodeURIComponent(normalizedMachineId)}/bunny-ears${accessToken ? `?token=${encodeURIComponent(accessToken)}` : ""}`;
+    const requestId = Date.now() + Math.floor(Math.random() * 1_000_000);
+
+    return await new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const ws = new WebSocket(url);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+
+      const finish = (error?: Error, value?: T) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (timeout) {
+          clearTimeout(timeout);
+        }
+        try {
+          ws.close();
+        } catch {}
+        if (error) {
+          reject(error);
+        } else {
+          resolve(value as T);
+        }
+      };
+
+      timeout = setTimeout(() => {
+        finish(new Error(`Timed out waiting for Hop runtime response: ${method}`));
+      }, 15_000);
+
+      ws.addEventListener("open", () => {
+        ws.send(JSON.stringify({
+          type: "request",
+          id: requestId,
+          method,
+          params,
+        }));
+      });
+
+      ws.addEventListener("message", (event) => {
+        try {
+          const message = JSON.parse(String(event.data || "{}"));
+          if (message?.type !== "response" || message.id !== requestId) {
+            return;
+          }
+          if (message.success === false || message.error) {
+            finish(new Error(String(message.error || "Hop runtime request failed")));
+            return;
+          }
+          finish(undefined, (message.payload ?? message.result) as T);
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+
+      ws.addEventListener("error", () => {
+        finish(new Error(`Hop runtime request failed: ${method}`));
+      });
+
+      ws.addEventListener("close", () => {
+        if (!settled) {
+          finish(new Error(`Hop runtime connection closed: ${method}`));
+        }
+      });
+    });
+  }
+
   async invokeCarrotFrom(
+    sourceCarrotId: string,
+    targetCarrotId: string,
+    method: string,
+    params?: unknown,
+    sourceWindowId?: string,
+    targetMachineId?: string,
+  ) {
+    const machineId = String(targetMachineId || this.getMachineId() || "").trim();
+    return this.sendHopRuntimeRequest(machineId, "invokeCarrot", {
+      sourceCarrotId,
+      targetCarrotId,
+      method,
+      params,
+      windowId: sourceWindowId,
+    });
+  }
+
+  async deliverCarrotInvokeFrom(
     sourceCarrotId: string,
     targetCarrotId: string,
     method: string,
@@ -4392,7 +4225,7 @@ class BunnyEarsRuntime {
       throw new Error("Missing target carrot method");
     }
     const startedAt = Date.now();
-    bridgeLog("invokeCarrotFrom:start", {
+    bridgeLog("deliverCarrotInvokeFrom:start", {
       sourceCarrotId,
       targetCarrotId,
       method,
@@ -4402,7 +4235,7 @@ class BunnyEarsRuntime {
 
     const target = this.carrots.get(targetCarrotId);
     if (!target) {
-      bridgeLog("invokeCarrotFrom:error", {
+      bridgeLog("deliverCarrotInvokeFrom:error", {
         sourceCarrotId,
         targetCarrotId,
         method,
@@ -4426,7 +4259,7 @@ class BunnyEarsRuntime {
         method,
         this.withSourceEnvelope(sourceCarrotId, sourceWindowId, params),
       );
-      bridgeLog("invokeCarrotFrom:ok", {
+      bridgeLog("deliverCarrotInvokeFrom:ok", {
         sourceCarrotId,
         targetCarrotId,
         method,
@@ -4436,7 +4269,7 @@ class BunnyEarsRuntime {
       });
       return result;
     } catch (error) {
-      bridgeLog("invokeCarrotFrom:error", {
+      bridgeLog("deliverCarrotInvokeFrom:error", {
         sourceCarrotId,
         targetCarrotId,
         method,
@@ -4458,6 +4291,29 @@ class BunnyEarsRuntime {
       return;
     }
 
+    void this.sendHopRuntimeRequest(this.getMachineId() || "", "emitCarrotEvent", {
+      sourceCarrotId,
+      targetCarrotId,
+      name,
+      payload,
+    }).catch((error) => {
+      console.warn(
+        "[hop] Failed to emit carrot event:",
+        error instanceof Error ? error.message : error,
+      );
+    });
+  }
+
+  deliverCarrotEventFrom(
+    sourceCarrotId: string,
+    targetCarrotId: string,
+    name: string,
+    payload?: unknown,
+  ) {
+    if (!targetCarrotId || !name) {
+      return;
+    }
+
     const target = this.carrots.get(targetCarrotId);
     if (!target || target.status !== "running") {
       return;
@@ -4467,7 +4323,7 @@ class BunnyEarsRuntime {
   }
 
   emitCarrotViewEventFrom(
-    _sourceCarrotId: string,
+    sourceCarrotId: string,
     targetCarrotId: string,
     name: string,
     payload?: unknown,
@@ -4481,12 +4337,42 @@ class BunnyEarsRuntime {
     }
 
     bridgeLog("emitCarrotViewEventFrom", {
+      sourceCarrotId,
       targetCarrotId,
       name,
       windowId: options?.windowId || "",
       raw: Boolean(options?.raw),
       payload: summarizeBridgeValue(payload),
     });
+
+    void this.sendHopRuntimeRequest(this.getMachineId() || "", "emitCarrotViewEvent", {
+      sourceCarrotId,
+      targetCarrotId,
+      name,
+      payload,
+      raw: Boolean(options?.raw),
+      windowId: options?.windowId,
+    }).catch((error) => {
+      console.warn(
+        "[hop] Failed to emit carrot view event:",
+        error instanceof Error ? error.message : error,
+      );
+    });
+  }
+
+  deliverCarrotViewEventFrom(
+    _sourceCarrotId: string,
+    targetCarrotId: string,
+    name: string,
+    payload?: unknown,
+    options?: {
+      raw?: boolean;
+      windowId?: string;
+    },
+  ) {
+    if (!targetCarrotId || !name) {
+      return;
+    }
 
     if (targetCarrotId === "dash-ui") {
       this.emitDashViewMessage(name, payload, options);
