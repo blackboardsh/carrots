@@ -4193,6 +4193,25 @@ class BunnyEarsRuntime {
     });
   }
 
+  private shouldUseLocalCarrotShortCircuit(
+    targetCarrotId: string,
+    targetMachineId?: string | null,
+  ) {
+    if (!targetCarrotId || targetCarrotId === "dash-ui" || targetCarrotId === "bunny-ears") {
+      return false;
+    }
+    const normalizedTargetMachineId = String(targetMachineId || "").trim();
+    if (!normalizedTargetMachineId) {
+      return true;
+    }
+    const localMachineId = this.getMachineId();
+    return (
+      normalizedTargetMachineId === localMachineId ||
+      normalizedTargetMachineId === `local:${localMachineId}` ||
+      (Boolean(this.instanceId) && normalizedTargetMachineId === this.instanceId)
+    );
+  }
+
   async invokeCarrotFrom(
     sourceCarrotId: string,
     targetCarrotId: string,
@@ -4201,6 +4220,23 @@ class BunnyEarsRuntime {
     sourceWindowId?: string,
     targetMachineId?: string,
   ) {
+    if (this.shouldUseLocalCarrotShortCircuit(targetCarrotId, targetMachineId)) {
+      bridgeLog("invokeCarrotFrom:local-short-circuit", {
+        sourceCarrotId,
+        targetCarrotId,
+        method,
+        sourceWindowId: sourceWindowId || "",
+        params: summarizeBridgeValue(params),
+      });
+      return this.deliverCarrotInvokeFrom(
+        sourceCarrotId,
+        targetCarrotId,
+        method,
+        params,
+        sourceWindowId,
+      );
+    }
+
     const machineId = String(targetMachineId || this.getMachineId() || "").trim();
     return this.sendHopRuntimeRequest(machineId, "invokeCarrot", {
       sourceCarrotId,
@@ -4291,6 +4327,11 @@ class BunnyEarsRuntime {
       return;
     }
 
+    if (this.shouldUseLocalCarrotShortCircuit(targetCarrotId)) {
+      this.deliverCarrotEventFrom(sourceCarrotId, targetCarrotId, name, payload);
+      return;
+    }
+
     void this.sendHopRuntimeRequest(this.getMachineId() || "", "emitCarrotEvent", {
       sourceCarrotId,
       targetCarrotId,
@@ -4344,6 +4385,17 @@ class BunnyEarsRuntime {
       raw: Boolean(options?.raw),
       payload: summarizeBridgeValue(payload),
     });
+
+    if (this.shouldUseLocalCarrotShortCircuit(targetCarrotId)) {
+      this.deliverCarrotViewEventFrom(
+        sourceCarrotId,
+        targetCarrotId,
+        name,
+        payload,
+        options,
+      );
+      return;
+    }
 
     void this.sendHopRuntimeRequest(this.getMachineId() || "", "emitCarrotViewEvent", {
       sourceCarrotId,
