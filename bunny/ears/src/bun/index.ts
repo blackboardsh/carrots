@@ -1493,9 +1493,9 @@ class BunnyEarsRuntime {
   deviceToken: string | null = null;
   // ID of the device token (from the API) — used for server-side revocation.
   deviceTokenId: string | null = null;
-  // ID of this instance in the API (assigned at registration time) — used to
-  // mark the instance offline on logout.
-  instanceId: string | null = null;
+  // Bunny Cloud API record for this machine. Runtime/Hop routing still uses
+  // the generated machineId; this record id is only for Cloud API operations.
+  instance: CloudInstance | null = null;
   farmWindow: BrowserWindow | null = null;
   dashWindows = new Map<string, BrowserWindow>();
   dashHopBrowserIds = new Map<string, { windowId: string | null }>();
@@ -2677,7 +2677,7 @@ class BunnyEarsRuntime {
     const os = require("node:os");
     const machineId = this.getMachineId() || "";
     const stableLocalInstanceId =
-      this.instanceId || (machineId ? `local:${machineId}` : "local:this-instance");
+      this.instance?.id || (machineId ? `local:${machineId}` : "local:this-instance");
     return {
       id: stableLocalInstanceId,
       machineId,
@@ -2856,11 +2856,11 @@ class BunnyEarsRuntime {
 
     const oldAccessToken = this.authToken;
     const oldDeviceTokenId = this.deviceTokenId;
-    const oldInstanceId = this.instanceId;
+    const oldInstanceId = this.instance?.id || null;
 
     this.clearSavedAuthToken();
     this.clearDeviceToken();
-    this.instanceId = null;
+    this.instance = null;
     this.upsertDashHostCache({
       account: {
         signedIn: false,
@@ -3104,14 +3104,14 @@ class BunnyEarsRuntime {
       });
     }
 
-    const currentInstanceId = currentMachine.machineId
-      ? instances.find((instance) => instance.machine_id === currentMachine.machineId)?.id ||
-        this.instanceId ||
+    const currentInstance = currentMachine.machineId
+      ? instances.find((instance) => instance.machine_id === currentMachine.machineId) ||
+        this.instance ||
         null
-      : this.instanceId;
+      : this.instance;
 
-    if (currentInstanceId) {
-      this.instanceId = currentInstanceId;
+    if (currentInstance) {
+      this.instance = currentInstance;
     }
 
     const currentDeviceTokenId = currentMachine.machineId
@@ -3127,7 +3127,7 @@ class BunnyEarsRuntime {
       instances,
       workspaces,
       devices,
-      currentInstanceId,
+      currentInstanceId: currentInstance?.id || null,
       currentDeviceTokenId,
       currentCarrots: this.buildCurrentDashCarrotSummaries(),
     };
@@ -3199,7 +3199,7 @@ class BunnyEarsRuntime {
       instances: [],
       workspaces: [],
       devices: [],
-      currentInstanceId: this.instanceId || null,
+      currentInstanceId: this.instance?.id || null,
       currentDeviceTokenId: this.deviceTokenId || null,
       currentCarrots: this.buildCurrentDashCarrotSummaries(),
     };
@@ -3459,9 +3459,10 @@ class BunnyEarsRuntime {
         return { ok: false, error: `API ${response.status}` };
       }
 
-      const data = await response.json() as any;
-      const instanceId = data.instance?.id || null;
-      if (instanceId) this.instanceId = instanceId;
+      const data = await response.json() as { instance?: CloudInstance };
+      const instance = data.instance || null;
+      if (instance) this.instance = instance;
+      const instanceId = instance?.id || null;
       console.log(`[bunny-ears] Instance registered: ${data.instance?.name} (${instanceId})`);
       return { ok: true, instanceId };
     } catch (err) {
@@ -4207,8 +4208,7 @@ class BunnyEarsRuntime {
     const localMachineId = this.getMachineId();
     return (
       normalizedTargetMachineId === localMachineId ||
-      normalizedTargetMachineId === `local:${localMachineId}` ||
-      (Boolean(this.instanceId) && normalizedTargetMachineId === this.instanceId)
+      normalizedTargetMachineId === `local:${localMachineId}`
     );
   }
 
