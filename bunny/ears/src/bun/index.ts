@@ -2837,10 +2837,7 @@ class BunnyEarsRuntime {
       windows: cache?.windows || [],
       workspaces: cache?.workspaces || [],
       cloudWorkspaces: cache?.cloudWorkspaces || [],
-      knownLocalProjects:
-        knownLocalProjects.length > 0
-          ? knownLocalProjects
-          : cache?.knownLocalProjects || [],
+      knownLocalProjects,
       peerDependencies: cache?.peerDependencies || {},
       account: cache?.account || {
         signedIn: false,
