@@ -10,6 +10,8 @@ on:
 jobs:
   build:
     runs-on: macos-15
+    env:
+      CARROTS: git pty fs tsserver biome llama
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -64,7 +66,7 @@ jobs:
 
       - name: Install carrot dependencies
         run: |
-          for carrot in git pty search tsserver biome llama dash; do
+          for carrot in $CARROTS; do
             if [ -f "$carrot/package.json" ]; then
               echo "Installing deps for $carrot..."
               cd "$carrot" && bun install && cd ..
@@ -76,7 +78,7 @@ jobs:
           ZIG_BINARY: ${{ github.workspace }}/vendors/zig/zig
         run: |
           mkdir -p artifacts
-          for carrot in git pty search tsserver biome llama dash; do
+          for carrot in $CARROTS; do
             echo "=== Building $carrot ==="
             cd "$carrot"
             npx electrobun build --env=canary
