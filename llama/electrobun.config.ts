@@ -1,3 +1,5 @@
+import { earsCarrotRuntimeAliasPlugin } from "../carrot-runtime-alias";
+
 export default {
 	app: {
 		name: "Bunny Llama",
@@ -7,6 +9,7 @@ export default {
 	build: {
 		bun: {
 			entrypoint: "src/bun/worker.ts",
+			plugins: [earsCarrotRuntimeAliasPlugin()],
 		},
 		carrot: {
 			id: "bunny.llama",

@@ -69,6 +69,7 @@ type InitMessage = {
   context?: {
     statePath?: string;
     logsPath?: string;
+    channel?: string;
   };
 };
 
@@ -702,6 +703,9 @@ export const app = {
   },
   get logsPath() {
     return carrotRuntime.context?.logsPath ?? "";
+  },
+  get channel() {
+    return carrotRuntime.context?.channel ?? "dev";
   },
   async getWindowFrame(windowId?: string) {
     return carrotRuntime.requestHost<{

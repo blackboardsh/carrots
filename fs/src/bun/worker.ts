@@ -15,7 +15,7 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import Electrobun from "electrobun";
+import { app } from "electrobun/bun";
 
 type InvocationSource = {
   carrotId?: string;
@@ -705,7 +705,7 @@ function normalizeDashWorkspaceId(workspaceId?: string | null) {
 }
 
 function getDashProjectsRoot(workspaceId?: string | null) {
-  const channel = Electrobun.channel || "dev";
+  const channel = app.channel || "dev";
   return join(
     homedir(),
     ".dash",

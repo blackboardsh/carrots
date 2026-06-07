@@ -1,4 +1,5 @@
 import type { ElectrobunConfig } from "electrobun";
+import { earsCarrotRuntimeAliasPlugin } from "../carrot-runtime-alias";
 
 export default {
 	app: {
@@ -9,6 +10,7 @@ export default {
 	build: {
 		bun: {
 			entrypoint: "src/bun/worker.ts",
+			plugins: [earsCarrotRuntimeAliasPlugin()],
 		},
 		carrot: {
 			id: "bunny.pty",
