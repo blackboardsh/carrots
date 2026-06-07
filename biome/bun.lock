@@ -6,7 +6,7 @@
       "name": "bunny-biome",
       "dependencies": {
         "@biomejs/biome": "2.3.13",
-        "electrobun": "1.18.4-beta.3",
+        "electrobun": "1.18.4-beta.5",
       },
     },
   },
@@ -57,7 +57,7 @@
 
     "degenerator": ["degenerator@5.0.1", "", { "dependencies": { "ast-types": "^0.13.4", "escodegen": "^2.1.0", "esprima": "^4.0.1" } }, "sha512-TllpMR/t0M5sqCXfj85i4XaAzxmS5tVA16dqvdkMwGmzI+dXLXnw3J+3Vdv7VKw+ThlTMboK6i9rnZ6Nntj5CQ=="],
 
-    "electrobun": ["electrobun@1.18.4-beta.3", "", { "dependencies": { "@babylonjs/core": "^7.45.0", "@types/bun": "^1.3.8", "png-to-ico": "^2.1.8", "proxy-agent": "^6.5.0", "rcedit": "^4.0.1", "three": "^0.165.0" }, "bin": { "electrobun": "bin/electrobun.cjs" } }, "sha512-5P94QsK8BGDak6aPaTn3QGHs4ZnA9R7CIhlMwxBjdITfDUIJ8c7vflYIsnmuVeafcel6pS2ask8gOVSqpIUD2A=="],
+    "electrobun": ["electrobun@1.18.4-beta.5", "", { "dependencies": { "@babylonjs/core": "^7.45.0", "@types/bun": "^1.3.8", "png-to-ico": "^2.1.8", "proxy-agent": "^6.5.0", "rcedit": "^4.0.1", "three": "^0.165.0" }, "bin": { "electrobun": "bin/electrobun.cjs" } }, "sha512-O1BFZynuJ1WoTmQWH32mC0pCPwqgO7yPGqg3U6hi8sQvRogyKKzMxaf8Lcp9CeqnQFUrK+YbOtVe/TauDJYcfw=="],
 
     "escodegen": ["escodegen@2.1.0", "", { "dependencies": { "esprima": "^4.0.1", "estraverse": "^5.2.0", "esutils": "^2.0.2" }, "optionalDependencies": { "source-map": "~0.6.1" }, "bin": { "esgenerate": "bin/esgenerate.js", "escodegen": "bin/escodegen.js" } }, "sha512-2NlIDTwUWJN0mRPQOdtQBzbUHvdGY2P1VXSyU83Q3xKxM7WHX2Ql8dKq782Q9TgQUNOLEzEYu9bzLNj1q88I5w=="],
 

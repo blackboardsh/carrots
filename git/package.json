@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "dependencies": {
-    "electrobun": "file:../../electrobun/package",
+    "electrobun": "1.18.4-beta.5",
     "esbuild": "^0.25.12",
     "esbuild-monaco-editor-plugin": "^0.1.1",
     "esbuild-plugin-solid": "^0.5.0",
