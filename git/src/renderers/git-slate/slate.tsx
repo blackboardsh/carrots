@@ -1,6 +1,5 @@
 import { render } from "solid-js/web";
 import { GitSlate } from "./GitSlate";
-import { setEmbeddedBridge } from "../shared/bridge";
 
 type SlateMountContext = {
   nodePath?: string;
@@ -9,18 +8,20 @@ type SlateMountContext = {
 };
 
 export function mount(container: HTMLElement, context: SlateMountContext) {
-  setEmbeddedBridge({
-    invokeCarrot: context.invokeCarrot,
-    sendToHost: context.sendToHost,
-  });
-
   const dispose = render(
-    () => <GitSlate nodePath={context.nodePath || ""} />,
+    () => (
+      <GitSlate
+        nodePath={context.nodePath || ""}
+        bridge={{
+          invokeCarrot: context.invokeCarrot,
+          sendToHost: context.sendToHost,
+        }}
+      />
+    ),
     container,
   );
 
   return () => {
     dispose();
-    setEmbeddedBridge(null);
   };
 }

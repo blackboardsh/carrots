@@ -13,6 +13,11 @@ import { Dialog } from "../shared/Dialog";
 import { dirname, join } from "../shared/pathUtils";
 import { electrobun, invokeFsCarrot, invokeGitCarrot, sendToHost } from "../shared/bridge";
 
+type GitSlateBridge = {
+  invokeCarrot: <T = unknown>(carrotId: string, method: string, params?: unknown) => Promise<T>;
+  sendToHost: (message: Record<string, unknown>) => void;
+};
+
 type FileChangeType = {
   changeType: string;
   relPath: string;
@@ -143,14 +148,33 @@ const getGitFileChangeType = (file: any): string => {
   return "";
 };
 
-export const GitSlate = ({ nodePath }: { nodePath: string }) => {
+export const GitSlate = ({
+  nodePath,
+  bridge,
+}: {
+  nodePath: string;
+  bridge?: GitSlateBridge;
+}) => {
   if (!nodePath) {
     return null;
   }
 
   const repoRootPath = nodePath.replace(/\/?\.git\/?$/, "");
   const gitRequest = <T = unknown>(method: string, params?: unknown) =>
-    invokeGitCarrot<T>(method, params);
+    bridge
+      ? bridge.invokeCarrot<T>("bunny.git", method, params)
+      : invokeGitCarrot<T>(method, params);
+  const fsRequest = <T = unknown>(method: string, params?: unknown) =>
+    bridge
+      ? bridge.invokeCarrot<T>("bunny.fs", method, params)
+      : invokeFsCarrot<T>(method, params);
+  const hostSend = (message: Record<string, unknown>) => {
+    if (bridge) {
+      bridge.sendToHost(message);
+      return;
+    }
+    sendToHost(message);
+  };
   let statusRefreshInFlight: Promise<void> | null = null;
   let statusRefreshQueued = false;
 
@@ -254,11 +278,11 @@ export const GitSlate = ({ nodePath }: { nodePath: string }) => {
     if (commitRef === "WORKING") {
       // Special case: read from working directory
       const absolutePath = join(repoRootPath, filepath);
-      const exists = await invokeFsCarrot<boolean>("exists", { path: absolutePath });
+      const exists = await fsRequest<boolean>("exists", { path: absolutePath });
       if (!exists) {
         return "";
       }
-      const result = await invokeFsCarrot<{ textContent?: string }>("readFile", { path: absolutePath });
+      const result = await fsRequest<{ textContent?: string }>("readFile", { path: absolutePath });
       const content = result?.textContent || "";
       return content;
     } else if (commitRef === "INDEX") {
@@ -1434,7 +1458,7 @@ export const GitSlate = ({ nodePath }: { nodePath: string }) => {
     await onClickSaveBackup();
 
     // duplicate the repo and checkout the target commit in that duplicate repo
-    await invokeFsCarrot("copy", {
+    await fsRequest("copy", {
       src: repoRootPath,
       dest: tempRootPath,
     });
@@ -1444,21 +1468,21 @@ export const GitSlate = ({ nodePath }: { nodePath: string }) => {
       hash: commit.hash,
     });
     // replace that duplicate repo's .git folder with the original
-    await invokeFsCarrot("safeDeleteFileOrFolder", {
+    await fsRequest("safeDeleteFileOrFolder", {
       absolutePath: tempGitPath,
     });
 
-    await invokeFsCarrot("copy", {
+    await fsRequest("copy", {
       src: originalGitPath,
       dest: tempGitPath,
     });
 
     // save the original repo as -backup just in case and replace the duplicate to the original
-    await invokeFsCarrot("rename", {
+    await fsRequest("rename", {
       oldPath: repoRootPath,
       newPath: backupPath,
     });
-    await invokeFsCarrot("rename", {
+    await fsRequest("rename", {
       oldPath: tempRootPath,
       newPath: repoRootPath,
     });
@@ -1470,7 +1494,7 @@ export const GitSlate = ({ nodePath }: { nodePath: string }) => {
 
     await onClickSaveBackup();
 
-    await invokeFsCarrot("safeTrashFileOrFolder", { path: backupPath });
+    await fsRequest("safeTrashFileOrFolder", { path: backupPath });
   };
 
   return (
@@ -1616,6 +1640,7 @@ export const GitSlate = ({ nodePath }: { nodePath: string }) => {
                   onDiscard={discardFileChanges}
                   isStaged={false}
                   repoRootPath={repoRootPath}
+                  sendToHost={hostSend}
                 />
               </div>
             </Show>
@@ -1882,6 +1907,7 @@ export const GitSlate = ({ nodePath }: { nodePath: string }) => {
                   onUnstage={unstageFile}
                   isStaged={true}
                   repoRootPath={repoRootPath}
+                  sendToHost={hostSend}
                 />
               </div>
             </div>
@@ -3792,6 +3818,7 @@ const FileList = ({
   onDiscard,
   isStaged = false,
   repoRootPath,
+  sendToHost,
 }: {
   files: Accessor<FileChangesType>;
   commitHash: string;
@@ -3803,6 +3830,7 @@ const FileList = ({
   onDiscard?: (filePath: string) => void;
   isStaged?: boolean;
   repoRootPath: string;
+  sendToHost: (message: Record<string, unknown>) => void;
 }) => {
   return (
     <div class="file-list" style={{ margin: "10px 0" }}>
@@ -3819,6 +3847,7 @@ const FileList = ({
             onDiscard={onDiscard}
             isStaged={isStaged}
             repoRootPath={repoRootPath}
+            sendToHost={sendToHost}
           />
         )}
       </For>
@@ -3837,6 +3866,7 @@ const FileListItem = ({
   onDiscard,
   isStaged = false,
   repoRootPath,
+  sendToHost,
 }: {
   change: FileChangeType;
   commitHash: string;
@@ -3848,6 +3878,7 @@ const FileListItem = ({
   onDiscard?: (filePath: string) => void;
   isStaged?: boolean;
   repoRootPath: string;
+  sendToHost: (message: Record<string, unknown>) => void;
 }) => {
   const [isHovered, setIsHovered] = createSignal(false);
   const relPath = () => change?.relPath || "";
