@@ -9,6 +9,7 @@ import {
   type RPCSchema,
   Updater,
 } from "electrobun/bun";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type {
@@ -43,6 +44,7 @@ const DEBUG_BUNNY_EARS_BOOT = process.env.BUNNY_EARS_BOOT_DEBUG === "1";
 const DEBUG_BUNNY_EARS_BRIDGE = process.env.BUNNY_EARS_BRIDGE_DEBUG === "1";
 const DEFAULT_DASH_WORKSPACE_ID = "local-workspace";
 const CLOUD_WORKSPACE_SHADOW_PREFIX = "__cloud_workspace__:";
+const WORKSPACE_CURRENT_LENS_PREFIX = "__workspace-current__:";
 const DASH_TRAY_ICON = "views://assets/Dash-tray.png";
 const SHOULD_REFRESH_TRACKED_DEV_CARROTS =
   process.env.BUNNY_EARS_REFRESH_TRACKED_DEV_CARROTS === "1";
@@ -205,6 +207,16 @@ type DashHostWindowCache = {
   activeTreeNodeId: string;
 };
 
+type DashLocalWorkspaceSummary = {
+  id: string;
+  name: string;
+  subtitle: string;
+  projectsDir: string;
+  sortOrder: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
 type DashHostSummaryCache = {
   version: 1;
   updatedAt: number;
@@ -213,6 +225,7 @@ type DashHostSummaryCache = {
   currentWindow: DashHostWindowCache | null;
   windows: DashHostWindowCache[];
   workspaces: unknown[];
+  localWorkspaces: DashLocalWorkspaceSummary[];
   cloudWorkspaces: unknown[];
   knownLocalProjects: unknown[];
   peerDependencies: unknown;
@@ -1616,12 +1629,6 @@ class BunnyEarsRuntime {
     });
 
     if (localDashTargets.length > 0) {
-      console.log("[dash-local-bridge] emitting local Dash message", {
-        name,
-        windowId: options?.windowId || "",
-        raw: Boolean(options?.raw),
-        targets: localDashTargets.length,
-      });
       for (const target of localDashTargets) {
         try {
           if (options?.raw) {
@@ -1631,7 +1638,7 @@ class BunnyEarsRuntime {
           }
         } catch (err) {
           console.warn(
-            "[dash-local-bridge] Failed to emit local Dash message:",
+            "[dash-bridge] Failed to emit local Dash message:",
             err instanceof Error ? err.message : err,
           );
         }
@@ -2414,6 +2421,20 @@ class BunnyEarsRuntime {
               .filter((window) => Boolean(window.windowId))
           : [],
         workspaces: Array.isArray(parsed.workspaces) ? parsed.workspaces : [],
+        localWorkspaces: Array.isArray((parsed as any).localWorkspaces)
+          ? (parsed as any).localWorkspaces
+              .filter((workspace: unknown) => workspace && typeof workspace === "object")
+              .map((workspace: any) => ({
+                id: String(workspace.id || ""),
+                name: String(workspace.name || "Local Workspace"),
+                subtitle: String(workspace.subtitle || "Local workspace"),
+                projectsDir: String(workspace.projectsDir || ""),
+                sortOrder: Number(workspace.sortOrder || 0),
+                createdAt: Number(workspace.createdAt || 0),
+                updatedAt: Number(workspace.updatedAt || 0),
+              }))
+              .filter((workspace: DashLocalWorkspaceSummary) => Boolean(workspace.id))
+          : [],
         cloudWorkspaces: Array.isArray(parsed.cloudWorkspaces) ? parsed.cloudWorkspaces : [],
         knownLocalProjects: Array.isArray(parsed.knownLocalProjects)
           ? parsed.knownLocalProjects
@@ -2471,6 +2492,7 @@ class BunnyEarsRuntime {
       currentWindow: null,
       windows: [],
       workspaces: [],
+      localWorkspaces: [],
       cloudWorkspaces: [],
       knownLocalProjects: [],
       peerDependencies: {},
@@ -2501,6 +2523,9 @@ class BunnyEarsRuntime {
     }
     if (Array.isArray(payload.workspaces)) {
       current.workspaces = payload.workspaces;
+    }
+    if (Array.isArray(payload.localWorkspaces)) {
+      current.localWorkspaces = payload.localWorkspaces;
     }
     if (Array.isArray(payload.cloudWorkspaces)) {
       current.cloudWorkspaces = payload.cloudWorkspaces;
@@ -2536,6 +2561,250 @@ class BunnyEarsRuntime {
     this.saveDashHostCache(current);
   }
 
+  private getDashLocalWorkspacesPath() {
+    return join(this.getChannelStateDir(), "dash-local-workspaces.json");
+  }
+
+  private createDashLocalWorkspaceId() {
+    return `local_ws_${randomUUID().replace(/-/g, "")}`;
+  }
+
+  private isGeneratedDashLocalWorkspaceId(workspaceId?: string) {
+    return this.normalizeDashLocalWorkspaceId(workspaceId).startsWith("local_ws_");
+  }
+
+  private normalizeDashLocalWorkspaceId(workspaceId?: string) {
+    const rawWorkspaceId = String(workspaceId || "").trim();
+    const localWorkspaceId = rawWorkspaceId.startsWith(CLOUD_WORKSPACE_SHADOW_PREFIX)
+      ? rawWorkspaceId.slice(CLOUD_WORKSPACE_SHADOW_PREFIX.length)
+      : rawWorkspaceId;
+    return localWorkspaceId
+      .replace(/[^A-Za-z0-9._-]/g, "_")
+      .replace(/^_+|_+$/g, "");
+  }
+
+  private sanitizeDashLocalWorkspaceName(name: unknown, fallback = "Local Workspace") {
+    const cleanName = String(name || "").trim();
+    return cleanName || fallback;
+  }
+
+  private makeDashLocalWorkspaceSummary(params: {
+    id: string;
+    name?: unknown;
+    subtitle?: unknown;
+    sortOrder: number;
+    createdAt?: number;
+    updatedAt?: number;
+    projectsDir?: string;
+  }): DashLocalWorkspaceSummary {
+    const id = this.normalizeDashLocalWorkspaceId(params.id) || this.createDashLocalWorkspaceId();
+    const now = Date.now();
+    return {
+      id,
+      name: this.sanitizeDashLocalWorkspaceName(params.name),
+      subtitle: String(params.subtitle || "Local workspace").trim() || "Local workspace",
+      projectsDir: this.getDashWorkspaceProjectsDir(id),
+      sortOrder: Number.isFinite(params.sortOrder) ? Number(params.sortOrder) : 0,
+      createdAt: Number(params.createdAt || 0) || now,
+      updatedAt: Number(params.updatedAt || 0) || now,
+    };
+  }
+
+  private loadDashLocalWorkspaces(): DashLocalWorkspaceSummary[] {
+    const registryPath = this.getDashLocalWorkspacesPath();
+    if (!existsSync(registryPath)) {
+      return [];
+    }
+
+    try {
+      const parsed = JSON.parse(readFileSync(registryPath, "utf8")) as
+        | { workspaces?: unknown[] }
+        | unknown[];
+      const rawWorkspaces = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.workspaces)
+          ? parsed.workspaces
+          : [];
+      const workspaces: DashLocalWorkspaceSummary[] = [];
+      for (const [index, workspace] of rawWorkspaces.entries()) {
+        if (!workspace || typeof workspace !== "object") {
+          continue;
+        }
+        const entry = workspace as any;
+        const id = this.normalizeDashLocalWorkspaceId(entry.id || entry.key || "");
+        if (!id || !this.isGeneratedDashLocalWorkspaceId(id)) {
+          continue;
+        }
+        workspaces.push(
+          this.makeDashLocalWorkspaceSummary({
+            id,
+            name: entry.name,
+            subtitle: entry.subtitle,
+            projectsDir: String(entry.projectsDir || ""),
+            sortOrder: Number(entry.sortOrder ?? index),
+            createdAt: Number(entry.createdAt || 0),
+            updatedAt: Number(entry.updatedAt || 0),
+          }),
+        );
+      }
+      return workspaces.sort((left, right) => left.sortOrder - right.sortOrder);
+    } catch (error) {
+      console.error(
+        "[bunny-ears] Failed to load Dash local workspaces:",
+        error instanceof Error ? error.message : error,
+      );
+      return [];
+    }
+  }
+
+  private saveDashLocalWorkspaces(workspaces: DashLocalWorkspaceSummary[]) {
+    const registryPath = this.getDashLocalWorkspacesPath();
+    const normalized = workspaces
+      .map((workspace, index) =>
+        this.makeDashLocalWorkspaceSummary({
+          ...workspace,
+          sortOrder: Number.isFinite(workspace.sortOrder) ? workspace.sortOrder : index,
+        }),
+      )
+      .sort((left, right) => left.sortOrder - right.sortOrder);
+    mkdirSync(this.getChannelStateDir(), { recursive: true });
+    writeFileSync(
+      registryPath,
+      JSON.stringify(
+        {
+          version: 1,
+          workspaces: normalized,
+        },
+        null,
+        2,
+      ),
+    );
+  }
+
+  private ensureDashLocalWorkspaces(): DashLocalWorkspaceSummary[] {
+    const workspacesById = new Map<string, DashLocalWorkspaceSummary>();
+    let changed = false;
+    const addWorkspace = (workspace: DashLocalWorkspaceSummary) => {
+      if (!workspace.id || workspacesById.has(workspace.id)) {
+        return;
+      }
+      workspacesById.set(workspace.id, workspace);
+    };
+
+    for (const workspace of this.loadDashLocalWorkspaces()) {
+      addWorkspace(workspace);
+    }
+
+    if (workspacesById.size === 0) {
+      addWorkspace(
+        this.makeDashLocalWorkspaceSummary({
+          id: this.createDashLocalWorkspaceId(),
+          name: "Local Workspace",
+          subtitle: "Local workspace",
+          sortOrder: 0,
+        }),
+      );
+      changed = true;
+    }
+
+    const workspaces = Array.from(workspacesById.values())
+      .map((workspace, index) => {
+        const projectsDir =
+          String(workspace.projectsDir || "").trim() ||
+          this.getDashWorkspaceProjectsDir(workspace.id);
+        if (workspace.projectsDir !== projectsDir || workspace.sortOrder !== index) {
+          changed = true;
+        }
+        mkdirSync(projectsDir, { recursive: true });
+        return {
+          ...workspace,
+          projectsDir,
+          sortOrder: Number.isFinite(workspace.sortOrder) ? workspace.sortOrder : index,
+        };
+      })
+      .sort((left, right) => left.sortOrder - right.sortOrder)
+      .map((workspace, index) => ({
+        ...workspace,
+        sortOrder: index,
+      }));
+
+    if (changed) {
+      this.saveDashLocalWorkspaces(workspaces);
+    }
+    return workspaces;
+  }
+
+  private buildDashLocalWorkspaceTree(
+    workspace: DashLocalWorkspaceSummary,
+    currentWorkspaceId: string,
+  ) {
+    const lensId = `${WORKSPACE_CURRENT_LENS_PREFIX}${workspace.id}`;
+    const isCurrent = workspace.id === currentWorkspaceId;
+    return {
+      id: workspace.id,
+      name: workspace.name,
+      subtitle: workspace.subtitle,
+      isCurrent,
+      currentLensId: lensId,
+      currentLensIsActive: isCurrent,
+      canExpand: true,
+      lenses: [
+        {
+          id: lensId,
+          name: "Current",
+          description: `Current working state for ${workspace.name}.`,
+          workspaceId: workspace.id,
+          isCurrent,
+          isDirty: false,
+        },
+      ],
+    };
+  }
+
+  private createDashLocalWorkspace(params?: {
+    workspaceId?: string;
+    name?: string;
+    subtitle?: string;
+  }) {
+    const workspaces = this.ensureDashLocalWorkspaces();
+    const existingIds = new Set(workspaces.map((workspace) => workspace.id));
+    let workspaceId = this.isGeneratedDashLocalWorkspaceId(params?.workspaceId)
+      ? this.normalizeDashLocalWorkspaceId(params?.workspaceId || "")
+      : "";
+    if (!workspaceId || existingIds.has(workspaceId)) {
+      do {
+        workspaceId = this.createDashLocalWorkspaceId();
+      } while (existingIds.has(workspaceId));
+    }
+
+    const now = Date.now();
+    const workspace = this.makeDashLocalWorkspaceSummary({
+      id: workspaceId,
+      name: this.sanitizeDashLocalWorkspaceName(
+        params?.name,
+        `Workspace ${workspaces.length + 1}`,
+      ),
+      subtitle: String(params?.subtitle || "Local workspace").trim() || "Local workspace",
+      sortOrder: workspaces.length,
+      createdAt: now,
+      updatedAt: now,
+    });
+    mkdirSync(workspace.projectsDir, { recursive: true });
+
+    const nextWorkspaces = [...workspaces, workspace];
+    this.saveDashLocalWorkspaces(nextWorkspaces);
+    this.upsertDashHostCache({
+      currentWorkspaceId: workspace.id,
+      currentLensId: `${WORKSPACE_CURRENT_LENS_PREFIX}${workspace.id}`,
+      workspaces: nextWorkspaces.map((entry) =>
+        this.buildDashLocalWorkspaceTree(entry, workspace.id),
+      ),
+      localWorkspaces: nextWorkspaces,
+      knownLocalProjects: this.listDashKnownLocalProjects(),
+    });
+    return workspace;
+  }
+
   private getDashHomeDir() {
     const os = require("node:os");
     return join(os.homedir(), ".dash", this.channel);
@@ -2557,61 +2826,53 @@ class BunnyEarsRuntime {
       : resolvedWorkspaceId;
   }
 
-  private listDashProjectWorkspaceRootEntries() {
-    const roots = new Map<string, { workspaceId: string; root: string }>();
-    const addRoot = (workspaceId: string, root: string) => {
-      if (!workspaceId || roots.has(root)) {
-        return;
-      }
-      roots.set(root, { workspaceId, root });
-    };
-
-    const currentWorkspacesRoot = this.getDashWorkspacesDir();
-    if (existsSync(currentWorkspacesRoot)) {
-      try {
-        for (const workspaceEntry of readdirSync(currentWorkspacesRoot, { withFileTypes: true })) {
-          if (workspaceEntry.name.startsWith(".")) {
-            continue;
-          }
-          const workspaceRoot = join(currentWorkspacesRoot, workspaceEntry.name);
-          let isWorkspaceDirectory = workspaceEntry.isDirectory();
-          if (!isWorkspaceDirectory && workspaceEntry.isSymbolicLink()) {
-            try {
-              isWorkspaceDirectory = statSync(workspaceRoot).isDirectory();
-            } catch {
-              isWorkspaceDirectory = false;
-            }
-          }
-          if (isWorkspaceDirectory) {
-            addRoot(workspaceEntry.name, join(workspaceRoot, "projects"));
-          }
-        }
-      } catch {}
+  private listDashProjectWorkspaceRootEntries(workspaceId?: string) {
+    const entries = this.ensureDashLocalWorkspaces().map((workspace) => ({
+      workspaceId: workspace.id,
+      root: workspace.projectsDir,
+    }));
+    const requestedWorkspaceId = workspaceId
+      ? this.normalizeDashProjectWorkspaceId(workspaceId)
+      : "";
+    if (
+      requestedWorkspaceId &&
+      !entries.some((entry) => entry.workspaceId === requestedWorkspaceId)
+    ) {
+      entries.push({
+        workspaceId: requestedWorkspaceId,
+        root: this.getDashProjectsFolder(workspaceId),
+      });
     }
-
-    return Array.from(roots.values());
+    return entries;
   }
 
   private getDashProjectsFolder(workspaceId?: string) {
-    const currentRoot = this.getDashWorkspaceProjectsDir(workspaceId);
+    const resolvedWorkspaceId = this.normalizeDashProjectWorkspaceId(workspaceId);
+    const localWorkspace = this.ensureDashLocalWorkspaces().find(
+      (workspace) => workspace.id === resolvedWorkspaceId,
+    );
+    const currentRoot = localWorkspace?.projectsDir || this.getDashWorkspaceProjectsDir(workspaceId);
     mkdirSync(currentRoot, { recursive: true });
     return currentRoot;
   }
 
-  private listDashKnownLocalProjects() {
-    const currentInstance = this.buildCurrentDashInstanceSummary();
+  private listDashKnownLocalProjects(workspaceId?: string) {
+    const currentInstance = this.buildCurrentDashInstanceSummary(workspaceId);
     const projects = new Map<string, {
       id: string;
       name: string;
       path: string;
       workspaceId: string;
       instanceId: string;
+      instanceMachineId: string;
       instanceLabel: string;
       kind: string;
       status: string;
     }>();
 
-    for (const { workspaceId, root: workspaceRoot } of this.listDashProjectWorkspaceRootEntries()) {
+    for (const projectRootEntry of this.listDashProjectWorkspaceRootEntries(workspaceId)) {
+      const projectWorkspaceId = projectRootEntry.workspaceId;
+      const workspaceRoot = projectRootEntry.root;
       if (!existsSync(workspaceRoot)) {
         continue;
       }
@@ -2636,8 +2897,9 @@ class BunnyEarsRuntime {
             id: fullPath,
             name: entry.name,
             path: fullPath,
-            workspaceId,
+            workspaceId: projectWorkspaceId,
             instanceId: currentInstance.id,
+            instanceMachineId: currentInstance.machineId,
             instanceLabel: currentInstance.name,
             kind: "project",
             status: "available",
@@ -2714,26 +2976,57 @@ class BunnyEarsRuntime {
 
   private buildDashHostBootState(sourceWindowId?: string, workspaceIdOverride?: string) {
     const cache = this.loadDashHostCache();
+    const localWorkspaces = this.ensureDashLocalWorkspaces();
     const targetWindowId = sourceWindowId || cache?.currentWindow?.windowId || "main";
     const windowTarget =
       cache?.windows.find((window) => window.windowId === targetWindowId) ||
       cache?.currentWindow ||
       null;
-    const workspaceId =
+    const requestedWorkspaceId =
       workspaceIdOverride ||
       windowTarget?.workspaceId ||
       cache?.currentWorkspaceId ||
+      localWorkspaces[0]?.id ||
       DEFAULT_DASH_WORKSPACE_ID;
-    const knownLocalProjects = this.listDashKnownLocalProjects();
+    const hasWorkspaceOverride = Boolean(String(workspaceIdOverride || "").trim());
+    const requestedIsCloudWorkspace = requestedWorkspaceId.startsWith(CLOUD_WORKSPACE_SHADOW_PREFIX);
+    const requestedLocalWorkspaceId = this.normalizeDashLocalWorkspaceId(requestedWorkspaceId);
+    const matchedLocalWorkspace = localWorkspaces.find(
+      (workspace) => workspace.id === requestedLocalWorkspaceId,
+    );
+    const fallbackLocalWorkspaceId = localWorkspaces[0]?.id || DEFAULT_DASH_WORKSPACE_ID;
+    const workspaceId =
+      matchedLocalWorkspace?.id ||
+      (hasWorkspaceOverride || requestedIsCloudWorkspace
+        ? requestedWorkspaceId
+        : fallbackLocalWorkspaceId);
+    const currentWorkspaceId =
+      matchedLocalWorkspace?.id ||
+      (hasWorkspaceOverride || requestedIsCloudWorkspace
+        ? requestedWorkspaceId
+        : fallbackLocalWorkspaceId);
+    const currentWorkspaceLensId = `${WORKSPACE_CURRENT_LENS_PREFIX}${currentWorkspaceId}`;
+    const cachedCurrentLensId = String(cache?.currentLensId || "");
+    const currentLensId =
+      matchedLocalWorkspace || !requestedIsCloudWorkspace
+        ? cachedCurrentLensId.endsWith(`:${currentWorkspaceId}`)
+          ? cachedCurrentLensId
+          : currentWorkspaceLensId
+        : cachedCurrentLensId;
+    const localWorkspaceTrees = localWorkspaces.map((workspace) =>
+      this.buildDashLocalWorkspaceTree(workspace, currentWorkspaceId),
+    );
+    const knownLocalProjects = this.listDashKnownLocalProjects(workspaceId);
     const currentInstanceSummary = this.buildCurrentDashInstanceSummary(workspaceId);
     const dashCache: DashHostSummaryCache = {
       version: 1,
       updatedAt: cache?.updatedAt || 0,
-      currentWorkspaceId: cache?.currentWorkspaceId || workspaceId,
-      currentLensId: cache?.currentLensId || "",
+      currentWorkspaceId,
+      currentLensId,
       currentWindow: cache?.currentWindow || null,
       windows: cache?.windows || [],
-      workspaces: cache?.workspaces || [],
+      workspaces: localWorkspaceTrees,
+      localWorkspaces,
       cloudWorkspaces: cache?.cloudWorkspaces || [],
       knownLocalProjects,
       peerDependencies: cache?.peerDependencies || {},
@@ -2751,6 +3044,10 @@ class BunnyEarsRuntime {
         ...currentInstanceSummary,
       },
     };
+    this.saveDashHostCache({
+      ...dashCache,
+      updatedAt: Date.now(),
+    });
 
     return {
       windowId: targetWindowId,
@@ -3865,15 +4162,6 @@ class BunnyEarsRuntime {
   ) {
     const bridgePayload =
       payload && typeof payload === "object" ? (payload as any) : {};
-    console.log("[dash-local-bridge] handling local Dash payload", {
-      windowId,
-      type: String(bridgePayload.type || ""),
-      id:
-        typeof bridgePayload.id === "number"
-          ? bridgePayload.id
-          : String(bridgePayload.id || ""),
-      method: String(bridgePayload.method || ""),
-    });
 
     if (bridgePayload.type === "request") {
       const requestId = bridgePayload.id;
@@ -3940,18 +4228,52 @@ class BunnyEarsRuntime {
           handled: true,
           result: await this.buildDashBunnyCloudOverview(),
         };
-      case "getDashHostBootState":
+      case "getDashHostBootState": {
+        const bootStateParams = params as {
+          windowId?: string;
+          workspaceId?: string;
+        } | null;
         console.log("[bunny-ears] getDashHostBootState request", {
           sourceWindowId: sourceWindowId || "",
-          workspaceId: String((params as { workspaceId?: string } | null)?.workspaceId || ""),
+          windowId: String(bootStateParams?.windowId || ""),
+          workspaceId: String(bootStateParams?.workspaceId || ""),
         });
         return {
           handled: true,
           result: this.buildDashHostBootState(
-            sourceWindowId,
-            String((params as { workspaceId?: string } | null)?.workspaceId || ""),
+            String(bootStateParams?.windowId || sourceWindowId || ""),
+            String(bootStateParams?.workspaceId || ""),
           ),
         };
+      }
+      case "listLocalWorkspaces":
+        return {
+          handled: true,
+          result: {
+            ok: true,
+            workspaces: this.ensureDashLocalWorkspaces(),
+          },
+        };
+      case "createLocalWorkspace": {
+        const request = (params || {}) as {
+          workspaceId?: string;
+          name?: string;
+          subtitle?: string;
+        };
+        const workspace = this.createDashLocalWorkspace({
+          workspaceId: request.workspaceId,
+          name: request.name,
+          subtitle: request.subtitle,
+        });
+        return {
+          handled: true,
+          result: {
+            ok: true,
+            workspace,
+            bootState: this.buildDashHostBootState(sourceWindowId, workspace.id),
+          },
+        };
+      }
       case "loginBunnyCloud": {
         try {
           const request = (params || {}) as {
@@ -4557,11 +4879,6 @@ class BunnyEarsRuntime {
         ? this.dashWindows.has(options.windowId)
         : this.dashWindows.size > 0)
     ) {
-      console.log("[dash-local-bridge] short-circuiting carrot view event to local Dash", {
-        sourceCarrotId,
-        name,
-        windowId: options?.windowId || "",
-      });
       this.deliverCarrotViewEventFrom(
         sourceCarrotId,
         targetCarrotId,
