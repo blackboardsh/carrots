@@ -2,9 +2,9 @@ import type { ElectrobunConfig } from "electrobun";
 
 export default {
 	app: {
-		name: "Bunny Ears",
-		identifier: "ai.electrobunny.ears",
-		version: "0.0.1",
+		name: "Dash",
+		identifier: "ai.electrobunny.dash",
+		version: "0.0.2",
 	},
 	runtime: {
 		exitOnLastWindowClosed: false,
