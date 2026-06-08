@@ -105,8 +105,12 @@ export class CloudApi {
           body: JSON.stringify({ refreshToken: auth.refreshToken }),
         });
         if (!resp.ok) return false;
-        const data = (await resp.json()) as { accessToken: string; refreshToken: string };
-        this.onTokenRefresh(data);
+        const data = (await resp.json()) as { accessToken: string; refreshToken?: string };
+        if (!data.accessToken) return false;
+        this.onTokenRefresh({
+          accessToken: data.accessToken,
+          refreshToken: data.refreshToken || auth.refreshToken,
+        });
         return true;
       } catch {
         return false;
