@@ -3215,11 +3215,7 @@ class BunnyEarsRuntime {
   // Mark this instance as offline on the API. Best-effort, fire-and-forget.
   // Used on logout so the instance immediately appears offline in Farm.
   private async markInstanceOfflineOnServer(instanceId: string, accessToken: string) {
-    const apiBase = this.channel === "dev"
-      ? "http://localhost:8787"
-      : this.channel === "canary"
-        ? "http://localhost:8787"
-        : "https://api.electrobunny.ai";
+    const apiBase = this.getDashCloudApiBaseUrl();
 
     try {
       const resp = await fetch(`${apiBase}/v1/instances/${instanceId}`, {
@@ -3243,11 +3239,7 @@ class BunnyEarsRuntime {
   // Revoke the device token on the server. Best-effort — the local token is
   // already cleared by the time this returns.
   private async revokeDeviceTokenOnServer(tokenId: string, accessToken: string) {
-    const apiBase = this.channel === "dev"
-      ? "http://localhost:8787"
-      : this.channel === "canary"
-        ? "http://localhost:8787"
-        : "https://api.electrobunny.ai";
+    const apiBase = this.getDashCloudApiBaseUrl();
 
     try {
       const resp = await fetch(`${apiBase}/v1/auth/device-tokens/${tokenId}`, {
@@ -3552,11 +3544,7 @@ class BunnyEarsRuntime {
     const machineId = this.getMachineId();
     if (!machineId) return null;
 
-    const apiBase = this.channel === "dev"
-      ? "http://localhost:8787"
-      : this.channel === "canary"
-        ? "http://localhost:8787"
-        : "https://api.electrobunny.ai";
+    const apiBase = this.getDashCloudApiBaseUrl();
 
     try {
       const resp = await fetch(`${apiBase}/v1/auth/device-access-token`, {
