@@ -5125,6 +5125,14 @@ class BunnyEarsRuntime {
           rmSync(stateDir, { recursive: true, force: true });
         } catch {}
       }
+      try {
+        const { rmSync } = await import("node:fs");
+        rmSync(this.getDashHostCachePath(), { force: true });
+        rmSync(this.getDashLocalWorkspacesPath(), { force: true });
+        rmSync(this.getDashHomeDir(), { recursive: true, force: true });
+      } catch (error) {
+        console.error("[bunny-ears] Failed to clear Dash local state:", error);
+      }
       console.log("[bunny-ears] Emergency reset complete. Restarting...");
       process.exit(0);
       return;
