@@ -2974,6 +2974,54 @@ class BunnyEarsRuntime {
     };
   }
 
+  private async buildDashMachineConnectionStatus() {
+    const os = require("node:os");
+    const machineId = this.getMachineId() || "";
+    const hopReadyState = this.hopWs?.readyState ?? -1;
+    const hopStatus =
+      isHopDisabled()
+        ? "disabled"
+        : !machineId || !this.deviceToken
+          ? "not-linked"
+          : hopReadyState === 1
+            ? "connected"
+            : "connecting";
+
+    let workspaces: unknown[] = [];
+    if (machineId && this.deviceToken) {
+      try {
+        const response = await fetch(`${this.getDashCloudApiBaseUrl()}/v1/auth/device-workspaces`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            machine_id: machineId,
+            device_token: this.deviceToken,
+          }),
+        });
+        if (response.ok) {
+          const data = await response.json() as { workspaces?: unknown[] };
+          workspaces = Array.isArray(data.workspaces) ? data.workspaces : [];
+        } else {
+          console.log(`[bunny-ears] device-workspaces failed: ${response.status}`);
+        }
+      } catch (error) {
+        console.log(`[bunny-ears] device-workspaces error: ${error}`);
+      }
+    }
+
+    return {
+      ok: true,
+      machineId,
+      name: os.hostname() || "This Machine",
+      hopStatus,
+      hopReadyState,
+      hasDeviceToken: Boolean(this.deviceToken),
+      apiBaseUrl: this.getDashCloudApiBaseUrl(),
+      hopBaseUrl: this.getHopWsBaseUrl(),
+      workspaces,
+    };
+  }
+
   private buildDashHostBootState(sourceWindowId?: string, workspaceIdOverride?: string) {
     const cache = this.loadDashHostCache();
     const localWorkspaces = this.ensureDashLocalWorkspaces();
@@ -4234,6 +4282,11 @@ class BunnyEarsRuntime {
           ),
         };
       }
+      case "getMachineConnectionStatus":
+        return {
+          handled: true,
+          result: await this.buildDashMachineConnectionStatus(),
+        };
       case "listLocalWorkspaces":
         return {
           handled: true,
